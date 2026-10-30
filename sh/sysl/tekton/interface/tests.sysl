@@ -2,6 +2,7 @@ module sh.sysl.tekton.interface
 @tests
 
 import sh.sysl.quaternion.Quaternion
+import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
 import sh.sysl.tekton.document.{Primitive, Transform}
 import sh.sysl.tekton.handles.{Grip, Layout, layout}
 import sh.sysl.tekton.picking.pick
@@ -763,3 +764,346 @@ a_shape_placed_out_of_view_brings_the_view_to_it()
     val (x, _) = w.camera.project(last, 900.0, 600.0).unwrap()
 
     assert(x > 0.0 && x < 900.0, "the newest is in the viewport")
+
+// ## Several selected, groups, and undo: through the pointer, the keys and the panel
+
+private const CMD: u16 = KMOD_GUI
+private const CMD_SHIFT: u16 = KMOD_GUI | KMOD_SHIFT
+private const KEY_Z: u32 = 122
+private const KEY_G: u32 = 103
+
+private val WINDOW: Rect = Rect(0, 0, 1280, 800)
+
+private shift_click(w: &Workspace, c: *Recorder, x: int, y: int)
+    c.chord.keys = Modifiers(true, false, false, false)
+    click_at(w, c, x, y)
+    c.chord.keys = no_modifiers()
+end shift_click
+
+// Tap a named control of the whole window, where a person would.
+private tap(w: &Workspace, c: *Recorder, name: string)
+    val v = w.tree()
+
+    c.taps.reset()
+    render(v, c, WINDOW)
+
+    val (x, y) = snapshot(v, c, WINDOW).click_point(name).unwrap()
+
+    c.point(x, y, true)
+    render(w.tree(), c, WINDOW)
+    c.release(x, y)
+    render(w.tree(), c, WINDOW)
+end tap
+
+// Whether the window shows a control of this name now.
+private shows(w: &Workspace, c: *Recorder, name: string) -> bool
+    val v = w.tree()
+
+    render(v, c, WINDOW)
+    snapshot(v, c, WINDOW).find(name).is_ok()
+end shows
+
+private two_apart() -> (&Workspace, int, int)
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+
+    w.doc.set_transform(b, Transform(Vec3(60.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    (w, a, b)
+end two_apart
+
+@test
+shift_click_adds_to_the_selection_and_takes_away_from_it()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+    val (ax, ay) = centre_of(w, a)
+    val (bx, by) = centre_of(w, b)
+
+    click_at(w, &c, ax, ay)
+    assert(w.doc.selected == Some(a), "one")
+
+    shift_click(w, &c, bx, by)
+    assert(w.doc.is_selected(a) && w.doc.is_selected(b), "both")
+    assert(w.doc.selected.is_none(), "so no one of them is the selection")
+
+    shift_click(w, &c, ax, ay)
+    assert(w.doc.selected == Some(b), "and shift-clicking the first takes it away")
+
+    shift_click(w, &c, 3, 3)
+    assert(w.doc.selected == Some(b), "a shift-click on nothing loses nothing")
+
+    click_at(w, &c, ax, ay)
+    assert(w.doc.selected == Some(a), "a plain click is back to one")
+end shift_click_adds_to_the_selection_and_takes_away_from_it
+
+@test
+several_selected_show_no_handles_and_no_numbers()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    assert(layout(w.doc, w.camera, 900.0, 600.0).strokes.len() > 0, "one has handles")
+
+    w.doc.toggle_selected(b)
+    assert_eq(layout(w.doc, w.camera, 900.0, 600.0).strokes.len(), 0usize, "several do not")
+    paint_field(field_of(w, POSITION, 0), &c)
+    assert_eq(field_of(w, POSITION, 0).text.read(), "", "nor numbers")
+end several_selected_show_no_handles_and_no_numbers
+
+@test
+a_drag_on_one_of_several_moves_them_all_by_as_much_in_one_step()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+    val (ax, ay) = centre_of(w, a)
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+
+    val a_at = transform_of(w, a).translation
+    val b_at = transform_of(w, b).translation
+    val steps = w.doc.undos.len()
+    val before = w.doc.describe()
+
+    drag_from(w, &c, ax, ay, ax + 80, ay + 10)
+
+    val by = transform_of(w, a).translation - a_at
+
+    assert(by.length() > 1.0, "the one under the pointer moved")
+    assert((transform_of(w, b).translation - b_at - by).length() < 1.0e-9, "the other by as much")
+    assert(w.doc.is_selected(a) && w.doc.is_selected(b), "both still selected")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+    w.undo()
+    assert_eq(w.doc.describe(), before, "and one undo takes both back")
+end a_drag_on_one_of_several_moves_them_all_by_as_much_in_one_step
+
+@test
+a_drag_of_many_frames_is_one_step_and_a_handle_drag_too()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+    val before = w.doc.describe()
+    val steps = w.doc.undos.len()
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+
+    for i in 1..30
+        c.point(x + i * 5, y, true)
+        paint_frame(w, &c)
+
+    c.release(x + 150, y)
+    paint_frame(w, &c)
+    assert_eq(w.doc.undos.len(), steps + 1, "thirty frames, one step")
+    w.undo()
+    assert_eq(w.doc.describe(), before, "and undone in one")
+
+    val (hx, hy) = spot_of(w, Grip.Raise)
+    val raised = w.doc.undos.len()
+
+    drag_from(w, &c, hx, hy, hx, hy - 60)
+    assert_eq(w.doc.undos.len(), raised + 1, "a handle, one step")
+end a_drag_of_many_frames_is_one_step_and_a_handle_drag_too
+
+@test
+a_drag_that_goes_nowhere_or_a_click_is_no_step()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+    val steps = w.doc.undos.len()
+
+    click_at(w, &c, x, y)
+    assert_eq(w.doc.undos.len(), steps, "a click")
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.point(x + 40, y, true)
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.release(x, y)
+    paint_frame(w, &c)
+    assert_eq(w.doc.undos.len(), steps, "and out and back")
+end a_drag_that_goes_nowhere_or_a_click_is_no_step
+
+@test
+a_typed_value_is_one_step()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val steps = w.doc.undos.len()
+
+    type_into(field_of(w, POSITION, 0), &c, "35", Key.Enter)
+    assert(transform_of(w, a).translation.x == 35.0, "it took")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+    type_into(field_of(w, POSITION, 0), &c, "not a number", Key.Enter)
+    assert_eq(w.doc.undos.len(), steps + 1, "and one that was refused is none")
+end a_typed_value_is_one_step
+
+@test
+the_shortcuts_group_ungroup_undo_and_redo()
+    val (w, a, b) = two_apart()
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+
+    val before = w.doc.describe()
+
+    assert(w.shortcut(KEY_G, CMD, false), "taken")
+    assert_eq(w.doc.items().len, 1, "grouped")
+
+    val grouped = w.doc.describe()
+
+    assert(w.shortcut(KEY_G, CMD_SHIFT, false), "taken")
+    assert_eq(w.doc.items().len, 2, "ungrouped")
+
+    assert(w.shortcut(KEY_Z, CMD, false), "taken")
+    assert_eq(w.doc.describe(), grouped, "undone")
+    assert(w.shortcut(KEY_Z, CMD, true), "held down, it goes on")
+    assert_eq(w.doc.describe(), before, "undone again")
+    assert(w.shortcut(KEY_Z, CMD_SHIFT, false), "taken")
+    assert_eq(w.doc.describe(), grouped, "redone")
+
+    assert(!w.shortcut(KEY_Z, 0u16, false), "without the command key it is a letter")
+    assert(!w.shortcut(KEY_Z, KMOD_SHIFT, false), "and with only shift")
+    assert(!w.shortcut(u32(97), CMD, false), "and another letter is not ours")
+    assert_eq(w.doc.describe(), grouped, "and those changed nothing")
+
+    w.shortcut(KEY_G, CMD_SHIFT, true)
+    assert_eq(w.doc.describe(), grouped, "a held key does not go on ungrouping")
+end the_shortcuts_group_ungroup_undo_and_redo
+
+@test
+a_shortcut_waits_while_a_field_is_being_typed_in_or_a_shape_dragged()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+
+    c.take_focus(FIRST_FIELD_ID)
+    paint_frame(w, &c)
+    assert(!w.shortcut(KEY_Z, CMD, false), "the field keeps it")
+    assert_eq(w.doc.items().len, 1, "still there")
+    c.take_focus(NOBODY)
+    paint_frame(w, &c)
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.point(x + 40, y, true)
+    paint_frame(w, &c)
+
+    val during = transform_of(w, a)
+
+    w.undo()
+    w.delete()
+    assert_eq(w.doc.items().len, 1, "not in the middle of a drag")
+    assert(transform_of(w, a) == during, "which goes on")
+    c.release(x + 40, y)
+    paint_frame(w, &c)
+end a_shortcut_waits_while_a_field_is_being_typed_in_or_a_shape_dragged
+
+@test
+the_delete_key_deletes_the_selection_and_not_while_typing()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    c.key(press(Key.Delete))
+    paint_frame(w, &c)
+    assert_eq(w.doc.items().len, 1, "gone")
+    assert(w.doc.selection.len() == 0, "and nothing is selected")
+
+    w.undo()
+    assert_eq(w.doc.items().len, 2, "back")
+    assert(w.doc.selected == Some(a), "and selected")
+
+    c.key(press(Key.Backspace))
+    paint_frame(w, &c)
+    assert_eq(w.doc.items().len, 1, "the key a Mac calls delete")
+    w.undo()
+
+    c.take_focus(FIRST_FIELD_ID)
+    c.key(press(Key.Backspace))
+    paint_frame(w, &c)
+    assert_eq(w.doc.items().len, 2, "a field's backspace is the field's")
+    c.take_focus(NOBODY)
+
+    val steps = w.doc.undos.len()
+
+    w.doc.select(None)
+    c.key(press(Key.Delete))
+    paint_frame(w, &c)
+    assert_eq(w.doc.undos.len(), steps, "with nothing selected it is nothing")
+    assert_eq(w.problem.read(), "", "and no complaint")
+    assert(b != a, "two shapes all along")
+end the_delete_key_deletes_the_selection_and_not_while_typing
+
+@test
+the_panel_offers_what_the_selection_can_do_and_each_button_does_it()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+
+    w.doc.select(None)
+    assert(!shows(w, &c, "panel.solid"), "nothing selected: no solid or hole")
+    assert(!shows(w, &c, "panel.delete"), "nor delete")
+
+    w.doc.select(Some(a))
+    assert(shows(w, &c, "panel.hole"), "one: solid or hole")
+    assert(!shows(w, &c, "panel.group"), "not group")
+    assert(!shows(w, &c, "panel.ungroup"), "nor ungroup")
+
+    tap(w, &c, "panel.hole")
+    assert(w.doc.find(a).unwrap().hole, "the hole button")
+    tap(w, &c, "panel.solid")
+    assert(!w.doc.find(a).unwrap().hole, "the solid button")
+
+    tap(w, &c, "undo")
+    assert(w.doc.find(a).unwrap().hole, "the undo button")
+    tap(w, &c, "redo")
+    assert(!w.doc.find(a).unwrap().hole, "the redo button")
+
+    w.doc.toggle_selected(b)
+    assert(shows(w, &c, "panel.group"), "two: group")
+
+    tap(w, &c, "panel.group")
+    assert_eq(w.doc.items().len, 1, "the group button")
+    assert(shows(w, &c, "panel.ungroup"), "a group: ungroup")
+
+    tap(w, &c, "panel.ungroup")
+    assert_eq(w.doc.items().len, 2, "the ungroup button")
+
+    tap(w, &c, "panel.delete")
+    assert_eq(w.doc.items().len, 0, "the delete button")
+end the_panel_offers_what_the_selection_can_do_and_each_button_does_it
+
+@test
+a_refused_group_says_why_in_the_panel_and_the_next_command_clears_it()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+    tap(w, &c, "panel.hole")
+    tap(w, &c, "panel.group")
+    assert(w.problem.read().contains("solid"), "says what is missing")
+    assert_eq(w.doc.items().len, 2, "and they stand as they were")
+
+    tap(w, &c, "panel.solid")
+    assert_eq(w.problem.read(), "", "cleared")
+end a_refused_group_says_why_in_the_panel_and_the_next_command_clears_it
+
+@test
+a_panel_message_with_nothing_selected_is_still_shown()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.group()
+    assert(w.problem.read() != "", "says why")
+    render(w.tree(), &c, WINDOW)
+end a_panel_message_with_nothing_selected_is_still_shown

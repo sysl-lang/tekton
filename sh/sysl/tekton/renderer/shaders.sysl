@@ -55,7 +55,7 @@ val SHADERS: string = raw"""
         float rim = pow(1.0 - max(dot(n, to_eye), 0.0), 3.0);
         float3 lit = u.color.rgb * (0.40 + 0.20 * sky + 0.46 * key + 0.24 * fill) + float3(0.07) * rim;
 
-        return float4(min(lit, float3(1.0)), 1.0);
+        return float4(min(lit, float3(1.0)), u.color.a);
     }
 
     // The mesh pushed out along its smoothed normals, as measured on the screen, so the width is the

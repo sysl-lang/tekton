@@ -4,15 +4,19 @@ import sh.sysl.manifold.{Manifold, circle, cube, cylinder, sphere, batch, empty,
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.space.{Aabb, Mat4, Vec3, vec3}
 import sysl.buf.{Buf, buf}
+import sysl.container.{Set, set}
 import sysl.math.{max, min}
 
 // A document is a tree of operations, not a mesh.
 //
 // A node says what to do: make this primitive, or combine these children. Its solid and its mesh are
-// **derived** by the kernel and cached on the node, so an edit clears the cache only along the path from
-// the edited node to the root, and every other node keeps what it has. This same tree is what a script
-// will produce. Nothing here knows about an interface or a GPU, so a command can be run and checked with
-// neither.
+// **derived** by the kernel and cached with the node. This same tree is what a script will produce. Nothing
+// here knows about an interface or a GPU, so a command can be run and checked with neither.
+//
+// **A node is never edited, only replaced.** A command builds new nodes along the path from the edited node
+// to the root and shares every other one, so an old root is still a whole document, and undo is keeping old
+// roots. What the kernel derived stays with the nodes that hold it, so going back to an old root asks the
+// kernel for nothing. The only fields written after a node is made are its caches.
 //
 // **A mesh is in its node's own space, before the transform**, and a renderer and a ray test take the
 // transform as a matrix. So moving, turning or resizing a shape asks the kernel for nothing: its triangles
@@ -23,6 +27,14 @@ import sysl.math.{max, min}
 const MIN_SIZE: real = 1.0
 const MAX_SIZE: real = 4000.0
 const POSITION_LIMIT: real = 2000.0
+
+// How far back undo reaches: this many steps, and fewer once the meshes that only old steps hold pass this
+// many bytes. The oldest step goes first, and one step always stays.
+const HISTORY_STEPS: usize = 200
+const HISTORY_MESH_BYTES: usize = 256 * 1024 * 1024
+
+// How far from square two axes may be, as a cosine, and still be taken for square.
+const SQUARE_TOLERANCE: real = 1.0e-9
 
 // The shapes a palette offers.
 enum Primitive
@@ -43,13 +55,13 @@ primitive_name(p: Primitive) -> string =
         Cone -> "Cone"
         Torus -> "Torus"
 
-// What a node computes. A group's solid is its children's, joined.
+// What a node computes. A group's solid is its solid children joined, with its hole children cut out.
 enum Operation
     Shape(primitive: Primitive)
     Group
 
 // Where a node's solid goes in its parent's space: scaled, then rotated, then moved.
-struct Transform
+struct Transform derives Eq
     translation: Vec3
     rotation: Quaternion[real]
     scale: Vec3
@@ -106,6 +118,32 @@ identity_transform() -> Transform =
 
 moved_to(p: Vec3) -> Transform = Transform(p, Quaternion.identity(), Vec3(1.0, 1.0, 1.0))
 
+// `inner` as one transform after `outer`, if one transform can say it.
+//
+// **A stretch applied to something already turned shears it**, unless the turn happens to leave the stretched
+// axes square, and a `Transform` has no shear in it. So the answer is a `Transform` exactly where the three
+// axes of the combined map come out square, and nothing where they do not.
+composed(outer: Transform, inner: Transform) -> Option[Transform]
+    val at = outer.apply(inner.translation)
+    val s = outer.scale
+
+    if s.x == s.y && s.y == s.z
+        return Some(Transform(at, outer.rotation * inner.rotation, inner.scale.times(s)))
+
+    val a = inner.turned(Vec3(inner.scale.x, 0.0, 0.0)).times(s)
+    val b = inner.turned(Vec3(0.0, inner.scale.y, 0.0)).times(s)
+    val c = inner.turned(Vec3(0.0, 0.0, inner.scale.z)).times(s)
+
+    if !is_square(a, b) || !is_square(b, c) || !is_square(a, c) then return None
+
+    val (x, y, z) = (a.unit(), b.unit(), c.unit())
+    val turn = Quaternion.from_matrix([[x.x, y.x, z.x], [x.y, y.y, z.y], [x.z, y.z, z.z]])
+
+    Some(Transform(at, (outer.rotation * turn).normalize(), Vec3(a.length(), b.length(), c.length())))
+end composed
+
+private is_square(a: Vec3, b: Vec3) -> bool = a.dot(b).abs() <= SQUARE_TOLERANCE * a.length() * b.length()
+
 // The triangles of a node's own solid, as a renderer and a ray test want them, before its transform.
 //
 // `vertices` holds six floats a vertex: the position, then the normal averaged over the faces meeting
@@ -161,45 +199,87 @@ end Mesh
 
 const FLOATS_PER_VERTEX: usize = 6
 
+// What the kernel derives from a node's own operation and children, before any transform.
+//
+// **Held behind one reference, because every copy of a node with the same children has the same answer.** A
+// copy made by a move shares this with the node it came from, so whichever of them is drawn first fills it in
+// for both, and undoing the move finds it filled.
+struct Derived
+    local: Option[&Manifold]
+    mesh: Option[&Mesh]
+
 // One operation in the tree, with what the kernel last derived from it.
 struct Node
     id: int
     operation: Operation
     transform: Transform
     tint: int
-    children: Buf[&Node]
 
-    // The solid in the node's own space, then in its parent's; the triangles of the first, and where they
-    // land.
-    local: Option[&Manifold]
+    // Whether a parent cuts this out of its solids instead of joining it to them.
+    hole: bool
+    children: Buf[&Node]
+    derived: &Derived
+
+    // The solid in its parent's space, and the box of the triangles where they land.
     solid: Option[&Manifold]
-    mesh: Option[&Mesh]
     bounds: Option[Aabb]
 
-    private clear_placed(&self)
-        self.solid = None
-        self.bounds = None
+    local = self.derived.local
 
-    private clear_cache(&self)
-        self.clear_placed()
-        self.local = None
-        self.mesh = None
+    mesh = self.derived.mesh
 
-    // Clear the cache along the path from this node down to `id`, and say whether `id` was below here. A
-    // new transform leaves the node's own solid and triangles as they are, and changes what its parents
-    // are made of.
-    private invalidate_path(&self, id: int) -> bool
-        if self.id == id
-            self.clear_placed()
-            return true
+    is_group -> bool =
+        self.operation match
+            Group -> true
+            _ -> false
 
-        for child in self.children.view()
-            if child.invalidate_path(id)
-                self.clear_cache()
-                return true
+    // This node somewhere else: the same triangles.
+    private with_transform(&self, t: Transform) -> &Node =
+        Node(self.id, self.operation, t, self.tint, self.hole, self.children, self.derived, None, None)
 
-        false
-    end invalidate_path
+    // This node as solid or as hole: the same triangles in the same place.
+    private with_hole(&self, hole: bool) -> &Node =
+        Node(self.id, self.operation, self.transform, self.tint, hole, self.children, self.derived, self.solid,
+             self.bounds)
+
+    // This node made of other children, so nothing derived from the old ones holds.
+    private with_children(&self, children: Buf[&Node]) -> &Node =
+        Node(self.id, self.operation, self.transform, self.tint, self.hole, children, Derived(None, None), None, None)
+
+    // This tree with the node of `with`'s id replaced by `with`, sharing everything off the path to it; or
+    // nothing, if that id is not here.
+    private replacing(&self, with: &Node) -> Option[&Node]
+        if self.id == with.id then return Some(with)
+
+        for i in 0..<self.children.len()
+            self.children[i].replacing(with) match
+                Some(changed) ->
+                    var children: Buf[&Node] = buf()
+
+                    for other in self.children.view() do children.push(other)
+
+                    children[i] = changed
+
+                    return Some(self.with_children(children))
+                None -> ()
+
+        None
+    end replacing
+
+    // What makes this node what it is, with every number exact, and none of what is derived from it.
+    private model(&self) -> string
+        val t = self.transform
+        val q = t.rotation
+        val name = self.operation match
+            Shape(p) -> primitive_name(p)
+            Group -> "Group"
+        var parts = ""
+
+        for child in self.children.view() do parts = s"${parts}${child.model()}"
+
+        s"${self.id} ${name} ${self.tint} ${self.hole} ${t.translation.x} ${t.translation.y} ${t.translation.z} " +
+        s"${q.w} ${q.x} ${q.y} ${q.z} ${t.scale.x} ${t.scale.y} ${t.scale.z} (${parts})"
+    end model
 
     private find(&self, id: int) -> Option[&Node]
         if self.id == id then return Some(self)
@@ -219,10 +299,17 @@ const PLACEMENT_GAP: real = 10.0
 // How far along x a row of shapes runs before the next one starts a new row.
 const ROW_LENGTH: real = 120.0
 
-// A model, and which of its shapes is selected.
+// Everything an undo puts back. The selection's `Buf` is replaced rather than changed, so a step can hold it.
+struct DocumentState
+    root: &Node
+    selection: Buf[int]
+    last_placed: Option[int]
+    next_id: int
+
+// A model, what of it is selected, and how it came to be.
 struct Document
     root: &Node
-    selected: Option[int]
+    selection: Buf[int]
     last_placed: Option[int]
     next_id: int
 
@@ -231,14 +318,124 @@ struct Document
     builds: int
     next_revision: int
 
-    private add_node(&self, operation: Operation, transform: Transform) -> &Node
-        val node = Node(self.next_id, operation, transform, self.next_id - 1, buf(), None, None, None, None)
+    undos: Buf[DocumentState]
+    redos: Buf[DocumentState]
 
-        self.next_id += 1
-        self.root.children.push(node)
-        self.root.clear_cache()
-        node
-    end add_node
+    // While a step is open, the state it began from, once something has changed.
+    in_step: bool
+    step_start: Option[DocumentState]
+    mesh_budget: usize
+
+    // The one selected node, if exactly one is. What a panel's numbers and a shape's handles work on.
+    selected -> Option[int] = if self.selection.len() == 1 then Some(self.selection[0]) else None
+
+    is_selected(&self, id: int) -> bool
+        for s in self.selection.view()
+            if s == id then return true
+
+        false
+    end is_selected
+
+    private state(&self) -> DocumentState = DocumentState(self.root, self.selection, self.last_placed, self.next_id)
+
+    private restore(&self, s: DocumentState)
+        self.root = s.root
+        self.selection = s.selection
+        self.last_placed = s.last_placed
+        self.next_id = s.next_id
+    end restore
+
+    // Every command calls this before it changes anything.
+    private record(&self)
+        if !self.in_step
+            self.push_step(self.state())
+        elif self.step_start.is_none()
+            self.step_start = Some(self.state())
+    end record
+
+    private push_step(&self, s: DocumentState)
+        self.undos.push(s)
+        self.redos = buf()
+
+        while self.undos.len() > HISTORY_STEPS do self.undos.remove(0)
+
+        while self.undos.len() > 1 && self.held_mesh_bytes() > self.mesh_budget do self.undos.remove(0)
+    end push_step
+
+    // The bytes of every distinct mesh the document and its history hold.
+    held_mesh_bytes(&self) -> usize
+        val seen = set[int]()
+        var total = 0usize
+
+        for s in self.undos.view() do total += mesh_bytes(s.root, seen)
+        for s in self.redos.view() do total += mesh_bytes(s.root, seen)
+
+        total + mesh_bytes(self.root, seen)
+    end held_mesh_bytes
+
+    // Make what happens until `end_step` one undo step, however many commands it takes. A drag is one.
+    begin_step(&self)
+        self.in_step = true
+        self.step_start = None
+    end begin_step
+
+    // A step that ended up where it began leaves nothing to undo.
+    end_step(&self)
+        self.in_step = false
+
+        self.step_start match
+            Some(before) ->
+                self.step_start = None
+
+                if model_text(before.root) != model_text(self.root) then self.push_step(before)
+            None -> ()
+    end end_step
+
+    can_undo = self.undos.len() > 0
+
+    can_redo = self.redos.len() > 0
+
+    // Back one step, selection and all. Says whether there was one.
+    undo(&self) -> bool
+        self.end_step()
+
+        self.undos.pop() match
+            Some(before) ->
+                self.redos.push(self.state())
+                self.restore(before)
+                true
+            None -> false
+    end undo
+
+    // Forward one step that was undone, unless a new edit has happened since.
+    redo(&self) -> bool
+        self.end_step()
+
+        self.redos.pop() match
+            Some(after) ->
+                self.undos.push(self.state())
+                self.restore(after)
+                true
+            None -> false
+    end redo
+
+    // The document as text, every number exact: what is in it and what is selected, and none of what is
+    // derived. Two equal texts are the same document.
+    describe(&self) -> string
+        var selected = ""
+
+        for s in self.selection.view() do selected = s"${selected} ${s}"
+
+        s"${model_text(self.root)} selected:${selected} last:${self.last_placed} next:${self.next_id}"
+    end describe
+
+    private put_node(&self, node: &Node)
+        self.root.replacing(node) match
+            Some(root) -> self.root = root
+            None -> ()
+    end put_node
+
+    private put_items(&self, items: Buf[&Node]) = self.root = self.root.with_children(items)
 
     // The things that stand on the ground as one: what a click picks and what a renderer draws. A group
     // is one of them, however many parts it remembers.
@@ -249,25 +446,207 @@ struct Document
     // The command behind the palette: a new shape on the ground, clear of what is already there, selected.
     add_shape(&self, p: Primitive) -> int
         val at = self.next_place(bounds_of_solid(primitive_solid(p)))
-        val node = self.add_node(Operation.Shape(p), moved_to(at))
+        val id = self.next_id
+        var items: Buf[&Node] = buf()
 
-        self.last_placed = Some(node.id)
-        self.selected = Some(node.id)
-        node.id
+        self.record()
+
+        for item in self.items() do items.push(item)
+
+        items.push(Node(id, Operation.Shape(p), moved_to(at), id - 1, false, buf(), Derived(None, None), None, None))
+        self.put_items(items)
+        self.next_id += 1
+        self.last_placed = Some(id)
+        self.select(Some(id))
+        id
     end add_shape
 
     // The command that changes where a node is, and every other edit of a transform comes through it. Only
     // the path to the root is computed again, and only when something asks. A transform nothing could draw
-    // is refused, so the document never holds one.
+    // is refused, so the document never holds one, and one that changes nothing is not a step.
     set_transform(&self, id: int, t: Transform)
         if !t.is_usable() then return
 
         self.find(id) match
             Some(node) ->
-                node.transform = t
-                self.root.invalidate_path(id)
+                if node.transform == t then return
+
+                self.record()
+                self.put_node(node.with_transform(t))
             None -> ()
     end set_transform
+
+    // The command behind the solid and hole buttons, on everything selected.
+    set_hole(&self, hole: bool) -> Result[unit, string]
+        if self.selection.len() == 0 then return Err("Nothing is selected")
+
+        var recorded = false
+
+        for id in self.selection.view()
+            self.find(id) match
+                Some(node) ->
+                    if node.hole != hole
+                        if !recorded
+                            self.record()
+                            recorded = true
+
+                        self.put_node(node.with_hole(hole))
+                None -> ()
+
+        Ok(())
+    end set_hole
+
+    // Whether a part of the tree is a hole, wherever it stands in it. A test of what the kernel makes of it,
+    // since the interface only reaches what stands on the ground.
+    set_part_hole(&self, id: int, hole: bool)
+        self.find(id) match
+            Some(node) ->
+                if node.hole != hole
+                    self.record()
+                    self.put_node(node.with_hole(hole))
+            None -> ()
+    end set_part_hole
+
+    // The command behind the delete key: everything selected goes.
+    delete_selected(&self) -> Result[unit, string]
+        if self.selection.len() == 0 then return Err("Nothing is selected")
+
+        self.record()
+
+        var items: Buf[&Node] = buf()
+
+        for item in self.items()
+            if !self.is_selected(item.id) then items.push(item)
+
+        self.put_items(items)
+
+        self.last_placed match
+            Some(id) -> if self.is_selected(id) then self.last_placed = None
+            None -> ()
+
+        self.select(None)
+        Ok(())
+    end delete_selected
+
+    // The command behind the group button: what is selected becomes one thing, standing where it stood, its
+    // holes cut from its solids. The group's origin is the middle of its solids' base, so its numbers mean
+    // what a shape's mean. Refused, leaving the document as it was, where there would be nothing to hold.
+    group_selected(&self) -> Result[int, string]
+        if self.selection.len() < 2 then return Err("Select two or more to group")
+
+        var extent: Option[Aabb] = None
+
+        for item in self.items()
+            if self.is_selected(item.id) && !item.hole
+                val b = self.bounds_of(item)
+
+                extent = extent match
+                    Some(e) -> Some(Aabb(Vec3(min(e.min.x, b.min.x), min(e.min.y, b.min.y), min(e.min.z, b.min.z)),
+                                         Vec3(max(e.max.x, b.max.x), max(e.max.y, b.max.y), max(e.max.z, b.max.z))))
+                    None -> Some(b)
+
+        val solids = extent.ok_or("A group needs a solid part:\nthese are all holes")?
+        val middle = solids.center()
+        val origin = Vec3(middle.x, middle.y, solids.min.z)
+        var parts: Buf[&Node] = buf()
+        var tint: Option[int] = None
+
+        for item in self.items()
+            if self.is_selected(item.id)
+                val t = item.transform
+
+                parts.push(item.with_transform(Transform(t.translation - origin, t.rotation, t.scale)))
+
+                if tint.is_none() && !item.hole then tint = Some(item.tint)
+
+        val group = Node(self.next_id, Operation.Group, moved_to(origin), tint.unwrap(), false, parts,
+                         Derived(None, None), None, None)
+        val joined = self.local_of(group)
+
+        joined.status() match
+            NoError -> ()
+            _ -> return Err("The kernel could not join these")
+
+        if joined.is_empty() then return Err("The holes would cut away\nall of the solid")
+
+        self.record()
+
+        var items: Buf[&Node] = buf()
+        var placed = false
+
+        for item in self.items()
+            if !self.is_selected(item.id)
+                items.push(item)
+            elif !placed
+                items.push(group)
+                placed = true
+
+        self.put_items(items)
+        self.next_id += 1
+        self.last_placed = Some(group.id)
+        self.select(Some(group.id))
+        Ok(group.id)
+    end group_selected
+
+    // The command behind the ungroup button: each selected group gives way to its parts, each where it stood
+    // and each as it was, and those parts are selected.
+    //
+    // **A part a stretched group sheared cannot stand alone**, because a `Transform` has no shear, so it stays
+    // inside a group of its own that keeps the stretch. It is where it was, and it is still a part that can be
+    // moved and resized as one thing; a group that is only that has nothing further to give up.
+    ungroup_selected(&self) -> Result[unit, string]
+        var any_group = false
+        var any_change = false
+
+        for item in self.items()
+            if self.is_selected(item.id) && item.is_group
+                any_group = true
+
+                if item.children.len() > 1 || composed(item.transform, item.children[0].transform).is_some()
+                    any_change = true
+
+        if !any_group then return Err("Only a group can be ungrouped")
+        if !any_change then return Err("This part was stretched at an\nangle: it stays as one piece")
+
+        self.record()
+
+        var items: Buf[&Node] = buf()
+        var chosen: Buf[int] = buf()
+
+        for item in self.items()
+            if !self.is_selected(item.id)
+                items.push(item)
+            elif !item.is_group
+                items.push(item)
+                chosen.push(item.id)
+            else
+                for part in item.children.view()
+                    val freed = composed(item.transform, part.transform) match
+                        Some(t) -> part.with_transform(t)
+                        None if item.children.len() == 1 -> item
+                        None -> self.wrapped_part(item, part)
+
+                    items.push(freed)
+                    chosen.push(freed.id)
+
+        self.put_items(items)
+        self.selection = chosen
+        self.last_placed = if chosen.len() > 0 then Some(chosen[chosen.len() - 1]) else None
+        Ok(())
+    end ungroup_selected
+
+    // A part that keeps its group's stretch by staying in a group of its own, solid or hole as it was.
+    private wrapped_part(&self, group: &Node, part: &Node) -> &Node
+        var inside: Buf[&Node] = buf()
+
+        inside.push(part.with_hole(false))
+
+        val id = self.next_id
+
+        self.next_id += 1
+
+        Node(id, Operation.Group, group.transform, part.tint, part.hole, inside, Derived(None, None), None, None)
+    end wrapped_part
 
     // The command behind a typed position.
     move_to(&self, id: int, p: Vec3) -> Result[unit, string]
@@ -314,7 +693,28 @@ struct Document
     // A node's sides along its own axes, in millimetres.
     size_of(&self, node: &Node) -> Vec3 = self.local_bounds(node).size().times(node.transform.scale)
 
-    select(&self, id: Option[int]) = self.selected = id
+    // Select this node alone, or nothing. Selecting is not a step of its own; each step remembers it.
+    select(&self, id: Option[int])
+        var chosen: Buf[int] = buf()
+
+        id match
+            Some(i) -> chosen.push(i)
+            None -> ()
+
+        self.selection = chosen
+    end select
+
+    // The shift-click: this node joins the selection, or leaves it if it was already in.
+    toggle_selected(&self, id: int)
+        var chosen: Buf[int] = buf()
+
+        for s in self.selection.view()
+            if s != id then chosen.push(s)
+
+        if !self.is_selected(id) then chosen.push(id)
+
+        self.selection = chosen
+    end toggle_selected
 
     // Where a shape with these bounds goes: to the right of the last one placed, starting a new row when
     // the row is long enough, and on past anything already standing there.
@@ -359,13 +759,20 @@ struct Document
         val s = node.operation match
             Shape(p) -> primitive_solid(p)
             Group ->
-                var parts: Buf[&Manifold] = buf()
+                var solids: Buf[&Manifold] = buf()
+                var holes: Buf[&Manifold] = buf()
 
-                for child in node.children.view() do parts.push(self.solid_of(child))
+                for child in node.children.view()
+                    if child.hole then holes.push(self.solid_of(child)) else solids.push(self.solid_of(child))
 
-                if parts.len() == 0 then empty() else batch(parts.view(), Op.Add)
+                if solids.len() == 0
+                    empty()
+                elif holes.len() == 0
+                    batch(solids.view(), Op.Add)
+                else
+                    batch(solids.view(), Op.Add).difference(batch(holes.view(), Op.Add))
 
-        node.local = Some(s)
+        node.derived.local = Some(s)
         s
     end local_of
 
@@ -399,7 +806,7 @@ struct Document
         val m = mesh_from(local, self.next_revision)
 
         self.next_revision += 1
-        node.mesh = Some(m)
+        node.derived.mesh = Some(m)
         m
     end mesh_of
 
@@ -421,7 +828,25 @@ struct Document
 end Document
 
 new_document() -> &Document =
-    Document(Node(0, Operation.Group, identity_transform(), 0, buf(), None, None, None, None), None, None, 1, 0, 1)
+    Document(Node(0, Operation.Group, identity_transform(), 0, false, buf(), Derived(None, None), None, None), buf(),
+             None, 1, 0, 1, buf(), buf(), false, None, HISTORY_MESH_BYTES)
+
+// What makes a tree what it is, as text.
+private model_text(node: &Node) -> string = node.model()
+
+// The bytes of the meshes under a node that are not yet in `seen`.
+private mesh_bytes(node: &Node, seen: Set[int]) -> usize
+    var total = 0usize
+
+    node.mesh match
+        Some(m) ->
+            if seen.add(m.revision) then total += m.vertices.len() * sizeof(f32) + m.indices.len() * sizeof(u32)
+        None -> ()
+
+    for child in node.children.view() do total += mesh_bytes(child, seen)
+
+    total
+end mesh_bytes
 
 // The scale that gives a node with this box these sides. A box with no extent along an axis has no scale
 // to find there, and keeps one.
@@ -457,6 +882,8 @@ const TORUS_RING: real = 7.0
 const TORUS_TUBE: real = 3.0
 
 private bounds_of_solid(m: &Manifold) -> Aabb
+    if m.is_empty() then return Aabb(Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0))
+
     val b = m.bounding_box()
 
     Aabb(from_kernel(b.min()), from_kernel(b.max()))

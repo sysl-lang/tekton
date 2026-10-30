@@ -41,6 +41,14 @@ val SHAPE_COLORS: [][3]f32 = [
     [0.80, 0.53, 0.40],
 ]
 
+// A hole, which is the same grey whatever its tint, and how much of it shows over what it stands before and
+// through what it stands inside.
+const HOLE_R: f32 = 0.42
+const HOLE_G: f32 = 0.47
+const HOLE_B: f32 = 0.55
+const HOLE_ALPHA: f32 = 0.45
+const HOLE_BURIED_ALPHA: f32 = 0.18
+
 const SELECTED_R: f32 = 0.04
 const SELECTED_G: f32 = 0.48
 const SELECTED_B: f32 = 1.0
@@ -74,6 +82,8 @@ struct Pipelines
     ground: &GpuPipeline
     shadow: &GpuPipeline
     surface: &GpuPipeline
+    hole: &GpuPipeline
+    hole_buried: &GpuPipeline
     outline: &GpuPipeline
     stroke: &GpuPipeline
 
@@ -121,32 +131,45 @@ struct Renderer
         pass.bind_pipeline(p.shadow)
 
         for m in self.meshes.view()
-            place(&u, doc, m.id)
-            push(cmd, &u)
-            draw_mesh(pass, m)
+            if !is_hole(doc, m.id)
+                place(&u, doc, m.id)
+                push(cmd, &u)
+                draw_mesh(pass, m)
 
         pass.bind_pipeline(p.surface)
 
         for m in self.meshes.view()
-            val base = shape_color(doc, m.id)
-            val lift: f32 = if doc.selected == Some(m.id) then 0.14 else 0.0
+            if !is_hole(doc, m.id)
+                val base = shape_color(doc, m.id)
+                val lift: f32 = if doc.is_selected(m.id) then 0.14 else 0.0
 
-            u.color = [base[0] + (1.0 - base[0]) * lift, base[1] + (1.0 - base[1]) * lift,
-                       base[2] + (1.0 - base[2]) * lift, 1.0]
-            place(&u, doc, m.id)
-            push(cmd, &u)
-            draw_mesh(pass, m)
+                u.color = [base[0] + (1.0 - base[0]) * lift, base[1] + (1.0 - base[1]) * lift,
+                           base[2] + (1.0 - base[2]) * lift, 1.0]
+                place(&u, doc, m.id)
+                push(cmd, &u)
+                draw_mesh(pass, m)
 
-        doc.selected match
-            Some(id) ->
-                for m in self.meshes.view()
-                    if m.id == id
-                        u.color = [SELECTED_R, SELECTED_G, SELECTED_B, 1.0]
-                        place(&u, doc, m.id)
-                        push(cmd, &u)
-                        pass.bind_pipeline(p.outline)
-                        draw_mesh(pass, m)
-            None -> ()
+        // **A hole is drawn twice over the solids, which is what shows where it is.** Faintly with no depth
+        // test, so the part buried in a solid can be seen through it, then more strongly where nothing stands
+        // in front, writing depth so an outline stays an outline and does not show through its whole back.
+        for (pipeline, alpha) in [(p.hole_buried, HOLE_BURIED_ALPHA), (p.hole, HOLE_ALPHA)]
+            pass.bind_pipeline(pipeline)
+
+            for m in self.meshes.view()
+                if is_hole(doc, m.id)
+                    u.color = [HOLE_R, HOLE_G, HOLE_B, alpha]
+                    place(&u, doc, m.id)
+                    push(cmd, &u)
+                    draw_mesh(pass, m)
+
+        pass.bind_pipeline(p.outline)
+
+        for m in self.meshes.view()
+            if doc.is_selected(m.id)
+                u.color = [SELECTED_R, SELECTED_G, SELECTED_B, 1.0]
+                place(&u, doc, m.id)
+                push(cmd, &u)
+                draw_mesh(pass, m)
 
         if strokes.len > 0
             pass.bind_pipeline(p.stroke)
@@ -163,7 +186,7 @@ struct Renderer
     end draw
 
     // Bring the GPU's copies up to the document: a new revision goes up, an unchanged one stays, and one
-    // whose node has gone is let go.
+    // whose node has gone is let go. A mesh with nothing in it has nothing to send or draw.
     private upload(&self, device: &GpuDevice, cmd: GpuCommandBuffer, doc: &Document)
         var kept: Buf[&GpuMesh] = buf()
         var copy: Option[GpuCopyPass] = None
@@ -178,16 +201,17 @@ struct Renderer
             have match
                 Some(m) -> kept.push(m)
                 None ->
-                    val pass = copy match
-                        Some(open) -> open
-                        None ->
-                            val opened = cmd.copy_pass().expect("a copy pass")
+                    if mesh.indices.len() > 0
+                        val pass = copy match
+                            Some(open) -> open
+                            None ->
+                                val opened = cmd.copy_pass().expect("a copy pass")
 
-                            copy = Some(opened)
-                            opened
+                                copy = Some(opened)
+                                opened
 
-                    kept.push(upload_mesh(device, pass, item.id, mesh))
-                    self.uploads += 1
+                        kept.push(upload_mesh(device, pass, item.id, mesh))
+                        self.uploads += 1
 
         copy match
             Some(open) -> open.finish()
@@ -206,6 +230,11 @@ private place(u: *Uniforms, doc: &Document, id: int)
             u.model = node.transform.matrix().floats()
             u.normals = node.transform.normal_matrix().floats()
         None -> ()
+
+private is_hole(doc: &Document, id: int) -> bool =
+    doc.find(id) match
+        Some(node) -> node.hole
+        None -> false
 
 // The colour a node is drawn in.
 private shape_color(doc: &Document, id: int) -> [3]f32 =
@@ -264,6 +293,11 @@ private make_pipelines(dev: &GpuDevice, color_format: i32, depth_format: i32) ->
                               cull = GPU_CULLMODE_BACK, blend = true).expect("the shadow's pipeline"),
         surface = dev.pipeline(shape, shaded, buffers, attributes, color_format, depth_format = depth_format,
                                cull = GPU_CULLMODE_BACK).expect("the surface's pipeline"),
+        hole = dev.pipeline(shape, shaded, buffers, attributes, color_format, depth_format = depth_format,
+                            cull = GPU_CULLMODE_BACK, blend = true).expect("the hole's pipeline"),
+        hole_buried = dev.pipeline(shape, shaded, buffers, attributes, color_format, depth_format = depth_format,
+                                   cull = GPU_CULLMODE_BACK, depth_test = false, depth_write = false,
+                                   blend = true).expect("the buried hole's pipeline"),
         outline = dev.pipeline(outline, flat, buffers, attributes, color_format, depth_format = depth_format,
                                cull = GPU_CULLMODE_FRONT).expect("the outline's pipeline"),
         stroke = dev.pipeline(mark, ink, [], [], color_format, depth_format = depth_format, depth_test = false,

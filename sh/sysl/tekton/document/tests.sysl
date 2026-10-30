@@ -3,7 +3,8 @@ module sh.sysl.tekton.document
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.space.{Aabb, Vec3}
-import sysl.math.pi
+import sysl.buf.{Buf, buf}
+import sysl.math.{max, min, pi}
 
 private near(a: real, b: real, tolerance: real) -> bool = (a - b).abs() <= tolerance
 
@@ -175,9 +176,13 @@ a_new_transform_keeps_the_mesh_and_moves_its_bounds()
 
     doc.bounds_of(node)
     doc.set_transform(a, moved_to(Vec3(100.0, 0.0, 0.0)))
-    assert_eq(doc.mesh_of(node).revision, first, "the same triangles")
-    assert(near(doc.mesh_of(node).bounds.center().x, 0.0, 1.0e-4), "in the node's own space")
-    assert(near(doc.bounds_of(node).center().x, 100.0, 1.0e-4), "and the box is where the edit put it")
+
+    val moved = doc.find(a).unwrap()
+
+    assert_eq(doc.mesh_of(moved).revision, first, "the same triangles")
+    assert(near(doc.mesh_of(moved).bounds.center().x, 0.0, 1.0e-4), "in the node's own space")
+    assert(near(doc.bounds_of(moved).center().x, 100.0, 1.0e-4), "and the box is where the edit put it")
+    assert(near(doc.bounds_of(node).center().x, 0.0, 1.0e-4), "and the node it came from has not moved")
 
 @test
 a_nodes_own_mesh_is_kept_by_every_transform_and_its_parents_are_not()
@@ -189,8 +194,11 @@ a_nodes_own_mesh_is_kept_by_every_transform_and_its_parents_are_not()
     doc.mesh_of(doc.root)
     doc.mesh_of(node)
     doc.set_transform(a, Transform(Vec3(1.0, 2.0, 3.0), Quaternion.from_axis_angle([0.0, 0.0, 1.0], 1.0), Vec3(2.0, 2.0, 2.0)))
-    assert(node.mesh.is_some() && node.local.is_some(), "its own triangles and solid stay")
-    assert(node.solid.is_none(), "its solid in its parent's space does not")
+
+    val moved = doc.find(a).unwrap()
+
+    assert(moved.mesh.is_some() && moved.local.is_some(), "its own triangles and solid stay")
+    assert(moved.solid.is_none(), "its solid in its parent's space does not")
     assert(doc.root.mesh.is_none() && doc.root.local.is_none(), "and nor does what its parent joined")
 
 // **The kernel is the oracle for the matrix.** What a renderer draws and a click tests comes from `Transform`;
@@ -275,13 +283,13 @@ a_size_past_either_limit_is_refused_and_one_inside_them_is_exact()
     val meshed = doc.builds
 
     assert(doc.resize_to(a, Vec3(30.0, 10.0, 45.0)).is_ok(), "in range")
-    assert((doc.size_of(node) - Vec3(30.0, 10.0, 45.0)).length() < 1.0e-3, "those sides")
+    assert((doc.size_of(doc.find(a).unwrap()) - Vec3(30.0, 10.0, 45.0)).length() < 1.0e-3, "those sides")
     assert_eq(doc.builds, meshed, "without the kernel")
     assert(before <= meshed, "the mesh having been made once")
 
     for bad in [Vec3(0.0, 10.0, 10.0), Vec3(MIN_SIZE - 0.01, 10.0, 10.0), Vec3(10.0, -5.0, 10.0), Vec3(10.0, 10.0, MAX_SIZE + 1.0), Vec3(10.0, real.nan(), 10.0)]
         assert(doc.resize_to(a, bad).is_err(), "refused")
-        assert((doc.size_of(node) - Vec3(30.0, 10.0, 45.0)).length() < 1.0e-3, "and kept")
+        assert((doc.size_of(doc.find(a).unwrap()) - Vec3(30.0, 10.0, 45.0)).length() < 1.0e-3, "and kept")
 
     assert(doc.resize_to(a, Vec3(MIN_SIZE, MIN_SIZE, MAX_SIZE)).is_ok(), "the limits themselves are allowed")
 
@@ -324,6 +332,635 @@ a_transform_rotates_and_scales_what_the_kernel_makes()
 
     assert(near(doc.solid_of(node).volume(), 16000.0, 1.0e-2), "scaling doubled the volume")
     assert(near(doc.bounds_of(node).size().z, 40.0, 1.0e-3), "and the long y axis was turned to z")
+
+private box_volume(sx: real, sy: real, sz: real) -> real = sx * sy * sz
+
+// The prism a palette's cylinder really is, at height 20 and radius 10.
+private cylinder_prism_volume() -> real = polygon_area(10.0, 64) * 20.0
+
+// A document holding a box and a cylinder cutting through its middle, top to bottom. Selected: both.
+private box_and_hole() -> (&Document, int, int)
+    val doc = new_document()
+    val box = doc.add_shape(Primitive.Box)
+    val hole = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_transform(hole, Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(0.5, 0.5, 2.0)))
+    doc.select(Some(hole))
+    doc.set_hole(true).unwrap()
+    doc.select(Some(box))
+    doc.toggle_selected(hole)
+    (doc, box, hole)
+end box_and_hole
+
+@test
+a_group_cuts_its_holes_out_of_its_solids()
+    val (doc, _, _) = box_and_hole()
+    val id = doc.group_selected().unwrap()
+    val group = doc.find(id).unwrap()
+    val want = box_volume(20.0, 20.0, 20.0) - polygon_area(5.0, 64) * 20.0
+
+    assert(near(doc.mesh_of(group).volume(), want, 1.0e-3), "box minus cylinder, from the triangles")
+    assert_eq(doc.items().len, 1, "one thing stands on the ground")
+    assert(doc.selected == Some(id), "the group is selected")
+    assert_eq(group.children.len(), 2, "and it remembers both")
+end a_group_cuts_its_holes_out_of_its_solids
+
+@test
+a_group_joins_overlapping_solids_counting_the_overlap_once()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(b, moved_to(Vec3(10.0, 0.0, 0.0)))
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val id = doc.group_selected().unwrap()
+
+    assert(near(doc.mesh_of(doc.find(id).unwrap()).volume(), 30.0 * 20.0 * 20.0, 1.0e-3), "30 by 20 by 20")
+end a_group_joins_overlapping_solids_counting_the_overlap_once
+
+@test
+a_group_stands_where_its_parts_stood_with_its_origin_at_the_middle_of_their_base()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(a, moved_to(Vec3(100.0, 50.0, 5.0)))
+    doc.set_transform(b, moved_to(Vec3(140.0, 50.0, 5.0)))
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val group = doc.find(doc.group_selected().unwrap()).unwrap()
+    val box = doc.bounds_of(group)
+
+    assert(group.transform.translation == Vec3(120.0, 50.0, 5.0), "the middle of the base")
+    assert(near(box.min.x, 90.0, 1.0e-4) && near(box.max.x, 150.0, 1.0e-4), "and x stays where it was")
+    assert(near(box.min.z, 5.0, 1.0e-4) && near(box.max.z, 25.0, 1.0e-4), "and z")
+end a_group_stands_where_its_parts_stood_with_its_origin_at_the_middle_of_their_base
+
+@test
+groups_nest_and_a_hole_group_cuts_as_one()
+    val (doc, _, _) = box_and_hole()
+    val inner = doc.group_selected().unwrap()
+    val outer_box = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(outer_box, Transform(Vec3(0.0, 0.0, 20.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    doc.select(Some(inner))
+    doc.toggle_selected(outer_box)
+
+    val outer = doc.group_selected().unwrap()
+    val with_hole = box_volume(20.0, 20.0, 20.0) - polygon_area(5.0, 64) * 20.0
+
+    assert(near(doc.mesh_of(doc.find(outer).unwrap()).volume(), with_hole + box_volume(20.0, 20.0, 20.0), 1.0e-2),
+           "the cut box stacked under a whole one")
+
+    // A third level: a smaller box cut out of the top of what that joined.
+    val cutter = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(cutter, Transform(Vec3(0.0, 0.0, 30.0), Quaternion.identity(), Vec3(0.5, 0.5, 1.0)))
+    doc.select(Some(cutter))
+    doc.set_hole(true).unwrap()
+    doc.select(Some(outer))
+    doc.toggle_selected(cutter)
+
+    val top = doc.group_selected().unwrap()
+
+    assert(near(doc.mesh_of(doc.find(top).unwrap()).volume(),
+                with_hole + box_volume(20.0, 20.0, 20.0) - box_volume(10.0, 10.0, 10.0), 1.0e-2),
+           "the third level cut what the second joined")
+end groups_nest_and_a_hole_group_cuts_as_one
+
+// A group may itself be a hole: what it cuts is what it holds, its own hole left standing.
+@test
+a_group_made_a_hole_cuts_as_one_thing()
+    val (doc, _, _) = box_and_hole()
+    val cutter = doc.group_selected().unwrap()
+
+    doc.set_hole(true).unwrap()
+
+    val big = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(big, Transform(Vec3(0.0, 0.0, -10.0), Quaternion.identity(), Vec3(2.0, 2.0, 2.0)))
+    doc.select(Some(big))
+    doc.toggle_selected(cutter)
+
+    val id = doc.group_selected().unwrap()
+    val box = box_volume(20.0, 20.0, 20.0)
+    val cutter_volume = box - polygon_area(5.0, 64) * 20.0
+
+    assert(near(doc.mesh_of(doc.find(id).unwrap()).volume(), box_volume(40.0, 40.0, 40.0) - cutter_volume, 1.0e-2),
+           "the big box loses the cut box, and keeps a post where its hole was")
+end a_group_made_a_hole_cuts_as_one_thing
+
+@test
+a_hole_moved_after_grouping_recomputes_the_path_and_cuts_somewhere_else()
+    val (doc, _, hole) = box_and_hole()
+    val id = doc.group_selected().unwrap()
+
+    doc.mesh_of(doc.find(id).unwrap())
+
+    val inside = doc.find(hole).unwrap().transform
+
+    doc.set_transform(hole,Transform(inside.translation + Vec3(200.0, 0.0, 0.0), inside.rotation, inside.scale))
+    assert(near(doc.mesh_of(doc.find(id).unwrap()).volume(), box_volume(20.0, 20.0, 20.0), 1.0e-3),
+           "clear of the box, it cuts nothing")
+
+    doc.set_transform(hole, inside)
+    assert(near(doc.mesh_of(doc.find(id).unwrap()).volume(), box_volume(20.0, 20.0, 20.0) - polygon_area(5.0, 64) * 20.0, 1.0e-3),
+           "back, it cuts again")
+end a_hole_moved_after_grouping_recomputes_the_path_and_cuts_somewhere_else
+
+@test
+a_group_of_only_holes_is_refused_and_says_so()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Sphere)
+
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+    doc.set_hole(true).unwrap()
+
+    val before = doc.describe()
+
+    doc.group_selected() match
+        Err(why) -> assert(why.contains("solid"), "says what is missing")
+        Ok(_) -> assert(false, "nothing to hold")
+
+    assert_eq(doc.describe(), before, "and nothing changed")
+end a_group_of_only_holes_is_refused_and_says_so
+
+@test
+a_hole_larger_than_its_solid_is_refused_and_says_so()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Sphere)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(b, Transform(Vec3(0.0, 0.0, -50.0), Quaternion.identity(), Vec3(10.0, 10.0, 10.0)))
+    doc.select(Some(b))
+    doc.set_hole(true).unwrap()
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val before = doc.describe()
+    val steps = doc.undos.len()
+
+    doc.group_selected() match
+        Err(why) -> assert(why.contains("cut away"), "says the holes took it all")
+        Ok(_) -> assert(false, "there would be nothing left")
+
+    assert_eq(doc.describe(), before, "nothing changed")
+    assert_eq(doc.undos.len(), steps, "and it is no step")
+end a_hole_larger_than_its_solid_is_refused_and_says_so
+
+@test
+a_group_that_an_edit_empties_still_answers_without_a_crash()
+    val (doc, _, hole) = box_and_hole()
+    val id = doc.group_selected().unwrap()
+
+    doc.set_transform(hole, Transform(Vec3(0.0, 0.0, -50.0), Quaternion.identity(), Vec3(10.0, 10.0, 10.0)))
+
+    val group = doc.find(id).unwrap()
+
+    assert_eq(doc.mesh_of(group).triangle_count(), 0usize, "nothing left of it")
+    assert(doc.bounds_of(group).size().is_finite(), "and a box that is a number")
+    assert(doc.size_of(group).is_finite(), "and a size")
+    assert(doc.undo(), "and the edit can be undone")
+    assert(doc.mesh_of(doc.find(id).unwrap()).triangle_count() > 0, "bringing it back")
+end a_group_that_an_edit_empties_still_answers_without_a_crash
+
+@test
+one_thing_selected_or_nothing_cannot_be_grouped()
+    val doc = new_document()
+
+    assert(doc.group_selected().is_err(), "nothing")
+    doc.add_shape(Primitive.Box)
+    assert(doc.group_selected().is_err(), "one")
+    assert(doc.ungroup_selected().is_err(), "and a shape is no group")
+    assert_eq(doc.undos.len(), 1usize, "and only the add is a step")
+end one_thing_selected_or_nothing_cannot_be_grouped
+
+// The box each thing on the ground fills, in the order they stand.
+private worlds(doc: &Document) -> Buf[Aabb]
+    var out: Buf[Aabb] = buf()
+
+    for item in doc.items() do out.push(doc.bounds_of(item))
+
+    out
+end worlds
+
+private near_boxes(a: Aabb, b: Aabb, tolerance: real) -> bool =
+    (a.min - b.min).length() <= tolerance && (a.max - b.max).length() <= tolerance
+
+@test
+ungrouping_gives_back_the_parts_exactly_as_they_were()
+    val (doc, box, hole) = box_and_hole()
+    val before_box = doc.find(box).unwrap().transform
+    val before_hole = doc.find(hole).unwrap()
+
+    doc.group_selected().unwrap()
+    doc.ungroup_selected().unwrap()
+
+    assert_eq(doc.items().len, 2, "both parts are back")
+    assert(doc.find(box).unwrap().transform == before_box, "the box's transform, to the bit")
+    assert(doc.find(hole).unwrap().transform == before_hole.transform, "and the hole's")
+    assert(doc.find(hole).unwrap().hole, "and the hole is a hole")
+    assert(doc.is_selected(box) && doc.is_selected(hole), "and both are selected")
+end ungrouping_gives_back_the_parts_exactly_as_they_were
+
+// A group turned and resized every way, ungrouped: each part lands in the world where the group had it.
+@test
+ungrouping_a_transformed_group_keeps_the_parts_world_positions()
+    val turn = Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.6)
+
+    for (name, group_turn, group_scale, part_turn) in [
+        ("moved", Quaternion.identity(), Vec3(1.0, 1.0, 1.0), Quaternion.identity()),
+        ("turned, uniformly grown, part turned", turn, Vec3(2.0, 2.0, 2.0), turn),
+        ("stretched, part square", Quaternion.identity(), Vec3(3.0, 1.0, 0.5), Quaternion.identity()),
+        ("turned and stretched, part square", turn, Vec3(3.0, 1.0, 0.5), Quaternion.identity()),
+        ("stretched, part a quarter turn", Quaternion.identity(), Vec3(3.0, 1.0, 0.5),
+         Quaternion.from_axis_angle([0.0, 0.0, 1.0], real.pi() / 2.0)),
+    ]
+        val doc = new_document()
+        val a = doc.add_shape(Primitive.Box)
+        val b = doc.add_shape(Primitive.Cone)
+
+        doc.set_transform(b, Transform(Vec3(30.0, 5.0, 2.0), part_turn, Vec3(1.0, 1.5, 2.0)))
+        doc.select(Some(a))
+        doc.toggle_selected(b)
+
+        val id = doc.group_selected().unwrap()
+        val g = doc.find(id).unwrap()
+
+        doc.set_transform(id, Transform(Vec3(7.0, -3.0, 4.0), group_turn, group_scale))
+
+        val placed = doc.find(id).unwrap()
+        val a_before = composed(placed.transform, doc.find(a).unwrap().transform).unwrap()
+        val a_box = doc.mesh_of(doc.find(a).unwrap()).bounds_after(a_before)
+        val whole = doc.bounds_of(placed)
+        val whole_volume = doc.mesh_of(placed).volume() * group_scale.x * group_scale.y * group_scale.z
+
+        doc.ungroup_selected().unwrap()
+
+        val parts = worlds(doc)
+
+        assert_eq(parts.len(), 2usize, name)
+        assert(near_boxes(parts[0], a_box, 1.0e-3), s"${name}: the part keeps its place")
+        assert(near(min(parts[0].min.x, parts[1].min.x), whole.min.x, 1.0e-3), s"${name}: and together they fill x")
+        assert(near(max(parts[0].max.z, parts[1].max.z), whole.max.z, 1.0e-3), s"${name}: and z")
+
+        val v_a = doc.mesh_of(doc.items()[0]).volume() * product(doc.items()[0].transform.scale)
+        val v_b = doc.mesh_of(doc.items()[1]).volume() * product(doc.items()[1].transform.scale)
+
+        assert(near(v_a + v_b, whole_volume, 1.0e-2), s"${name}: and the volume is the same")
+        assert(g.id == id, "the group was the one asked for")
+end ungrouping_a_transformed_group_keeps_the_parts_world_positions
+
+private product(s: Vec3) -> real = s.x * s.y * s.z
+
+// A stretch across a turned part is a shear, which a transform cannot say: the part keeps its stretch in a
+// group of its own, and stands exactly where it stood.
+@test
+a_part_a_stretched_group_shears_stays_in_a_group_of_its_own_where_it_stood()
+    val turn = Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.6)
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(b, Transform(Vec3(30.0, 0.0, 0.0), turn, Vec3(1.0, 1.0, 1.0)))
+    doc.select(Some(b))
+    doc.set_hole(true).unwrap()
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val id = doc.group_selected().unwrap()
+
+    doc.set_transform(id, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(3.0, 1.0, 1.0)))
+
+    val stretched = doc.find(id).unwrap()
+    val want = doc.bounds_of(stretched)
+
+    doc.ungroup_selected().unwrap()
+
+    assert_eq(doc.items().len, 2, "two things")
+    assert(!doc.items()[0].is_group, "the square part is free")
+
+    val kept = doc.items()[1]
+
+    assert(kept.is_group && kept.hole,"the sheared one stays in a group, and a hole as it was")
+    assert(!kept.children[0].hole, "with a solid inside, so the group has a solid to be")
+    assert(doc.mesh_of(kept).triangle_count() > 0, "and it has triangles")
+    assert(near(doc.bounds_of(doc.items()[0]).min.x, want.min.x, 1.0e-3), "and the free part kept its place")
+
+    // That group has nothing further to give up, and says so.
+    doc.select(Some(kept.id))
+    assert(doc.ungroup_selected().is_err(), "ungrouping it again is refused")
+end a_part_a_stretched_group_shears_stays_in_a_group_of_its_own_where_it_stood
+
+// Every command there is, each on a document it can act on.
+private commands() -> [](string, &Fn(&Document) -> unit)
+    var out: Buf[(string, &Fn(&Document) -> unit)] = buf()
+
+    out.push(("add", d -> d.add_shape(Primitive.Torus)))
+    out.push(("set_transform", d -> d.set_transform(1, moved_to(Vec3(-50.0, 3.0, 1.0)))))
+    out.push(("move_to", d -> d.move_to(1, Vec3(-40.0, 0.0, 2.0)).unwrap()))
+    out.push(("rotate_to", d -> d.rotate_to(1, Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.5)).unwrap()))
+    out.push(("resize_to", d -> d.resize_to(1, Vec3(5.0, 6.0, 7.0)).unwrap()))
+    out.push(("set_hole", d -> d.set_hole(true).unwrap()))
+    out.push(("set_part_hole", d -> d.set_part_hole(1, true)))
+    out.push(("delete", d -> d.delete_selected().unwrap()))
+    out.push(("group", d -> d.group_selected().unwrap()))
+    out.push(("ungroup", d -> d.ungroup_selected().unwrap()))
+    out.view()
+end commands
+
+private two_selected() -> &Document
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Sphere)
+
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+    doc
+end two_selected
+
+@test
+every_command_does_then_undoes_then_redoes_the_whole_document()
+    for (name, command) in commands()
+        val doc = two_selected()
+
+        if name == "ungroup" then doc.group_selected().unwrap()
+
+        val before = doc.describe()
+        val steps = doc.undos.len()
+
+        command(doc)
+
+        val after = doc.describe()
+
+        assert(after != before, s"${name} changes the document")
+        assert_eq(doc.undos.len(), steps + 1, s"${name} is one step")
+
+        for round in 0..<3
+            assert(doc.undo(), name)
+            assert_eq(doc.describe(), before, s"${name} undone, round ${round}")
+            assert(doc.redo(), name)
+            assert_eq(doc.describe(), after, s"${name} redone, round ${round}")
+    end for
+end every_command_does_then_undoes_then_redoes_the_whole_document
+
+@test
+ungroup_undoes_to_the_group_and_redoes_to_the_parts()
+    val doc = two_selected()
+
+    doc.group_selected().unwrap()
+
+    val grouped = doc.describe()
+
+    doc.ungroup_selected().unwrap()
+
+    val parts = doc.describe()
+
+    assert(doc.undo(), "back")
+    assert_eq(doc.describe(), grouped, "to the group")
+    assert(doc.redo(), "forward")
+    assert_eq(doc.describe(), parts, "to the parts")
+end ungroup_undoes_to_the_group_and_redoes_to_the_parts
+
+@test
+undo_with_nothing_to_undo_and_redo_with_nothing_to_redo_change_nothing()
+    val doc = new_document()
+    val before = doc.describe()
+
+    assert(!doc.undo(), "no undo")
+    assert(!doc.redo(), "no redo")
+    assert_eq(doc.describe(), before, "and nothing moved")
+end undo_with_nothing_to_undo_and_redo_with_nothing_to_redo_change_nothing
+
+@test
+a_new_edit_clears_what_could_be_redone()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc.add_shape(Primitive.Box)
+    doc.undo()
+    assert(doc.can_redo, "the second add can come back")
+
+    doc.add_shape(Primitive.Sphere)
+    assert(!doc.can_redo, "until something new is done")
+    assert(!doc.redo(), "and then it cannot")
+end a_new_edit_clears_what_could_be_redone
+
+@test
+a_shape_added_after_an_undo_takes_the_id_and_colour_it_would_have_had()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+
+    val second = doc.add_shape(Primitive.Box)
+
+    doc.undo()
+    assert_eq(doc.add_shape(Primitive.Sphere), second, "the same id")
+end a_shape_added_after_an_undo_takes_the_id_and_colour_it_would_have_had
+
+@test
+undo_puts_the_selection_back_with_the_document()
+    val doc = two_selected()
+    val before = doc.selection.len()
+
+    doc.delete_selected().unwrap()
+    assert_eq(doc.selection.len(), 0usize, "deleting empties it")
+    doc.undo()
+    assert_eq(doc.selection.len(), before, "undoing restores it")
+
+    doc.select(None)
+    assert(doc.can_undo, "selecting is no step of its own")
+
+    val steps = doc.undos.len()
+
+    doc.select(Some(1))
+    assert_eq(doc.undos.len(), steps, "selecting adds none")
+end undo_puts_the_selection_back_with_the_document
+
+@test
+a_step_of_many_moves_is_one_undo_and_one_that_returns_is_none()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val start = doc.describe()
+    val steps = doc.undos.len()
+
+    doc.begin_step()
+
+    for i in 1..60 do doc.set_transform(a, moved_to(Vec3(real(i), 0.0, 0.0)))
+
+    doc.end_step()
+    assert_eq(doc.undos.len(), steps + 1, "sixty frames, one step")
+    doc.undo()
+    assert_eq(doc.describe(), start, "and one undo goes back through them all")
+
+    doc.begin_step()
+    doc.set_transform(a, moved_to(Vec3(5.0, 0.0, 0.0)))
+    doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    doc.end_step()
+    assert_eq(doc.undos.len(), steps, "a drag that comes back is no step")
+
+    doc.begin_step()
+    doc.end_step()
+    assert_eq(doc.undos.len(), steps, "and nor is one that never moved")
+end a_step_of_many_moves_is_one_undo_and_one_that_returns_is_none
+
+@test
+a_transform_that_changes_nothing_is_not_a_step()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val steps = doc.undos.len()
+
+    doc.set_transform(a, doc.find(a).unwrap().transform)
+    assert_eq(doc.undos.len(), steps, "no step")
+end a_transform_that_changes_nothing_is_not_a_step
+
+// What the design relies on: undo keeps old roots, and old roots keep what the kernel derived.
+@test
+undoing_and_redoing_a_group_asks_the_kernel_for_nothing()
+    val (doc, _, _) = box_and_hole()
+
+    for item in doc.items() do doc.bounds_of(item)
+
+    val id = doc.group_selected().unwrap()
+
+    doc.bounds_of(doc.find(id).unwrap())
+
+    val before = doc.builds
+
+    for round in 0..<5
+        doc.undo()
+        for item in doc.items() do doc.bounds_of(item)
+        doc.redo()
+        for item in doc.items() do doc.bounds_of(item)
+
+    assert_eq(doc.builds, before, "not once, in five rounds")
+    assert(before > 0, "though it did the first time")
+end undoing_and_redoing_a_group_asks_the_kernel_for_nothing
+
+// The counter above would read nothing in a test that had nothing to count: the same walk with the cache
+// missing has to build.
+@test
+a_new_group_of_the_same_parts_does_ask_the_kernel()
+    val (doc, _, _) = box_and_hole()
+    val id = doc.group_selected().unwrap()
+
+    doc.bounds_of(doc.find(id).unwrap())
+
+    val before = doc.builds
+
+    doc.undo()
+    doc.group_selected().unwrap()
+    assert(doc.builds > before, "a group is a new join")
+end a_new_group_of_the_same_parts_does_ask_the_kernel
+
+@test
+a_node_copied_before_its_mesh_was_made_shares_it_when_undone_to()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Sphere)
+
+    doc.set_transform(a, moved_to(Vec3(50.0, 0.0, 0.0)))
+    doc.bounds_of(doc.find(a).unwrap())
+
+    val before = doc.builds
+
+    doc.undo()
+    doc.bounds_of(doc.find(a).unwrap())
+    assert_eq(doc.builds, before, "drawn once, in either place, it is made for both")
+end a_node_copied_before_its_mesh_was_made_shares_it_when_undone_to
+
+@test
+a_move_shares_every_other_node_with_the_old_root()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+    val old_root = doc.root
+    val old_b = doc.find(b).unwrap()
+
+    doc.set_transform(a, moved_to(Vec3(-100.0, 0.0, 0.0)))
+
+    assert(doc.root != old_root, "a new root")
+    assert(doc.find(b).unwrap() == old_b, "and the same node, not a copy, for what did not move")
+    assert(old_root.children[0].transform.translation == Vec3(0.0, 0.0, 0.0), "and the old root is as it was")
+end a_move_shares_every_other_node_with_the_old_root
+
+@test
+a_very_long_history_of_moves_holds_one_mesh_and_a_bounded_number_of_steps()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Sphere)
+
+    doc.bounds_of(doc.find(a).unwrap())
+
+    val one_mesh = doc.held_mesh_bytes()
+
+    for i in 0..<5000 do doc.set_transform(a, moved_to(Vec3(real(i % 400), 0.0, 0.0)))
+
+    assert(doc.undos.len() <= HISTORY_STEPS, "only so many steps")
+    assert_eq(doc.held_mesh_bytes(), one_mesh, "and every one of them shares the mesh")
+end a_very_long_history_of_moves_holds_one_mesh_and_a_bounded_number_of_steps
+
+@test
+a_history_of_new_meshes_stays_inside_the_budget_and_lets_go_of_the_oldest()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Sphere)
+    val b = doc.add_shape(Primitive.Sphere)
+
+    doc.bounds_of(doc.find(a).unwrap())
+
+    val first: weak Mesh = doc.mesh_of(doc.find(a).unwrap())
+
+    // Each round makes one new group mesh; a budget of a few meshes has to drop steps to hold.
+    doc.mesh_budget = doc.held_mesh_bytes() * 4
+
+    for round in 0..<40
+        doc.select(Some(a))
+        doc.toggle_selected(b)
+
+        val id = doc.group_selected().unwrap()
+
+        doc.bounds_of(doc.find(id).unwrap())
+        doc.ungroup_selected().unwrap()
+
+    // One step past the end of the last round is the check: the budget holds at each push.
+    doc.select(Some(a))
+    doc.delete_selected().unwrap()
+
+    assert(doc.held_mesh_bytes() <= doc.mesh_budget, "inside the budget")
+    assert(doc.undos.len() < 80, "by giving up old steps")
+    assert(doc.undos.len() >= 1, "though never the last")
+    doc.undo()
+    assert(first.get().is_some(), "a mesh something still holds stays")
+end a_history_of_new_meshes_stays_inside_the_budget_and_lets_go_of_the_oldest
+
+@test
+a_mesh_only_dropped_steps_held_is_really_freed()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Sphere)
+
+    doc.bounds_of(doc.find(a).unwrap())
+    doc.resize_to(a, Vec3(30.0, 30.0, 30.0)).unwrap()
+
+    val other = doc.add_shape(Primitive.Sphere)
+
+    doc.select(Some(a))
+    doc.toggle_selected(other)
+
+    val id = doc.group_selected().unwrap()
+    val made: weak Mesh = doc.mesh_of(doc.find(id).unwrap())
+
+    assert(made.get().is_some(), "alive while the document holds it")
+
+    doc.undo()
+    assert(made.get().is_some(), "and while redo can reach it")
+
+    doc.select(Some(a))
+    doc.set_hole(true).unwrap()
+    assert(made.get().is_none(), "a new edit lets it go")
+end a_mesh_only_dropped_steps_held_is_really_freed
 
 @test
 selecting_an_id_that_was_edited_keeps_it()

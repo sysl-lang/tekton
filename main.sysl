@@ -4,15 +4,18 @@
 //     tekton --demo                                   with one of each shape, the second selected
 //     tekton --demo --shot frame.png --size 1400x900  a few frames, the last written to a PNG
 //     tekton --demo --select 3 --view 0.3,0.5         which demo shape is selected; the camera's turn and tilt
+//     tekton --holes                                  a part with a hole cut in it, and a hole not yet grouped
 //
 // The shaders are Metal Shading Language, so this runs on a Mac, in a shell inside the desktop session.
 
-import sh.sysl.sdl3.GPU_SHADERFORMAT_MSL
+import sh.sysl.sdl3.{EventKind, GPU_SHADERFORMAT_MSL}
 import sh.sysl.tekton.interface.new_workspace
-import sh.sysl.tekton.document.PRIMITIVES
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform}
+import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.signal
 import sh.sysl.ui_sdl.{app, run, save_frame, stop}
-import sysl.text.{parse_int, parse_real}
+import sysl.text.{parse_int, parse_real, split}
 
 // How many frames a shot lets pass first, for the window and the shaders to settle.
 const SHOT_SETTLE: int = 5
@@ -35,18 +38,42 @@ private parse_view(s: string) -> Option[(real, real)]
     Some((turn, tilt))
 end parse_view
 
+// A box with a round hole cut through it, in a group, and beside it a block with a hole not yet grouped.
+private add_hole_scene(doc: &Document)
+    val box = doc.add_shape(Primitive.Box)
+    val cut = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_transform(box, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(2.0, 2.0, 1.0)))
+    doc.set_transform(cut, Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(1.0, 1.0, 2.0)))
+    doc.select(Some(cut))
+    doc.set_hole(true).expect("a hole")
+    doc.select(Some(box))
+    doc.toggle_selected(cut)
+    doc.group_selected().expect("a group")
+
+    val block = doc.add_shape(Primitive.Box)
+    val hole = doc.add_shape(Primitive.Sphere)
+
+    doc.set_transform(block, Transform(Vec3(70.0, 0.0, 0.0), Quaternion.identity(), Vec3(2.0, 2.0, 1.0)))
+    doc.set_transform(hole, Transform(Vec3(80.0, -14.0, 5.0), Quaternion.identity(), Vec3(1.2, 1.2, 1.2)))
+    doc.select(Some(hole))
+    doc.set_hole(true).expect("a hole")
+end add_hole_scene
+
 main(args: []string) -> Result[unit, string]
     var shot = ""
     var width = 1280
     var height = 800
     var demo = false
-    var selected = 2
+    var holes = false
+    var selected = ""
     var view: Option[(real, real)] = None
     var i = 1
 
     while i < args.len
         args[i] match
             "--demo" -> demo = true
+            "--holes" -> holes = true
             "--shot" ->
                 i += 1
                 shot = args[i]
@@ -55,7 +82,7 @@ main(args: []string) -> Result[unit, string]
                 (width, height) = parse_size(args[i]).ok_or(s"not a size: ${args[i]}")?
             "--select" ->
                 i += 1
-                selected = parse_int(args[i]).ok().ok_or(s"not a shape: ${args[i]}")?
+                selected = args[i]
             "--view" ->
                 i += 1
                 view = Some(parse_view(args[i]).ok_or(s"not a view: ${args[i]}")?)
@@ -65,10 +92,20 @@ main(args: []string) -> Result[unit, string]
 
     val w = new_workspace()
 
+    if holes then add_hole_scene(w.doc)
+
     if demo
         for p in PRIMITIVES do w.doc.add_shape(p)
 
-        w.doc.select(Some(selected))
+        w.doc.select(Some(2))
+
+    if selected != ""
+        w.doc.select(None)
+
+        for one in split(selected, ",")
+            w.doc.toggle_selected(parse_int(one).ok().ok_or(s"not a shape: ${one}")?)
+
+    if demo || holes
         w.camera.frame(w.doc)
 
         view match
@@ -79,7 +116,9 @@ main(args: []string) -> Result[unit, string]
 
     val frames = signal(0)
 
-    run(app("Tekton", () -> w.tree(), () -> 0xDDE2E9u32, width, height, gpu = GPU_SHADERFORMAT_MSL, on_frame = dt ->
+    run(app("Tekton", () -> w.tree(), () -> 0xDDE2E9u32, width, height, gpu = GPU_SHADERFORMAT_MSL, on_event = e ->
+        e.kind() == EventKind.KeyDown && w.shortcut(e.key_code(), e.key_mod(), e.key_repeat())
+    , on_frame = dt ->
         if shot != ""
             frames.set(frames.read() + 1)
 

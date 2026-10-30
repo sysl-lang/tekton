@@ -59,6 +59,119 @@ private frame(dev: &GpuDevice, r: &Renderer, doc: &Document, strokes: []Stroke =
 end frame
 
 // How many pixels are mostly the selection's blue.
+@test
+a_hole_lets_what_is_behind_it_show_and_a_solid_does_not()
+    if !can_use_gpu("a_hole_lets_what_is_behind_it_show") then return
+
+    val dev = device()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val middle = doc.bounds_of(doc.find(id).unwrap()).center()
+    val (x, y) = new_camera().project(middle, real(SIZE), real(SIZE)).unwrap()
+
+    doc.select(None)
+
+    val solid = pixel_at(frame(dev, new_renderer(), doc), x, y)
+
+    doc.select(Some(id))
+    doc.set_hole(true).unwrap()
+    doc.select(None)
+
+    val hole = pixel_at(frame(dev, new_renderer(), doc), x, y)
+
+    doc.undo()
+    doc.select(None)
+    assert(hole != solid, "a hole does not look like the solid it was")
+    assert(pixel_at(frame(dev, new_renderer(), doc), x, y) == solid, "and undoing it draws the solid again")
+end a_hole_lets_what_is_behind_it_show_and_a_solid_does_not
+
+@test
+a_hole_buried_in_a_solid_can_still_be_seen_through_it()
+    if !can_use_gpu("a_hole_buried_in_a_solid") then return
+
+    val dev = device()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val middle = doc.bounds_of(doc.find(a).unwrap()).center()
+    val (x, y) = new_camera().project(middle, real(SIZE), real(SIZE)).unwrap()
+
+    doc.select(None)
+
+    val plain = pixel_at(frame(dev, new_renderer(), doc), x, y)
+    val b = doc.add_shape(Primitive.Sphere)
+
+    doc.set_transform(b, Transform(Vec3(0.0, 0.0, 5.0), Quaternion.identity(), Vec3(0.5, 0.5, 0.5)))
+    doc.select(Some(b))
+    doc.set_hole(true).unwrap()
+    doc.select(None)
+
+    assert(pixel_at(frame(dev, new_renderer(), doc), x, y) != plain, "the box's face shows what is inside it")
+end a_hole_buried_in_a_solid_can_still_be_seen_through_it
+
+// Its surface is see-through and its depth is not, so an outline's back faces do not flood the shape.
+@test
+a_selected_hole_has_an_outline_and_not_a_blue_body()
+    if !can_use_gpu("a_selected_hole_has_an_outline") then return
+
+    val dev = device()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Sphere)
+
+    val solid = selection_pixels(frame(dev, new_renderer(), doc))
+
+    doc.set_hole(true).unwrap()
+
+    val hole = selection_pixels(frame(dev, new_renderer(), doc))
+
+    assert(hole > 0, "it shows")
+    assert(hole <= solid * 2, "about as much as a solid's")
+end a_selected_hole_has_an_outline_and_not_a_blue_body
+
+@test
+everything_selected_has_an_outline()
+    if !can_use_gpu("everything_selected_has_an_outline") then return
+
+    val dev = device()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.select(Some(a))
+
+    val one = selection_pixels(frame(dev, new_renderer(), doc))
+
+    doc.toggle_selected(b)
+    assert(selection_pixels(frame(dev, new_renderer(), doc)) > one, "two have more of it than one")
+end everything_selected_has_an_outline
+
+// A group an edit emptied has no triangles, and a buffer of no bytes is one a GPU refuses.
+@test
+a_group_with_nothing_left_of_it_draws_nothing_without_a_crash()
+    if !can_use_gpu("a_group_with_nothing_left_of_it") then return
+
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+    doc.group_selected().unwrap()
+    doc.set_transform(b, Transform(Vec3(-200.0, -200.0, -200.0), Quaternion.identity(), Vec3(40.0, 40.0, 40.0)))
+    doc.set_part_hole(b, true)
+
+    val renderer = new_renderer()
+
+    frame(device(), renderer, doc)
+    assert_eq(renderer.uploads, 0, "nothing went up")
+end a_group_with_nothing_left_of_it_draws_nothing_without_a_crash
+
+private pixel_at(p: Buf[u8], x: real, y: real) -> (u8, u8, u8)
+    val at = (usize(y) * usize(SIZE) + usize(x)) * 4
+
+    (p[at], p[at + 1], p[at + 2])
+end pixel_at
+
 private selection_pixels(p: Buf[u8]) -> int
     var count = 0
 

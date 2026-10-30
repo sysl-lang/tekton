@@ -2,14 +2,15 @@ module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
-import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, new_document, primitive_name}
+import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
+import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform, new_document, primitive_name}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
 import sh.sysl.tekton.picking.{pick, pick_hit}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
 import sh.sysl.ui.*
 import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, viewport, viewport_depth_format}
 import sysl.buf.{Buf, buf}
-import sysl.text.{parse_real, to_lower}
+import sysl.text.{parse_real, split, to_lower}
 
 // The window: a palette beside one viewport.
 //
@@ -66,8 +67,15 @@ struct Workspace
     overlay: &Layout
     fields: Buf[&NumberField]
 
-    // What is wrong with the number last typed, or nothing.
+    // What is wrong with the number last typed or the command last asked for, or nothing.
     problem: &Signal[string]
+
+    // The rest of what a drag on one of several selected shapes carries along, where each began.
+    carried: Buf[(int, Transform)]
+
+    // Whether a field has the keyboard, as of the last frame. A shortcut leaves the document alone then, since
+    // what is half typed into a field was written against the document as it stands.
+    typing: bool
 
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
@@ -79,9 +87,61 @@ struct Workspace
         self.changed()
     end add
 
+    // Report how a command went. A command in the middle of a drag would be undone or overtaken by the drag, so
+    // nothing asks for one then.
+    private answer(&self, done: Result[unit, string])
+        done match
+            Ok(_) -> self.problem.set("")
+            Err(why) -> self.problem.set(why)
+
+        self.changed()
+    end answer
+
+    set_hole(&self, hole: bool) = if !self.is_editing() then self.answer(self.doc.set_hole(hole))
+
+    group(&self) = if !self.is_editing() then self.answer(self.doc.group_selected().map(id -> ()))
+
+    ungroup(&self) = if !self.is_editing() then self.answer(self.doc.ungroup_selected())
+
+    delete(&self) = if !self.is_editing() then self.answer(self.doc.delete_selected())
+
+    undo(&self)
+        if !self.is_editing()
+            self.doc.undo()
+            self.answer(Ok(()))
+    end undo
+
+    redo(&self)
+        if !self.is_editing()
+            self.doc.redo()
+            self.answer(Ok(()))
+    end redo
+
+    // A key the toolkit does not see, as the window reports it: `code` is the layout's own, so the letters are
+    // where the keyboard has them. Says whether it was a shortcut, and so whether anyone else should see it.
+    shortcut(&self, code: u32, mods: u16, repeat: bool) -> bool
+        if (mods & KMOD_GUI) == 0u16 || self.typing then return false
+
+        val shift = (mods & KMOD_SHIFT) != 0u16
+
+        if code == u32(u8('z'))
+            if shift then self.redo() else self.undo()
+
+            return true
+
+        if code == u32(u8('g'))
+            if !repeat
+                if shift then self.ungroup() else self.group()
+
+            return true
+
+        false
+    end shortcut
+
     // A click at this point of a viewport at this rectangle. On a handle it does nothing: the handle is
-    // part of what is already selected.
-    click(&self, x: int, y: int, r: Rect)
+    // part of what is already selected. With `adding` it joins the selection or leaves it, and a click on
+    // nothing changes nothing, so a slip does not lose what has been gathered.
+    click(&self, x: int, y: int, r: Rect, adding: bool = false)
         val lx = real(x - r.x)
         val ly = real(y - r.y)
 
@@ -89,7 +149,10 @@ struct Workspace
 
         val ray = self.camera.ray(lx, ly, real(r.w), real(r.h))
 
-        self.doc.select(pick(self.doc, ray))
+        pick(self.doc, ray) match
+            Some(id) -> if adding then self.doc.toggle_selected(id) else self.doc.select(Some(id))
+            None -> if !adding then self.doc.select(None)
+
         self.problem.set("")
         self.changed()
     end click
@@ -105,7 +168,7 @@ struct Workspace
         layout(self.doc, self.camera, w, h).grip_at(lx, ly) match
             Some(grip) ->
                 self.doc.selected.and_then(id -> drag_grip(self.doc, self.camera, id, grip, w, h, lx, ly)) match
-                    Some(d) -> self.gesture = Gesture.Edit(d)
+                    Some(d) -> self.start_edit(d)
                     None -> ()
 
                 return
@@ -115,18 +178,35 @@ struct Workspace
 
         pick_hit(self.doc, ray) match
             Some(p) ->
-                self.doc.select(Some(p.id))
+                // A drag on part of a selection takes all of it along, and on anything else takes that alone.
+                if !self.doc.is_selected(p.id) then self.doc.select(Some(p.id))
+
                 self.problem.set("")
                 self.changed()
 
                 drag_body(self.doc, p.id, ray.at(p.distance), lx, ly) match
-                    Some(d) -> self.gesture = Gesture.Edit(d)
+                    Some(d) -> self.start_edit(d)
                     None -> ()
             None -> self.gesture = Gesture.Orbit
     end begin
 
-    // Bring the shape to where the pointer has it now. Nothing is told if that is where it already is, so a
-    // pointer held still costs no rebuild.
+    // However many frames it takes, a drag is one undo step.
+    private start_edit(&self, d: Drag)
+        var carried: Buf[(int, Transform)] = buf()
+
+        for id in self.doc.selection.view()
+            if id != d.id
+                self.doc.find(id) match
+                    Some(node) -> carried.push((id, node.transform))
+                    None -> ()
+
+        self.carried = carried
+        self.gesture = Gesture.Edit(d)
+        self.doc.begin_step()
+    end start_edit
+
+    // Bring the shape to where the pointer has it now, and whatever it carries by as much. Nothing is told if
+    // that is where it already is, so a pointer held still costs no rebuild.
     private follow(&self, d: Drag, c: *Canvas, r: Rect)
         val (x, y) = c.pointer()
         val keys = c.modifiers()
@@ -135,10 +215,14 @@ struct Workspace
 
         self.doc.find(d.id) match
             Some(node) ->
-                val was = node.transform
-
-                if was.translation != t.translation || was.scale != t.scale || was.rotation != t.rotation
+                if node.transform != t
                     self.doc.set_transform(d.id, t)
+
+                    val by = t.translation - d.start.translation
+
+                    for (id, was) in self.carried.view()
+                        self.doc.set_transform(id, Transform(was.translation + by, was.rotation, was.scale))
+
                     self.changed()
             None -> ()
     end follow
@@ -180,7 +264,12 @@ struct Workspace
 
         if wheel != 0 && !self.is_editing() then self.camera.zoom(real(wheel))
 
-        if !c.held(PointerButton.Primary) then self.gesture = Gesture.Idle
+        if !c.held(PointerButton.Primary)
+            if self.is_editing()
+                self.doc.end_step()
+                self.changed()
+
+            self.gesture = Gesture.Idle
 
         // A tap's action is called at the release, between paints, with no canvas to ask where the press
         // was; the next paint asks, and the press may have come and gone since this one.
@@ -188,9 +277,16 @@ struct Workspace
             val (x, y) = c.press_origin()
 
             self.tap_waiting = false
-            self.click(x, y, r)
+            self.click(x, y, r, c.modifiers().shift)
 
         c.hit(r, () -> self.tap_waiting = true)
+
+        self.typing = c.focus() != NOBODY
+
+        if !self.typing
+            for p in c.keys()
+                if p.key == Key.Delete || p.key == Key.Backspace
+                    if self.doc.selection.len() > 0 then self.delete()
 
         self.overlay = layout(self.doc, self.camera, real(r.w), real(r.h), self.hot_grip(c, r))
     end input
@@ -243,11 +339,20 @@ struct Workspace
             parts.push(button(primitive_name(p), () -> self.add(p), Role.Primary, Variant.Soft)
                 .named(s"palette.${to_lower(primitive_name(p))}"))
 
+        parts.push(row([self.small_button("Undo", () -> self.undo(), "undo", self.doc.can_undo).flex(),
+                        self.small_button("Redo", () -> self.redo(), "redo", self.doc.can_redo).flex()], 6))
         parts.push(spacer().flex())
         parts.push(self.selection_panel())
+
+        for line in split(self.problem.read(), "\n")
+            if line != "" then parts.push(text(line).font_size(11.0).foreground(WRONG_INK))
+
         parts.push(column([text("Drag a shape to move it").font_size(11.0), text("Drag empty space to orbit").font_size(11.0),
-                           text("Right-drag to pan").font_size(11.0), text("Wheel to zoom").font_size(11.0),
-                           text("Shift: no snapping").font_size(11.0), text("Option: keep proportions").font_size(11.0)], 2))
+                           text("Right-drag to pan, wheel to zoom").font_size(11.0),
+                           text("Shift-click to select several").font_size(11.0),
+                           text("Shift: no snapping").font_size(11.0),
+                           text("Option: keep proportions").font_size(11.0),
+                           text("Cmd+G group, Cmd+Z undo").font_size(11.0)], 2))
 
         row([column(parts.view(), 10).padding(16).frame(206, 0).background(0xFFFFFFu32).restyle(t -> light()),
              spacer().frame(1, 0).background(0xCBD2DCu32)])
@@ -265,26 +370,60 @@ struct Workspace
         self.fields.view()
     end number_fields
 
+    // A button that says whether it has anything to do: dashed when it has not. There is no disabled state to
+    // ask for, so a tap on one with nothing to do is a tap that does nothing.
+    private small_button(&self, label: string, tap: &Fn() -> unit, name: string, live: bool) -> &View =
+        button(label, tap, Role.Primary, if live then Variant.Soft else Variant.Dashed).named(name)
+
+    // Which of the two is on: filled, and the other quiet. With a mixed selection neither is.
+    private solid_or_hole(&self) -> &View
+        var solids = 0
+        var holes = 0
+
+        for id in self.doc.selection.view()
+            self.doc.find(id) match
+                Some(node) -> if node.hole then holes += 1 else solids += 1
+                None -> ()
+
+        row([button("Solid", () -> self.set_hole(false), Role.Primary,
+                    if holes == 0 then Variant.Filled else Variant.Outline).named("panel.solid").flex(),
+             button("Hole", () -> self.set_hole(true), Role.Primary,
+                    if solids == 0 then Variant.Filled else Variant.Outline).named("panel.hole").flex()], 6)
+    end solid_or_hole
+
     private selection_panel(&self) -> &View
+        val count = self.doc.selection.len()
+
+        if count == 0 then return text("Nothing selected").font_size(12.0)
+
+        var parts: Buf[&View] = buf()
+
         self.doc.selected.and_then(id -> self.doc.find(id)) match
             Some(node) ->
                 val name = node.operation match
                     Shape(p) -> primitive_name(p)
                     Group -> "Group"
                 val fields = self.number_fields()
-                var parts: Buf[&View] = buf()
 
                 parts.push(text(name).font_size(16.0))
+                parts.push(self.solid_or_hole())
 
                 for (i, label) in [(0, "Position, mm"), (3, "Size, mm"), (6, "Rotation, degrees")]
                     parts.push(text(label).font_size(11.0))
                     parts.push(row([fields[i].view(), fields[i + 1].view(), fields[i + 2].view()], 3))
 
-                if self.problem.read() != ""
-                    parts.push(text(self.problem.read()).font_size(11.0).foreground(WRONG_INK))
+                if node.is_group
+                    parts.push(row([self.small_button("Ungroup", () -> self.ungroup(), "panel.ungroup", true).flex(),
+                                    self.small_button("Delete", () -> self.delete(), "panel.delete", true).flex()], 6))
+                else
+                    parts.push(self.small_button("Delete", () -> self.delete(), "panel.delete", true))
+            None ->
+                parts.push(text(s"${count} selected").font_size(16.0))
+                parts.push(self.solid_or_hole())
+                parts.push(row([self.small_button("Group", () -> self.group(), "panel.group", true).flex(),
+                                self.small_button("Delete", () -> self.delete(), "panel.delete", true).flex()], 6))
 
-                column(parts.view(), 4)
-            None -> text("Nothing selected").font_size(12.0)
+        column(parts.view(), 4)
     end selection_panel
 
     // What a field should show now.
@@ -429,4 +568,4 @@ private new_number_field(owner: &Workspace, q: Quantity, axis: int, id: int) -> 
 
 new_workspace() -> &Workspace =
     Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
-              layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""))
+              layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), false)
