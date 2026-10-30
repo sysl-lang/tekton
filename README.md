@@ -9,15 +9,11 @@ says what it will be.
 ## Running it
 
 It needs Manifold (`brew install manifold`) and a Mac: the shaders are Metal Shading Language. From a shell
-in the desktop session (`launchctl managername` says `Aqua`), with `quaternion` and `sdl3-shapes` checked out
-beside this directory:
+in the desktop session (`launchctl managername` says `Aqua`):
 
 ```
-sysl build . --lib ../quaternion --lib ../sdl3-shapes && ./tekton
+sysl build . && ./tekton
 ```
-
-**The two `--lib` flags are for now.** `sysl-lang/quaternion` has no tag to fetch, and `sdl3-shapes` holds the
-fix that makes a pipeline's `blend` take effect. Once both are released the command is `sysl build .`.
 
 - **Drag** on empty space or on a shape to orbit, **right- or middle-drag** to pan, **wheel** to zoom.
 - **Click** a shape to select it, or empty space to clear the selection.
@@ -27,7 +23,7 @@ fix that makes a pipeline's `blend` take effect. Once both are released the comm
 ## Tests
 
 ```
-sysl test . --lib ../quaternion --lib ../sdl3-shapes
+sysl test .
 ```
 
 The document, camera, picking and pointer tests need neither a window nor a GPU. The renderer's three draw real

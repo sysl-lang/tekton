@@ -1,5 +1,9 @@
 github.com/sysl-lang/manifold v0.1.1 sha256:2d09b6241f9c6a568f26f52c1c1390b22d9073458273a6e465dec529ca243df5
 github.com/sysl-lang/plutovg v0.2.6 sha256:daef22f6d3f1cf301052abc013ffa5634f2b9b3601dd5001a82ef25be4a584e2
+github.com/sysl-lang/quaternion v0.1.0 sha256:e4d82c4df2c20683d64e344a57063d543ef71d6426a1f7dcf339562c2008f4c3
 github.com/sysl-lang/sdl3 v0.3.14 sha256:ff3190b9d63237f17e6a0a93f0906488eb2d25015a6bc1064528aae014e32db4
+github.com/sysl-lang/sdl3 v0.3.15 sha256:e28b1122bc4027e5fb45b09d87ff07bc6ee2c68b7f02aefceb9c1f19f53ae267
 github.com/sysl-lang/syslui v0.1.12 sha256:f96364efcd013286b0dafbfc0b123d3d56b239a31add15f75b56530e97ceecf5
+github.com/sysl-lang/syslui v0.1.13 sha256:d95e14023670fe6490f3d4a7cc13e37a97ae3739158c6959b081f81b43c37033
 github.com/sysl-lang/syslui-sdl v0.2.12 sha256:430b6b431c9bae05bc498244fce3b17c295f00dcc152fabef286a71b1b4c4f27
+github.com/sysl-lang/syslui-sdl v0.2.13 sha256:154b08102d05b30087eee33dc4b8cf817e2e16758cf8697a0caa40605acd6795
