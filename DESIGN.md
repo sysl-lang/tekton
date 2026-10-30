@@ -71,4 +71,6 @@ their own tests, so most changes never need the whole application linked or a wi
 3. Shapes, orbit camera, picking, and handles.
 4. Solid or hole, groups, undo.
 5. Saving, STL and 3MF export.
-6. nex scripting.
+6. Printing: the printer's bed in the viewport, control over facets on round shapes, measuring, align, mirror
+   and array, hole clearances, chamfers, text.
+7. nex scripting.
