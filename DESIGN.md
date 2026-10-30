@@ -52,9 +52,10 @@ Everything runs without a window, so a test or an agent can use the application 
 - **Screenshots are real frames**: the same GPU pass and interface, read back into a PNG. Pixel
   assertions run against a fixed camera and size.
 
-Most of this belongs below Tekton, so every application gets it. syslUI owns the commands, named
-controls and the snapshot of what is on screen. syslui-sdl owns the socket, running a real frame offscreen
-and writing the PNG. Tekton adds only its own `state` report and its viewport.
+Most of this belongs below Tekton, so every application gets it. sdl3 owns the socket, input
+by coordinates through `SDL_PushEvent` (the real event path), and reading a frame back into a PNG, so any
+SDL program can be controlled. syslUI adds what SDL cannot know: named controls and the snapshot of what
+is on screen. syslui-sdl joins the two. Tekton adds only its own `state` report and its viewport.
 
 **Building stays fast by keeping layers apart.** The document, kernel glue and renderer are modules with
 their own tests, so most changes never need the whole application linked or a window opened.
