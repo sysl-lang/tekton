@@ -1,5 +1,65 @@
 // Tekton, a modeller for building solid objects.
+//
+//     tekton                                          a window, until it is closed
+//     tekton --demo                                   with one of each shape, the second selected
+//     tekton --demo --shot frame.png --size 1400x900  a few frames, the last written to a PNG
+//
+// The shaders are Metal Shading Language, so this runs on a Mac, in a shell inside the desktop session.
+
+import sh.sysl.sdl3.GPU_SHADERFORMAT_MSL
+import sh.sysl.tekton.interface.new_workspace
+import sh.sysl.tekton.document.PRIMITIVES
+import sh.sysl.ui.signal
+import sh.sysl.ui_sdl.{app, run, save_frame, stop}
+import sysl.text.parse_int
+
+// How many frames a shot lets pass first, for the window and the shaders to settle.
+const SHOT_SETTLE: int = 5
+
+// `WxH`, if it is that.
+private parse_size(s: string) -> Option[(int, int)]
+    val at = s.index_of("x")?
+    val w = parse_int(s[0..<at]).ok()?
+    val h = parse_int(s[at + 1..<s.len]).ok()?
+
+    Some((w, h))
+end parse_size
 
 main(args: []string) -> Result[unit, string]
-    Ok(())
+    var shot = ""
+    var width = 1280
+    var height = 800
+    var demo = false
+    var i = 1
+
+    while i < args.len
+        args[i] match
+            "--demo" -> demo = true
+            "--shot" ->
+                i += 1
+                shot = args[i]
+            "--size" ->
+                i += 1
+                (width, height) = parse_size(args[i]).ok_or(s"not a size: ${args[i]}")?
+            other -> return Err(s"unknown option: ${other}")
+
+        i += 1
+
+    val w = new_workspace()
+
+    if demo
+        for p in PRIMITIVES do w.doc.add_shape(p)
+
+        w.doc.select(Some(2))
+        w.camera.frame(w.doc)
+
+    val frames = signal(0)
+
+    run(app("Tekton", () -> w.tree(), () -> 0xDDE2E9u32, width, height, gpu = GPU_SHADERFORMAT_MSL, on_frame = dt ->
+        if shot != ""
+            frames.set(frames.read() + 1)
+
+            if frames.read() == SHOT_SETTLE then save_frame(shot)
+            if frames.read() > SHOT_SETTLE + 1 then stop()
+    ))
 end main

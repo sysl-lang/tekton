@@ -1,0 +1,128 @@
+module sh.sysl.tekton.renderer
+
+// The viewport's shaders, in Metal Shading Language.
+//
+// Four pipelines share one set of uniforms. The ground fades its grid into the background, the shadow
+// flattens each mesh onto the ground along the light, the surface shades facets from the triangles'
+// own slopes, and the outline pushes the selected mesh's back faces out by a fixed number of pixels.
+val SHADERS: string = raw"""
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct Uniforms {
+        float4x4 view_projection;
+        float4 eye;
+        float4 light;
+        float4 color;
+        float4 ground;      // the view's centre, and how far the ground reaches from it
+        float4 size;        // the target in pixels, and the outline's width in pixels
+    };
+
+    struct Vertex {
+        float3 position [[attribute(0)]];
+        float3 normal [[attribute(1)]];
+    };
+
+    struct Surface {
+        float4 position [[position]];
+        float3 world;
+    };
+
+    vertex Surface surface_vertex(Vertex in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
+        Surface out;
+
+        out.position = u.view_projection * float4(in.position, 1.0);
+        out.world = in.position;
+        return out;
+    }
+
+    // The slope of the position across a pixel is the plane of the triangle it is in, so every facet is
+    // lit as one flat face without a vertex having to be repeated for each.
+    fragment float4 surface_fragment(Surface in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
+        float3 n = normalize(cross(dfdx(in.world), dfdy(in.world)));
+        float3 to_eye = normalize(u.eye.xyz - in.world);
+
+        if (dot(n, to_eye) < 0.0) n = -n;
+
+        float key = max(dot(n, u.light.xyz), 0.0);
+        float fill = max(dot(n, normalize(float3(0.8, -0.1, 0.3))), 0.0);
+        float sky = 0.5 + 0.5 * n.z;
+        float rim = pow(1.0 - max(dot(n, to_eye), 0.0), 3.0);
+        float3 lit = u.color.rgb * (0.40 + 0.20 * sky + 0.46 * key + 0.24 * fill) + float3(0.07) * rim;
+
+        return float4(min(lit, float3(1.0)), 1.0);
+    }
+
+    // The mesh pushed out along its smoothed normals, as measured on the screen, so the width is the
+    // same near and far.
+    vertex float4 outline_vertex(Vertex in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
+        float4 clip = u.view_projection * float4(in.position, 1.0);
+        float2 along = (u.view_projection * float4(in.normal, 0.0)).xy * u.size.xy;
+        float n = length(along);
+
+        if (n > 0.0) clip.xy += along / n * 2.0 / u.size.xy * u.size.z * clip.w;
+
+        return clip;
+    }
+
+    fragment float4 flat_fragment(constant Uniforms& u [[buffer(0)]]) {
+        return u.color;
+    }
+
+    // The mesh along the light until it reaches the ground.
+    vertex float4 shadow_vertex(Vertex in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
+        float3 p = in.position - u.light.xyz * (in.position.z / u.light.z);
+
+        return u.view_projection * float4(p.x, p.y, 0.0, 1.0);
+    }
+
+    struct Ground {
+        float4 position [[position]];
+        float2 plan;
+    };
+
+    vertex Ground ground_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer(0)]]) {
+        const float2 corners[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
+        float2 plan = u.ground.xy + corners[id] * u.ground.w;
+        Ground out;
+
+        out.position = u.view_projection * float4(plan, 0.0, 1.0);
+        out.plan = plan;
+        return out;
+    }
+
+    // How much of a line every `spacing` covers this pixel, with an edge a pixel soft.
+    static float grid_line(float2 plan, float spacing, float width) {
+        float2 at = plan / spacing;
+        float2 slope = fwidth(at);
+        float2 off = abs(fract(at - 0.5) - 0.5) / slope;
+        float line = min(off.x, off.y);
+
+        return 1.0 - smoothstep(width - 0.5, width + 0.5, line);
+    }
+
+    fragment float4 ground_fragment(Ground in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
+        const float3 plane = float3(0.955, 0.962, 0.972);
+        const float3 fine = float3(0.895, 0.91, 0.93);
+        const float3 coarse = float3(0.80, 0.825, 0.86);
+
+        // Lines closer than a few pixels would be a grey wash, so the fine grid leaves as they close up.
+        float mm_per_pixel = length(fwidth(in.plan));
+        float closing = 1.0 - smoothstep(0.35, 1.1, mm_per_pixel);
+        float3 c = plane;
+
+        c = mix(c, fine, grid_line(in.plan, 10.0, 0.6) * closing);
+        c = mix(c, coarse, grid_line(in.plan, 50.0, 0.8));
+
+        float2 slope = fwidth(in.plan);
+        float2 off = abs(in.plan) / slope;
+
+        c = mix(c, float3(0.90, 0.60, 0.58), (1.0 - smoothstep(0.7, 1.7, off.y)));
+        c = mix(c, float3(0.60, 0.80, 0.65), (1.0 - smoothstep(0.7, 1.7, off.x)));
+
+        float away = length(in.plan - u.ground.xy);
+        float fade = smoothstep(u.ground.w * 0.12, u.ground.w * 0.6, away);
+
+        return float4(mix(c, u.color.rgb, fade), 1.0);
+    }
+    """

@@ -1,0 +1,111 @@
+module sh.sysl.tekton.renderer
+@tests
+
+import sh.sysl.sdl3.{GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, GPU_TEXTUREUSAGE_COLOR_TARGET,
+                     GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+                     GPU_SHADERFORMAT_MSL, GpuDevice, gpu_device, init, INIT_VIDEO}
+import sysl.buf.{Buf, buf}
+import sh.sysl.tekton.camera.new_camera
+import sh.sysl.tekton.document.{Document, Primitive, moved_to, new_document}
+import sysl.process
+
+// Real pixels from a real device, with no window: the shaders compile, the projection lands where a click
+// would look, and the selection shows.
+//
+// **Only inside the macOS desktop session**, asked before SDL starts because it is SDL starting that would
+// otherwise never return. Anywhere else each test says it did not run, and passes.
+
+const SIZE: u32 = 128
+
+private can_use_gpu(test: string) -> bool
+    val here = process.capture("/bin/launchctl", ["managername"]) match
+        Ok(out) -> out.text.starts_with("Aqua")
+        Err(e) -> false
+
+    if !here then print(s"skipped outside the desktop session: ${test}")
+    here
+end can_use_gpu
+
+private device() -> &GpuDevice
+    assert(init(INIT_VIDEO), "SDL started")
+    gpu_device(GPU_SHADERFORMAT_MSL).unwrap()
+
+// A frame of this document, as bytes of RGBA, drawn by this renderer on the device that made it.
+private frame(dev: &GpuDevice, r: &Renderer, doc: &Document) -> Buf[u8]
+    val color = dev.texture(GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, GPU_TEXTUREUSAGE_COLOR_TARGET, SIZE, SIZE).unwrap()
+    val depth = dev.texture(GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, SIZE, SIZE).unwrap()
+    val readback = dev.transfer_buffer(GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, SIZE * SIZE * 4).unwrap()
+    val cmd = dev.command_buffer().unwrap()
+
+    r.draw(dev, cmd, color, depth, GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, doc, new_camera(),
+           real(SIZE), real(SIZE), 1.0)
+
+    val out = cmd.copy_pass().unwrap()
+
+    out.download_texture(color, readback)
+    out.finish()
+    assert(cmd.submit_with_fence(dev).unwrap().wait(), "the GPU finished")
+
+    val bytes: *u8 = readback.map()
+    var pixels: Buf[u8] = buf()
+
+    for i in 0..<usize(SIZE * SIZE * 4) do pixels.push(bytes[i])
+
+    readback.unmap()
+    pixels
+end frame
+
+// How many pixels are mostly the selection's blue.
+private selection_pixels(p: Buf[u8]) -> int
+    var count = 0
+
+    for i in 0..<usize(SIZE * SIZE)
+        if p[i * 4] < 60 && p[i * 4 + 1] < 170 && p[i * 4 + 2] > 200 then count += 1
+
+    count
+end selection_pixels
+
+@test
+a_shape_covers_the_ground_where_the_camera_says_it_is()
+    if !can_use_gpu("a_shape_covers_the_ground") then return
+
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val bounds = doc.bounds_of(doc.find(id).unwrap())
+    val (x, y) = new_camera().project(bounds.center(), real(SIZE), real(SIZE)).unwrap()
+    val p = frame(device(), new_renderer(), doc)
+    val at = (usize(y) * usize(SIZE) + usize(x)) * 4
+
+    assert(p[at] > p[at + 2], "the box's warm colour at its centre, not the cool ground")
+
+@test
+the_selected_shape_has_an_outline_and_an_unselected_one_does_not()
+    if !can_use_gpu("the_selected_shape_has_an_outline") then return
+
+    val dev = device()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    assert(selection_pixels(frame(dev, new_renderer(), doc)) > 20, "selected: a blue edge")
+
+    doc.select(None)
+    assert_eq(selection_pixels(frame(dev, new_renderer(), doc)), 0, "unselected: none")
+
+@test
+a_mesh_goes_to_the_gpu_once_until_its_revision_changes()
+    if !can_use_gpu("a_mesh_goes_to_the_gpu_once") then return
+
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val r = new_renderer()
+    val dev = device()
+
+    frame(dev, r, doc)
+    assert_eq(r.uploads, 1, "the first frame")
+
+    frame(dev, r, doc)
+    assert_eq(r.uploads, 1, "the second, nothing")
+
+    doc.set_transform(a, moved_to(sh.sysl.tekton.space.Vec3(30.0, 0.0, 0.0)))
+    frame(dev, r, doc)
+    assert_eq(r.uploads, 2, "an edit, once more")

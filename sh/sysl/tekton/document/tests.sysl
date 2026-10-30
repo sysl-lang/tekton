@@ -145,6 +145,26 @@ an_untouched_nodes_mesh_is_not_computed_again()
     assert_eq(doc.builds, before + 1, "the edited node, once")
     assert_eq(doc.mesh_of(b_node).revision, b_mesh.revision, "and its neighbour is the same mesh")
 
+// The walk to the edited node passes every sibling before it, which is where a careless one clears too much.
+@test
+an_edit_leaves_the_siblings_on_both_sides_of_it_alone()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Sphere)
+    val d = doc.add_shape(Primitive.Cone)
+
+    for item in doc.items() do doc.mesh_of(item)
+
+    val before = doc.builds
+
+    doc.set_transform(b, moved_to(Vec3(0.0, 100.0, 0.0)))
+    assert(doc.find(a).unwrap().mesh.is_some(), "the one before it keeps its mesh")
+    assert(doc.find(d).unwrap().mesh.is_some(), "and the one after it")
+
+    for item in doc.items() do doc.mesh_of(item)
+
+    assert_eq(doc.builds, before + 1, "and only the edited one is computed")
+
 @test
 a_new_revision_tells_a_renderer_the_mesh_changed()
     val doc = new_document()

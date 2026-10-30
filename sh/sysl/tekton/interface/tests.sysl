@@ -1,0 +1,175 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.tekton.document.Primitive
+import sh.sysl.ui.*
+
+// The pointer, from a press to what it did, through the same canvas calls a window makes. No window and no
+// GPU: a viewport outside an application with a `gpu` still takes its input, and draws nothing.
+
+private val AT: Rect = Rect(0, 0, 900, 600)
+
+private paint_frame(w: &Workspace, c: *Recorder)
+    render(w.viewport(), c, AT)
+
+// Where a shape's centre lands in the viewport.
+private centre_of(w: &Workspace, id: int) -> (int, int)
+    val centre = w.doc.bounds_of(w.doc.find(id).unwrap()).center()
+    val (x, y) = w.camera.project(centre, 900.0, 600.0).unwrap()
+
+    (int(x), int(y))
+
+// A press and a release at one place, with a frame painted around each.
+private click_at(w: &Workspace, c: *Recorder, x: int, y: int)
+    paint_frame(w, c)
+    c.point(x, y, true)
+    paint_frame(w, c)
+    c.release(x, y)
+    paint_frame(w, c)
+
+@test
+a_click_on_a_shape_selects_it()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Sphere)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+
+    assert(w.doc.selected == Some(b), "the last placed, to begin with")
+    click_at(w, &c, x, y)
+    assert(w.doc.selected == Some(a), "now the one clicked")
+
+@test
+a_click_on_empty_space_deselects()
+    val w = new_workspace()
+
+    w.doc.add_shape(Primitive.Box)
+
+    var c = recorder()
+
+    click_at(w, &c, 3, 3)
+    assert(w.doc.selected.is_none(), "nothing there")
+
+@test
+a_press_and_release_with_no_paint_between_still_selects()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+
+    w.doc.select(None)
+
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    c.release(x, y)
+    paint_frame(w, &c)
+    assert(w.doc.selected == Some(a), "a tap faster than a frame")
+
+@test
+a_drag_turns_the_camera_and_does_not_select()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+
+    w.doc.select(None)
+
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+    val turn = w.camera.turn
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.point(x + 40, y, true)
+    paint_frame(w, &c)
+    c.release(x + 40, y)
+    paint_frame(w, &c)
+    paint_frame(w, &c)
+    assert(w.camera.turn != turn, "it orbited")
+    assert(w.doc.selected.is_none(), "and a drag starting on a shape selected nothing")
+
+@test
+a_small_wobble_is_still_a_click()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+
+    w.doc.select(None)
+
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+    val turn = w.camera.turn
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.point(x + CLICK_SLOP, y, true)
+    paint_frame(w, &c)
+    c.release(x + CLICK_SLOP, y)
+    paint_frame(w, &c)
+    assert(w.camera.turn == turn, "not a drag")
+    assert(w.doc.selected == Some(a), "so a click")
+
+@test
+a_right_drag_and_a_middle_drag_pan_without_turning_or_selecting()
+    for button in [PointerButton.Secondary, PointerButton.Middle]
+        val w = new_workspace()
+
+        w.doc.add_shape(Primitive.Box)
+
+        var c = recorder()
+        val turn = w.camera.turn
+        val target = w.camera.target
+        val selected = w.doc.selected
+
+        paint_frame(w, &c)
+        c.press(100, 100, button)
+        paint_frame(w, &c)
+        c.point(140, 110, false)
+        paint_frame(w, &c)
+        c.let_go(140, 110, button)
+        paint_frame(w, &c)
+        assert(w.camera.target != target, "it panned")
+        assert(w.camera.turn == turn, "and did not turn")
+        assert(w.doc.selected == selected, "and the selection stayed")
+
+@test
+the_wheel_zooms_over_the_viewport_only()
+    val w = new_workspace()
+    var c = recorder()
+    val far = w.camera.distance
+
+    c.point(100, 100, false)
+    c.spin(0.0, 50.0)
+    paint_frame(w, &c)
+    assert(w.camera.distance < far, "turning it away moves nearer")
+
+    val near = w.camera.distance
+
+    c.point(2000, 2000, false)
+    c.spin(0.0, 50.0)
+    paint_frame(w, &c)
+    assert(w.camera.distance == near, "and outside the viewport it does nothing")
+
+@test
+the_palette_drops_a_selected_shape_for_each_primitive()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.add(Primitive.Torus)
+    assert_eq(w.doc.items().len, 1usize, "one shape")
+    assert(w.doc.selected == Some(w.doc.items()[0].id), "selected")
+    assert(w.changes.read() > 0, "and the interface was told")
+
+@test
+a_shape_placed_out_of_view_brings_the_view_to_it()
+    val w = new_workspace()
+
+    w.camera.distance = 40.0
+
+    for i in 0..<4 do w.add(Primitive.Box)
+
+    val items = w.doc.items()
+    val last = w.doc.bounds_of(items[items.len - 1]).center()
+    val (x, _) = w.camera.project(last, 900.0, 600.0).unwrap()
+
+    assert(x > 0.0 && x < 900.0, "the newest is in the viewport")

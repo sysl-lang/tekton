@@ -1,0 +1,137 @@
+module sh.sysl.tekton.interface
+
+import sh.sysl.tekton.camera.{Camera, new_camera}
+import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, new_document, primitive_name}
+import sh.sysl.tekton.picking.pick
+import sh.sysl.tekton.renderer.{Renderer, new_renderer}
+import sh.sysl.ui.*
+import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, viewport, viewport_depth_format}
+import sysl.buf.{Buf, buf}
+import sysl.text.to_lower
+
+// The window: a palette beside one viewport.
+//
+// Everything the pointer can do arrives here and leaves as a command on the document or a move of the
+// camera. **The slop is what tells a click from a drag**: a press that travels further than this over the
+// viewport is the camera's, and the canvas then does not report it as a tap.
+
+// How far a press may wander, in points, and still be a click.
+const CLICK_SLOP: int = 3
+
+// A click selected or cleared the selection, or the palette added a shape. What a document's panel
+// shows follows this.
+struct Workspace
+    doc: &Document
+    camera: &Camera
+    renderer: &Renderer
+    view: Option[&Viewport]
+    changes: &Signal[int]
+
+    // The viewport's size in points as last painted, which a frame's pixels are divided by for its density.
+    height: int
+    tap_waiting: bool
+
+    private changed(&self) = self.changes.set(self.changes.read() + 1)
+
+    // The palette's command, and what the view does about it.
+    add(&self, p: Primitive)
+        self.doc.add_shape(p)
+        self.camera.frame_if_out_of_view(self.doc)
+        self.changed()
+    end add
+
+    // A click at this point of a viewport at this rectangle.
+    click(&self, x: int, y: int, r: Rect)
+        val ray = self.camera.ray(real(x - r.x), real(y - r.y), real(r.w), real(r.h))
+
+        self.doc.select(pick(self.doc, ray))
+        self.changed()
+    end click
+
+    // What the pointer did over the viewport this frame.
+    private input(&self, c: *Canvas, r: Rect)
+        self.height = r.h
+
+        val (ox, oy) = c.drag_by(r, 1, PointerButton.Primary, CLICK_SLOP, CLICK_SLOP)
+
+        if ox != 0 || oy != 0 then self.camera.orbit(real(ox), real(oy))
+
+        for button in [PointerButton.Middle, PointerButton.Secondary]
+            val (px, py) = c.drag_by(r, 2, button, 0, 0)
+
+            if px != 0 || py != 0 then self.camera.pan(real(px), real(py), real(r.h))
+
+        val (_, wheel) = c.wheel(r)
+
+        if wheel != 0 then self.camera.zoom(real(wheel))
+
+        // A tap's action is called at the release, between paints, with no canvas to ask where the press
+        // was; the next paint asks, and the press may have come and gone since this one.
+        if self.tap_waiting
+            val (x, y) = c.press_origin()
+
+            self.tap_waiting = false
+            self.click(x, y, r)
+
+        c.hit(r, () -> self.tap_waiting = true)
+    end input
+
+    // The viewport, made once: it holds the targets the 3D is drawn into.
+    viewport(&self) -> &Viewport
+        self.view match
+            Some(v) -> return v
+            None -> ()
+
+        val v = viewport(f ->
+            val scale = if self.height > 0 then real(f.rect.h) / real(self.height) else 1.0
+
+            self.renderer.draw(f.device, f.cmd, f.color, f.depth, viewport_depth_format(f.device), VIEWPORT_COLOR_FORMAT,
+                               self.doc, self.camera, real(f.rect.w), real(f.rect.h), scale)
+        , (c, r) -> self.input(c, r))
+
+        self.view = Some(v)
+        v
+    end viewport
+
+    // The whole window.
+    tree(&self) -> &View
+        self.changes.read()
+
+        row([self.panel(), self.viewport().flex()])
+    end tree
+
+    private panel(&self) -> &View
+        var parts: Buf[&View] = buf()
+
+        parts.push(text("Tekton").font_size(22.0))
+        parts.push(text("Shapes"))
+
+        for p in PRIMITIVES
+            parts.push(button(primitive_name(p), () -> self.add(p), Role.Primary, Variant.Soft)
+                .named(s"palette.${to_lower(primitive_name(p))}"))
+
+        parts.push(spacer().flex())
+        parts.push(self.selection_panel())
+        parts.push(column([text("Drag to orbit").font_size(11.0), text("Right-drag to pan").font_size(11.0),
+                           text("Wheel to zoom").font_size(11.0)], 2))
+
+        row([column(parts.view(), 10).padding(16).frame(190, 0).background(0xFFFFFFu32).restyle(t -> light()),
+             spacer().frame(1, 0).background(0xCBD2DCu32)])
+    end panel
+
+    private selection_panel(&self) -> &View
+        self.doc.selected.and_then(id -> self.doc.find(id)) match
+            Some(node) ->
+                val size = self.doc.bounds_of(node).size()
+                val name = node.operation match
+                    Shape(p) -> primitive_name(p)
+                    Group -> "Group"
+
+                column([text(name).font_size(16.0),
+                        text(s"${size.x.round()} x ${size.y.round()} x ${size.z.round()} mm").font_size(12.0)], 4)
+            None -> text("Nothing selected").font_size(12.0)
+    end selection_panel
+end Workspace
+
+new_workspace() -> &Workspace =
+    Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, false)

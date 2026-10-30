@@ -2,7 +2,8 @@ module sh.sysl.tekton.camera
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.space.{Mat4, Ray, Vec3, vec3}
-import sysl.math.clamp
+import sh.sysl.tekton.document.Document
+import sysl.math.{clamp, max, min}
 
 // A camera orbiting a point near the ground.
 //
@@ -28,6 +29,12 @@ const ORBIT_RATE: real = 0.008
 
 // How much one point of wheel changes the distance, as a power of e.
 const ZOOM_RATE: real = 0.002
+
+// How much room `frame` leaves around what it frames, as a multiple of its size.
+const FRAME_MARGIN: real = 1.05
+
+// The shape of the view a new shape's visibility is judged in. A placement has no viewport to ask.
+const ASSUMED_ASPECT: real = 1.5
 
 struct Camera
     target: Vec3
@@ -66,6 +73,39 @@ struct Camera
     // Move toward the view's centre, or away, by a turn of the wheel in points. Positive is toward.
     zoom(&self, amount: real) =
         self.distance = clamp(self.distance * (-amount * ZOOM_RATE).exp(), MIN_DISTANCE, MAX_DISTANCE)
+
+    // Look at everything in the document, from far enough back that it all fits.
+    frame(&self, doc: &Document)
+        val items = doc.items()
+
+        if items.len == 0 then return
+
+        var low = doc.bounds_of(items[0]).min
+        var high = doc.bounds_of(items[0]).max
+
+        for item in items
+            val b = doc.bounds_of(item)
+
+            low = Vec3(min(low.x, b.min.x), min(low.y, b.min.y), min(low.z, b.min.z))
+            high = Vec3(max(high.x, b.max.x), max(high.y, b.max.y), max(high.z, b.max.z))
+
+        val across = (high - low).length()
+
+        self.target = (low + high) * 0.5
+        self.distance = clamp(across * FRAME_MARGIN / (self.fov * 0.5).tan() * 0.5, MIN_DISTANCE, MAX_DISTANCE)
+    end frame
+
+    // Frame the document, if the last shape placed has landed outside what is in view at this aspect.
+    frame_if_out_of_view(&self, doc: &Document)
+        val items = doc.items()
+
+        if items.len == 0 then return
+
+        val centre = doc.bounds_of(items[items.len - 1]).center()
+        val (clip, w) = self.view_projection(ASSUMED_ASPECT).apply(centre)
+
+        if w <= 0.0 || (clip.x / w).abs() > 0.9 || (clip.y / w).abs() > 0.9 then self.frame(doc)
+    end frame_if_out_of_view
 
     // Half the view's height, in world units, at the target's depth.
     private half_height(&self) -> real = self.distance * (self.fov * 0.5).tan()
@@ -111,4 +151,4 @@ struct Camera
 end Camera
 
 // The view a new document opens on: from the front and to the right, looking down a little.
-new_camera() -> &Camera = Camera(Vec3(0.0, 0.0, 8.0), 0.65, 0.5, 150.0, 0.7)
+new_camera() -> &Camera = Camera(Vec3(0.0, 0.0, 8.0), 0.3, 0.5, 150.0, 0.7)

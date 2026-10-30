@@ -1,0 +1,231 @@
+module sh.sysl.tekton.renderer
+
+import sh.sysl.sdl3.{GpuBuffer, GpuCommandBuffer, GpuCopyPass, GpuDevice, GpuPipeline, GpuRenderPass, GpuTexture, color_target_clear,
+                     depth_target_clear, vertex_attribute, vertex_buffer, GPU_BUFFERUSAGE_INDEX,
+                     GPU_BUFFERUSAGE_VERTEX, GPU_COMPAREOP_LESS, GPU_CULLMODE_BACK, GPU_CULLMODE_FRONT,
+                     GPU_INDEXELEMENTSIZE_32BIT, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT,
+                     GPU_SHADERSTAGE_VERTEX, GPU_TRANSFERBUFFERUSAGE_UPLOAD, GPU_VERTEXELEMENTFORMAT_FLOAT3}
+import sh.sysl.tekton.camera.Camera
+import sh.sysl.tekton.document.{Document, FLOATS_PER_VERTEX, Mesh}
+import sh.sysl.tekton.space.Vec3
+import sysl.buf.{Buf, buf}
+import sysl.raw.ptr_cast
+import sysl.slices.as_ptr
+
+// Draws a document through a camera, into whichever colour and depth targets it is handed.
+//
+// **It knows nothing of an interface**, so a test can hand it a device and two textures with no window at
+// all. A mesh reaches the GPU once and stays there until its node's mesh has a new revision.
+
+// The colour of what is not the ground, which the ground also fades into.
+const BACKGROUND_R: f32 = 0.868
+const BACKGROUND_G: f32 = 0.888
+const BACKGROUND_B: f32 = 0.915
+
+// The light: from behind the viewer's left shoulder, as the view opens, and well above.
+const LIGHT_X: real = 0.05
+const LIGHT_Y: real = -0.60
+const LIGHT_Z: real = 0.80
+
+// How wide the selection's outline is, in points.
+const OUTLINE_POINTS: f32 = 2.0
+
+// The colours shapes are given, in turn. None of them is the blue of the selection.
+val SHAPE_COLORS: [][3]f32 = [
+    [0.90, 0.42, 0.31],
+    [0.91, 0.74, 0.36],
+    [0.49, 0.71, 0.50],
+    [0.64, 0.45, 0.68],
+    [0.36, 0.67, 0.65],
+    [0.80, 0.53, 0.40],
+]
+
+const SELECTED_R: f32 = 0.04
+const SELECTED_G: f32 = 0.48
+const SELECTED_B: f32 = 1.0
+
+// Laid out as the shaders' `Uniforms`.
+private struct Uniforms
+    view_projection: [16]f32
+    eye: [4]f32
+    light: [4]f32
+    color: [4]f32
+    ground: [4]f32
+    size: [4]f32
+
+// A mesh's buffers on the GPU, and the revision of the mesh they hold.
+struct GpuMesh
+    id: int
+    revision: int
+    vertices: &GpuBuffer
+    indices: &GpuBuffer
+    index_count: u32
+
+struct Pipelines
+    ground: &GpuPipeline
+    shadow: &GpuPipeline
+    surface: &GpuPipeline
+    outline: &GpuPipeline
+
+struct Renderer
+    pipelines: Option[Pipelines]
+    meshes: Buf[&GpuMesh]
+
+    // How many times a mesh has gone to the GPU, so a test can see a revision saving the trip.
+    uploads: int
+
+    // Everything in the document, as this camera sees it. Records into `cmd` and leaves it open.
+    draw(&self, device: &GpuDevice, cmd: GpuCommandBuffer, color: &GpuTexture, depth: &GpuTexture, depth_format: i32,
+         color_format: i32, doc: &Document, camera: &Camera, width: real, height: real, scale: real)
+        val p = self.pipelines match
+            Some(have) -> have
+            None ->
+                val made = make_pipelines(device, color_format, depth_format)
+
+                self.pipelines = Some(made)
+                made
+
+        self.upload(device, cmd, doc)
+
+        val pass = cmd.render_pass_depth([color_target_clear(color, BACKGROUND_R, BACKGROUND_G, BACKGROUND_B, 1.0)],
+                                         depth_target_clear(depth, 1.0)).expect("a render pass")
+        val eye = camera.eye()
+        val reach = camera.distance * 5.0 + 600.0
+        var u = Uniforms(camera.view_projection(width / height).floats(),
+                         [f32(eye.x), f32(eye.y), f32(eye.z), 0.0],
+                         [f32(LIGHT_X), f32(LIGHT_Y), f32(LIGHT_Z), 0.0],
+                         [BACKGROUND_R, BACKGROUND_G, BACKGROUND_B, 1.0],
+                         [f32(camera.target.x), f32(camera.target.y), 0.0, f32(reach)],
+                         [f32(width), f32(height), OUTLINE_POINTS * f32(scale), 0.0])
+
+        push(cmd, &u)
+        pass.bind_pipeline(p.ground)
+        pass.draw(6)
+
+        // Faces toward the light land on the ground once each, so nothing is darkened twice.
+        u.color = [0.20, 0.25, 0.36, 0.22]
+        push(cmd, &u)
+        pass.bind_pipeline(p.shadow)
+
+        for m in self.meshes.view() do draw_mesh(pass, m)
+
+        pass.bind_pipeline(p.surface)
+
+        for m in self.meshes.view()
+            val base = shape_color(doc, m.id)
+            val lift: f32 = if doc.selected == Some(m.id) then 0.14 else 0.0
+
+            u.color = [base[0] + (1.0 - base[0]) * lift, base[1] + (1.0 - base[1]) * lift,
+                       base[2] + (1.0 - base[2]) * lift, 1.0]
+            push(cmd, &u)
+            draw_mesh(pass, m)
+
+        doc.selected match
+            Some(id) ->
+                for m in self.meshes.view()
+                    if m.id == id
+                        u.color = [SELECTED_R, SELECTED_G, SELECTED_B, 1.0]
+                        push(cmd, &u)
+                        pass.bind_pipeline(p.outline)
+                        draw_mesh(pass, m)
+            None -> ()
+
+        pass.finish()
+    end draw
+
+    // Bring the GPU's copies up to the document: a new revision goes up, an unchanged one stays, and one
+    // whose node has gone is let go.
+    private upload(&self, device: &GpuDevice, cmd: GpuCommandBuffer, doc: &Document)
+        var kept: Buf[&GpuMesh] = buf()
+        var copy: Option[GpuCopyPass] = None
+
+        for item in doc.items()
+            val mesh = doc.mesh_of(item)
+            var have: Option[&GpuMesh] = None
+
+            for m in self.meshes.view()
+                if m.id == item.id && m.revision == mesh.revision then have = Some(m)
+
+            have match
+                Some(m) -> kept.push(m)
+                None ->
+                    val pass = copy match
+                        Some(open) -> open
+                        None ->
+                            val opened = cmd.copy_pass().expect("a copy pass")
+
+                            copy = Some(opened)
+                            opened
+
+                    kept.push(upload_mesh(device, pass, item.id, mesh))
+                    self.uploads += 1
+
+        copy match
+            Some(open) -> open.finish()
+            None -> ()
+
+        self.meshes = kept
+    end upload
+end Renderer
+
+new_renderer() -> &Renderer = Renderer(None, buf(), 0)
+
+// The colour a node is drawn in.
+private shape_color(doc: &Document, id: int) -> [3]f32 =
+    doc.find(id) match
+        Some(node) -> SHAPE_COLORS[node.tint % int(SHAPE_COLORS.len)]
+        None -> SHAPE_COLORS[0]
+
+private draw_mesh(pass: GpuRenderPass, m: &GpuMesh)
+    pass.bind_vertex_buffer(0, m.vertices)
+    pass.bind_index_buffer(m.indices, GPU_INDEXELEMENTSIZE_32BIT)
+    pass.draw_indexed(m.index_count)
+
+private push(cmd: GpuCommandBuffer, u: *Uniforms)
+    cmd.push_vertex_uniforms(0, ptr_cast(u), u32(sizeof(Uniforms)))
+    cmd.push_fragment_uniforms(0, ptr_cast(u), u32(sizeof(Uniforms)))
+
+private upload_mesh(device: &GpuDevice, pass: GpuCopyPass, id: int, mesh: &Mesh) -> &GpuMesh
+    val vertices = upload_slice(device, pass, GPU_BUFFERUSAGE_VERTEX, mesh.vertices.view())
+    val indices = upload_slice(device, pass, GPU_BUFFERUSAGE_INDEX, mesh.indices.view())
+
+    GpuMesh(id, mesh.revision, vertices, indices, u32(mesh.indices.len()))
+end upload_mesh
+
+private upload_slice[T](device: &GpuDevice, pass: GpuCopyPass, usage: u32, data: []const T) -> &GpuBuffer
+    val size = u32(data.len * sizeof(T))
+    val buffer = device.buffer(usage, size).expect("a mesh's buffer")
+    val staging = device.transfer_buffer(GPU_TRANSFERBUFFERUSAGE_UPLOAD, size).expect("a staging buffer")
+    val to: *T = ptr_cast(staging.map())
+
+    for i in 0..<data.len do to[i] = data[i]
+
+    staging.unmap()
+    pass.upload_buffer(staging, buffer, size)
+    buffer
+end upload_slice
+
+private make_pipelines(dev: &GpuDevice, color_format: i32, depth_format: i32) -> Pipelines
+    val stride = u32(FLOATS_PER_VERTEX * sizeof(f32))
+    val buffers = [vertex_buffer(0, stride)]
+    val attributes = [vertex_attribute(0, 0, GPU_VERTEXELEMENTFORMAT_FLOAT3, 0),
+                      vertex_attribute(1, 0, GPU_VERTEXELEMENTFORMAT_FLOAT3, 12)]
+    val shape = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_VERTEX, "surface_vertex", uniform_buffers = 1).expect("the surface's vertex shader")
+    val shaded = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT, "surface_fragment", uniform_buffers = 1).expect("the surface's fragment shader")
+    val flat = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT, "flat_fragment", uniform_buffers = 1).expect("the flat fragment shader")
+    val outline = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_VERTEX, "outline_vertex", uniform_buffers = 1).expect("the outline's vertex shader")
+    val shadow = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_VERTEX, "shadow_vertex", uniform_buffers = 1).expect("the shadow's vertex shader")
+    val ground = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_VERTEX, "ground_vertex", uniform_buffers = 1).expect("the ground's vertex shader")
+    val plane = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT, "ground_fragment", uniform_buffers = 1).expect("the ground's fragment shader")
+
+    Pipelines(
+        ground = dev.pipeline(ground, plane, [], [], color_format, depth_format = depth_format, depth_test = false,
+                              depth_write = false).expect("the ground's pipeline"),
+        shadow = dev.pipeline(shadow, flat, buffers, attributes, color_format, depth_format = depth_format,
+                              cull = GPU_CULLMODE_BACK, blend = true).expect("the shadow's pipeline"),
+        surface = dev.pipeline(shape, shaded, buffers, attributes, color_format, depth_format = depth_format,
+                               cull = GPU_CULLMODE_BACK).expect("the surface's pipeline"),
+        outline = dev.pipeline(outline, flat, buffers, attributes, color_format, depth_format = depth_format,
+                               cull = GPU_CULLMODE_FRONT).expect("the outline's pipeline"),
+    )
+end make_pipelines
