@@ -49,6 +49,9 @@ Everything runs without a window, so a test or an agent can use the application 
   `shot <file>`, `wait` and `state`, which prints the document, selection and camera as text. Input
   feeds the same event path a real window does, so a click that misses a handle misses here too. A
   script is a file of the same commands. Without the flag, nothing listens.
+  **A person can watch it happen.** Control runs in a real window by default, and offscreen only when
+  asked. Controlled input draws a visible pointer and press marker, and a drag moves across the screen
+  at a watchable pace rather than jumping to its end.
 - **Screenshots are real frames**: the same GPU pass and interface, read back into a PNG. Pixel
   assertions run against a fixed camera and size.
 
