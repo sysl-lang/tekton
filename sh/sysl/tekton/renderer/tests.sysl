@@ -6,7 +6,10 @@ import sh.sysl.sdl3.{GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNO
                      GPU_SHADERFORMAT_MSL, GpuDevice, gpu_device, init, INIT_VIDEO}
 import sysl.buf.{Buf, buf}
 import sh.sysl.tekton.camera.new_camera
-import sh.sysl.tekton.document.{Document, Primitive, moved_to, new_document}
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.document.{Document, Primitive, Transform, moved_to, new_document}
+import sh.sysl.tekton.handles.Stroke
+import sh.sysl.tekton.space.Vec3
 import sysl.process
 
 // Real pixels from a real device, with no window: the shaders compile, the projection lands where a click
@@ -31,14 +34,14 @@ private device() -> &GpuDevice
     gpu_device(GPU_SHADERFORMAT_MSL).unwrap()
 
 // A frame of this document, as bytes of RGBA, drawn by this renderer on the device that made it.
-private frame(dev: &GpuDevice, r: &Renderer, doc: &Document) -> Buf[u8]
+private frame(dev: &GpuDevice, r: &Renderer, doc: &Document, strokes: []Stroke = []) -> Buf[u8]
     val color = dev.texture(GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, GPU_TEXTUREUSAGE_COLOR_TARGET, SIZE, SIZE).unwrap()
     val depth = dev.texture(GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, SIZE, SIZE).unwrap()
     val readback = dev.transfer_buffer(GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, SIZE * SIZE * 4).unwrap()
     val cmd = dev.command_buffer().unwrap()
 
     r.draw(dev, cmd, color, depth, GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, doc, new_camera(),
-           real(SIZE), real(SIZE), 1.0)
+           real(SIZE), real(SIZE), 1.0, strokes)
 
     val out = cmd.copy_pass().unwrap()
 
@@ -106,6 +109,70 @@ a_mesh_goes_to_the_gpu_once_until_its_revision_changes()
     frame(dev, r, doc)
     assert_eq(r.uploads, 1, "the second, nothing")
 
-    doc.set_transform(a, moved_to(sh.sysl.tekton.space.Vec3(30.0, 0.0, 0.0)))
+    doc.set_transform(a, moved_to(Vec3(30.0, 0.0, 0.0)))
     frame(dev, r, doc)
-    assert_eq(r.uploads, 2, "an edit, once more")
+    assert_eq(r.uploads, 1, "a move, nothing: the same triangles under a new matrix")
+
+    doc.add_shape(Primitive.Sphere)
+    frame(dev, r, doc)
+    assert_eq(r.uploads, 2, "a new shape, once more")
+
+private warm_at(p: Buf[u8], x: real, y: real) -> bool
+    val at = (usize(y) * usize(SIZE) + usize(x)) * 4
+
+    p[at] > p[at + 2]
+
+// The picture has to follow the transform with no new mesh, for all three things a transform does.
+@test
+a_shape_is_drawn_where_its_transform_puts_it()
+    if !can_use_gpu("a_shape_is_drawn_where_its_transform_puts_it") then return
+
+    val dev = device()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val r = new_renderer()
+    val camera = new_camera()
+    val size = real(SIZE)
+    val (x0, y0) = camera.project(Vec3(0.0, 0.0, 10.0), size, size).unwrap()
+
+    assert(warm_at(frame(dev, r, doc), x0, y0), "first where it starts")
+
+    doc.set_transform(a, moved_to(Vec3(25.0, 0.0, 0.0)))
+
+    val moved = frame(dev, r, doc)
+    val (x1, y1) = camera.project(Vec3(25.0, 0.0, 10.0), size, size).unwrap()
+
+    assert(warm_at(moved, x1, y1), "then where it moved to")
+    assert(!warm_at(moved, x0, y0), "and no longer where it was")
+
+    // Stretched along y and turned a quarter about z, its long side lies along x.
+    doc.set_transform(a, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.from_axis_angle([0.0, 0.0, 1.0], 1.5708), Vec3(1.0, 2.5, 1.0)))
+
+    val (x2, y2) = camera.project(Vec3(22.0, 0.0, 10.0), size, size).unwrap()
+
+    assert(warm_at(frame(dev, r, doc), x2, y2), "and it reaches there when stretched and turned")
+
+// A selected shape hidden behind another still shows its handles, because the strokes test no depth.
+@test
+handles_show_through_a_shape_standing_in_front()
+    if !can_use_gpu("handles_show_through_a_shape_standing_in_front") then return
+
+    val dev = device()
+    val doc = new_document()
+    val camera = new_camera()
+    val size = real(SIZE)
+    val hidden = doc.add_shape(Primitive.Box)
+    val front = doc.add_shape(Primitive.Box)
+
+    // Between the camera and the first, and much bigger, so it hides it entirely.
+    val toward = camera.forward() * -40.0
+
+    doc.set_transform(front, Transform(Vec3(toward.x, toward.y, 0.0), Quaternion.identity(), Vec3(3.0, 3.0, 3.0)))
+    doc.select(Some(hidden))
+
+    val (x, y) = camera.project(Vec3(0.0, 0.0, 20.0), size, size).unwrap()
+    val p = frame(dev, new_renderer(), doc, [Stroke(x, y, x, y, 6.0, [0.0, 1.0, 0.0, 1.0])])
+    val at = (usize(y) * usize(SIZE) + usize(x)) * 4
+
+    assert(p[at + 1] > 240 && p[at] < 20 && p[at + 2] < 20, "the stroke's colour, in front of everything")
+    assert(warm_at(frame(dev, new_renderer(), doc), x, y), "and without it, the shape that hides it")

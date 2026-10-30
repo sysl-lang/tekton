@@ -6,7 +6,8 @@ import sh.sysl.sdl3.{GpuBuffer, GpuCommandBuffer, GpuCopyPass, GpuDevice, GpuPip
                      GPU_INDEXELEMENTSIZE_32BIT, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT,
                      GPU_SHADERSTAGE_VERTEX, GPU_TRANSFERBUFFERUSAGE_UPLOAD, GPU_VERTEXELEMENTFORMAT_FLOAT3}
 import sh.sysl.tekton.camera.Camera
-import sh.sysl.tekton.document.{Document, FLOATS_PER_VERTEX, Mesh}
+import sh.sysl.tekton.document.{Document, FLOATS_PER_VERTEX, Mesh, identity_transform}
+import sh.sysl.tekton.handles.Stroke
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf}
 import sysl.raw.ptr_cast
@@ -47,10 +48,18 @@ const SELECTED_B: f32 = 1.0
 // Laid out as the shaders' `Uniforms`.
 private struct Uniforms
     view_projection: [16]f32
+    model: [16]f32
+    normals: [16]f32
     eye: [4]f32
     light: [4]f32
     color: [4]f32
     ground: [4]f32
+    size: [4]f32
+
+// Laid out as the shaders' `StrokeUniforms`.
+private struct StrokeUniforms
+    ends: [4]f32
+    color: [4]f32
     size: [4]f32
 
 // A mesh's buffers on the GPU, and the revision of the mesh they hold.
@@ -66,6 +75,7 @@ struct Pipelines
     shadow: &GpuPipeline
     surface: &GpuPipeline
     outline: &GpuPipeline
+    stroke: &GpuPipeline
 
 struct Renderer
     pipelines: Option[Pipelines]
@@ -74,9 +84,11 @@ struct Renderer
     // How many times a mesh has gone to the GPU, so a test can see a revision saving the trip.
     uploads: int
 
-    // Everything in the document, as this camera sees it. Records into `cmd` and leaves it open.
+    // Everything in the document, as this camera sees it, then these strokes over it, whose points are
+    // `scale` pixels each. Records into `cmd` and leaves it open.
     draw(&self, device: &GpuDevice, cmd: GpuCommandBuffer, color: &GpuTexture, depth: &GpuTexture, depth_format: i32,
-         color_format: i32, doc: &Document, camera: &Camera, width: real, height: real, scale: real)
+         color_format: i32, doc: &Document, camera: &Camera, width: real, height: real, scale: real,
+         strokes: []Stroke = [])
         val p = self.pipelines match
             Some(have) -> have
             None ->
@@ -91,7 +103,9 @@ struct Renderer
                                          depth_target_clear(depth, 1.0)).expect("a render pass")
         val eye = camera.eye()
         val reach = camera.distance * 5.0 + 600.0
-        var u = Uniforms(camera.view_projection(width / height).floats(),
+        val unmoved = identity_transform()
+        var u = Uniforms(camera.view_projection(width / height).floats(), unmoved.matrix().floats(),
+                         unmoved.normal_matrix().floats(),
                          [f32(eye.x), f32(eye.y), f32(eye.z), 0.0],
                          [f32(LIGHT_X), f32(LIGHT_Y), f32(LIGHT_Z), 0.0],
                          [BACKGROUND_R, BACKGROUND_G, BACKGROUND_B, 1.0],
@@ -104,10 +118,12 @@ struct Renderer
 
         // Faces toward the light land on the ground once each, so nothing is darkened twice.
         u.color = [0.20, 0.25, 0.36, 0.22]
-        push(cmd, &u)
         pass.bind_pipeline(p.shadow)
 
-        for m in self.meshes.view() do draw_mesh(pass, m)
+        for m in self.meshes.view()
+            place(&u, doc, m.id)
+            push(cmd, &u)
+            draw_mesh(pass, m)
 
         pass.bind_pipeline(p.surface)
 
@@ -117,6 +133,7 @@ struct Renderer
 
             u.color = [base[0] + (1.0 - base[0]) * lift, base[1] + (1.0 - base[1]) * lift,
                        base[2] + (1.0 - base[2]) * lift, 1.0]
+            place(&u, doc, m.id)
             push(cmd, &u)
             draw_mesh(pass, m)
 
@@ -125,10 +142,22 @@ struct Renderer
                 for m in self.meshes.view()
                     if m.id == id
                         u.color = [SELECTED_R, SELECTED_G, SELECTED_B, 1.0]
+                        place(&u, doc, m.id)
                         push(cmd, &u)
                         pass.bind_pipeline(p.outline)
                         draw_mesh(pass, m)
             None -> ()
+
+        if strokes.len > 0
+            pass.bind_pipeline(p.stroke)
+
+            for s in strokes
+                var mark = StrokeUniforms([f32(s.ax * scale), f32(s.ay * scale), f32(s.bx * scale), f32(s.by * scale)],
+                                          s.color, [f32(width), f32(height), f32(s.radius * scale), 0.0])
+
+                cmd.push_vertex_uniforms(0, ptr_cast(&mark), u32(sizeof(StrokeUniforms)))
+                cmd.push_fragment_uniforms(0, ptr_cast(&mark), u32(sizeof(StrokeUniforms)))
+                pass.draw(6)
 
         pass.finish()
     end draw
@@ -169,6 +198,14 @@ struct Renderer
 end Renderer
 
 new_renderer() -> &Renderer = Renderer(None, buf(), 0)
+
+// Put a node's transform in the uniforms.
+private place(u: *Uniforms, doc: &Document, id: int)
+    doc.find(id) match
+        Some(node) ->
+            u.model = node.transform.matrix().floats()
+            u.normals = node.transform.normal_matrix().floats()
+        None -> ()
 
 // The colour a node is drawn in.
 private shape_color(doc: &Document, id: int) -> [3]f32 =
@@ -217,6 +254,8 @@ private make_pipelines(dev: &GpuDevice, color_format: i32, depth_format: i32) ->
     val shadow = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_VERTEX, "shadow_vertex", uniform_buffers = 1).expect("the shadow's vertex shader")
     val ground = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_VERTEX, "ground_vertex", uniform_buffers = 1).expect("the ground's vertex shader")
     val plane = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT, "ground_fragment", uniform_buffers = 1).expect("the ground's fragment shader")
+    val mark = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_VERTEX, "stroke_vertex", uniform_buffers = 1).expect("the strokes' vertex shader")
+    val ink = dev.shader(SHADERS, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT, "stroke_fragment", uniform_buffers = 1).expect("the strokes' fragment shader")
 
     Pipelines(
         ground = dev.pipeline(ground, plane, [], [], color_format, depth_format = depth_format, depth_test = false,
@@ -227,5 +266,7 @@ private make_pipelines(dev: &GpuDevice, color_format: i32, depth_format: i32) ->
                                cull = GPU_CULLMODE_BACK).expect("the surface's pipeline"),
         outline = dev.pipeline(outline, flat, buffers, attributes, color_format, depth_format = depth_format,
                                cull = GPU_CULLMODE_FRONT).expect("the outline's pipeline"),
+        stroke = dev.pipeline(mark, ink, [], [], color_format, depth_format = depth_format, depth_test = false,
+                              depth_write = false, blend = true).expect("the strokes' pipeline"),
     )
 end make_pipelines

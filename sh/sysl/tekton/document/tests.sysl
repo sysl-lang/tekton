@@ -1,7 +1,8 @@
 module sh.sysl.tekton.document
 @tests
 
-import sh.sysl.tekton.space.Vec3
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.{Aabb, Vec3}
 import sysl.math.pi
 
 private near(a: real, b: real, tolerance: real) -> bool = (a - b).abs() <= tolerance
@@ -142,7 +143,7 @@ an_untouched_nodes_mesh_is_not_computed_again()
 
     doc.set_transform(a, moved_to(Vec3(100.0, 0.0, 0.0)))
     doc.mesh_of(a_node)
-    assert_eq(doc.builds, before + 1, "the edited node, once")
+    assert_eq(doc.builds, before, "a move computes no triangles")
     assert_eq(doc.mesh_of(b_node).revision, b_mesh.revision, "and its neighbour is the same mesh")
 
 // The walk to the edited node passes every sibling before it, which is where a careless one clears too much.
@@ -163,18 +164,137 @@ an_edit_leaves_the_siblings_on_both_sides_of_it_alone()
 
     for item in doc.items() do doc.mesh_of(item)
 
-    assert_eq(doc.builds, before + 1, "and only the edited one is computed")
+    assert_eq(doc.builds, before, "and nothing is computed, the edited one included")
 
 @test
-a_new_revision_tells_a_renderer_the_mesh_changed()
+a_new_transform_keeps_the_mesh_and_moves_its_bounds()
     val doc = new_document()
     val a = doc.add_shape(Primitive.Box)
     val node = doc.find(a).unwrap()
     val first = doc.mesh_of(node).revision
 
+    doc.bounds_of(node)
     doc.set_transform(a, moved_to(Vec3(100.0, 0.0, 0.0)))
-    assert(doc.mesh_of(node).revision != first, "an edit made a new mesh")
-    assert(near(doc.mesh_of(node).bounds.center().x, 100.0, 1.0e-4), "and it is where the edit put it")
+    assert_eq(doc.mesh_of(node).revision, first, "the same triangles")
+    assert(near(doc.mesh_of(node).bounds.center().x, 0.0, 1.0e-4), "in the node's own space")
+    assert(near(doc.bounds_of(node).center().x, 100.0, 1.0e-4), "and the box is where the edit put it")
+
+@test
+a_nodes_own_mesh_is_kept_by_every_transform_and_its_parents_are_not()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val node = doc.find(a).unwrap()
+
+    doc.solid_of(doc.root)
+    doc.mesh_of(doc.root)
+    doc.mesh_of(node)
+    doc.set_transform(a, Transform(Vec3(1.0, 2.0, 3.0), Quaternion.from_axis_angle([0.0, 0.0, 1.0], 1.0), Vec3(2.0, 2.0, 2.0)))
+    assert(node.mesh.is_some() && node.local.is_some(), "its own triangles and solid stay")
+    assert(node.solid.is_none(), "its solid in its parent's space does not")
+    assert(doc.root.mesh.is_none() && doc.root.local.is_none(), "and nor does what its parent joined")
+
+// **The kernel is the oracle for the matrix.** What a renderer draws and a click tests comes from `Transform`;
+// what a group joins and a file exports comes from the kernel. They have to be the same shape.
+@test
+the_box_from_the_transform_is_the_box_the_kernel_makes()
+    for p in PRIMITIVES
+        val doc = new_document()
+        val id = doc.add_shape(p)
+        val node = doc.find(id).unwrap()
+
+        doc.set_transform(id, Transform(Vec3(12.0, -7.0, 30.0), Quaternion.from_axis_angle(Vec3(1.0, 2.0, 3.0).unit().array(), 0.8), Vec3(1.5, 0.5, 2.5)))
+
+        val ours = doc.bounds_of(node)
+        val box = doc.solid_of(node).bounding_box()
+        val theirs = Aabb(Vec3(box.min().x, box.min().y, box.min().z), Vec3(box.max().x, box.max().y, box.max().z))
+
+        assert((ours.min - theirs.min).length() < 1.0e-3 && (ours.max - theirs.max).length() < 1.0e-3, "the same box")
+
+@test
+a_point_goes_through_a_transform_and_comes_back()
+    val t = Transform(Vec3(12.0, -7.0, 30.0), Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.8), Vec3(1.5, 0.5, 2.5))
+    val p = Vec3(3.0, -4.0, 5.0)
+
+    assert((t.unapply(t.apply(p)) - p).length() < 1.0e-9, "there and back")
+
+    val m = t.matrix().apply(p).0
+
+    assert((m - t.apply(p)).length() < 1.0e-9, "and the matrix agrees")
+
+// A face of a stretched box: its normal must stay square to it, which the rotation alone would not do on a slope.
+@test
+a_normal_stays_square_to_a_stretched_face()
+    val t = Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(4.0, 1.0, 1.0))
+    val along_face = t.matrix().apply(Vec3(1.0, -1.0, 0.0)).0
+    val normal = t.normal_matrix().apply(Vec3(1.0, 1.0, 0.0)).0
+
+    assert(near(along_face.dot(normal), 0.0, 1.0e-9), "square")
+
+// ## The commands
+
+@test
+a_transform_nothing_could_draw_is_refused()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val q: Quaternion[real] = Quaternion.identity()
+    val good = Vec3(1.0, 1.0, 1.0)
+
+    doc.set_transform(a, moved_to(Vec3(5.0, 0.0, 0.0)))
+
+    for bad in [Transform(Vec3(real.nan(), 0.0, 0.0), q, good),
+                Transform(Vec3(real.infinity(), 0.0, 0.0), q, good),
+                Transform(good, q, Vec3(0.0, 1.0, 1.0)),
+                Transform(good, q, Vec3(-1.0, 1.0, 1.0)),
+                Transform(good, q, Vec3(1.0, real.nan(), 1.0)),
+                Transform(good, Quaternion.nan(), good)]
+        doc.set_transform(a, bad)
+        assert(near(doc.find(a).unwrap().transform.translation.x, 5.0, 0.0), "the old one stays")
+
+@test
+a_position_past_the_limit_or_not_a_number_is_refused()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+
+    assert(doc.move_to(a, Vec3(7.0, 8.0, 9.0)).is_ok(), "in range")
+
+    for bad in [Vec3(POSITION_LIMIT + 1.0, 0.0, 0.0), Vec3(0.0, -POSITION_LIMIT - 1.0, 0.0), Vec3(0.0, 0.0, real.nan()), Vec3(real.infinity(), 0.0, 0.0)]
+        assert(doc.move_to(a, bad).is_err(), "refused")
+        assert(doc.find(a).unwrap().transform.translation == Vec3(7.0, 8.0, 9.0), "and kept")
+
+    assert(doc.move_to(99, Vec3(0.0, 0.0, 0.0)).is_err(), "and no such shape")
+
+@test
+a_size_past_either_limit_is_refused_and_one_inside_them_is_exact()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Cylinder)
+    val node = doc.find(a).unwrap()
+    val before = doc.builds
+
+    doc.mesh_of(node)
+
+    val meshed = doc.builds
+
+    assert(doc.resize_to(a, Vec3(30.0, 10.0, 45.0)).is_ok(), "in range")
+    assert((doc.size_of(node) - Vec3(30.0, 10.0, 45.0)).length() < 1.0e-3, "those sides")
+    assert_eq(doc.builds, meshed, "without the kernel")
+    assert(before <= meshed, "the mesh having been made once")
+
+    for bad in [Vec3(0.0, 10.0, 10.0), Vec3(MIN_SIZE - 0.01, 10.0, 10.0), Vec3(10.0, -5.0, 10.0), Vec3(10.0, 10.0, MAX_SIZE + 1.0), Vec3(10.0, real.nan(), 10.0)]
+        assert(doc.resize_to(a, bad).is_err(), "refused")
+        assert((doc.size_of(node) - Vec3(30.0, 10.0, 45.0)).length() < 1.0e-3, "and kept")
+
+    assert(doc.resize_to(a, Vec3(MIN_SIZE, MIN_SIZE, MAX_SIZE)).is_ok(), "the limits themselves are allowed")
+
+@test
+a_rotation_turns_a_shape_about_its_middle()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val node = doc.find(a).unwrap()
+    val middle = doc.bounds_of(node).center()
+
+    assert(doc.rotate_to(a, Quaternion.from_axis_angle([1.0, 0.0, 0.0], 1.0)).is_ok(), "a turn")
+    assert((doc.bounds_of(node).center() - middle).length() < 1.0e-4, "the middle stayed")
+    assert(doc.rotate_to(a, Quaternion.nan()).is_err(), "and no number is refused")
 
 @test
 an_edit_recomputes_only_the_path_from_the_node_to_the_root()
@@ -189,21 +309,21 @@ an_edit_recomputes_only_the_path_from_the_node_to_the_root()
 
     doc.set_transform(a, moved_to(Vec3(0.0, 100.0, 0.0)))
     doc.solid_of(doc.root)
-    assert_eq(doc.builds, before + 2, "the edited node and the root; not the other shape")
+    assert_eq(doc.builds, before + 3, "the edited node placed, and the root joined and placed; not the other shape")
     assert(doc.find(b).unwrap().solid.is_some(), "whose cache was left alone")
 
 @test
 a_transform_rotates_and_scales_what_the_kernel_makes()
     val doc = new_document()
     val a = doc.add_shape(Primitive.Box)
-    val half_turn = sh.sysl.quaternion.Quaternion.from_axis_angle([1.0, 0.0, 0.0], pi/ 2.0)
+    val half_turn = Quaternion.from_axis_angle([1.0, 0.0, 0.0], pi/ 2.0)
 
     doc.set_transform(a, Transform(Vec3(0.0, 0.0, 0.0), half_turn, Vec3(1.0, 2.0, 1.0)))
 
-    val mesh = doc.mesh_of(doc.find(a).unwrap())
+    val node = doc.find(a).unwrap()
 
-    assert(near(mesh.volume(), 16000.0, 1.0e-2), "scaling doubled the volume")
-    assert(near(mesh.bounds.size().z, 40.0, 1.0e-3), "and the long y axis was turned to z")
+    assert(near(doc.solid_of(node).volume(), 16000.0, 1.0e-2), "scaling doubled the volume")
+    assert(near(doc.bounds_of(node).size().z, 40.0, 1.0e-3), "and the long y axis was turned to z")
 
 @test
 selecting_an_id_that_was_edited_keeps_it()

@@ -56,18 +56,32 @@ private ray_triangle(ray: Ray, a: Vec3, b: Vec3, c: Vec3) -> Option[real]
     if t > 0.0 then Some(t) else None
 end ray_triangle
 
-// The id of the nearest thing on the ground this ray meets, if any.
-pick(doc: &Document, ray: Ray) -> Option[int]
-    var best: Option[int] = None
-    var best_t = real.infinity()
+// What the pointer met: a thing on the ground, and how far along the ray.
+struct Picked
+    id: int
+    distance: real
+
+// The nearest thing on the ground this ray meets, if any. A mesh is in its node's own space, so the ray
+// goes there instead of the triangles coming here; its direction keeps its length there, so a distance
+// along it means the same in both.
+pick_hit(doc: &Document, ray: Ray) -> Option[Picked]
+    var best: Option[Picked] = None
 
     for item in doc.items()
-        ray_mesh(ray, doc.mesh_of(item)) match
-            Some(t) ->
-                if t < best_t
-                    best_t = t
-                    best = Some(item.id)
+        val t = item.transform
+        val local = Ray(t.unapply(ray.origin), t.unmapped(ray.direction))
+
+        ray_mesh(local, doc.mesh_of(item)) match
+            Some(along) ->
+                val nearer = best match
+                    Some(b) -> along < b.distance
+                    None -> true
+
+                if nearer then best = Some(Picked(item.id, along))
             None -> ()
 
     best
-end pick
+end pick_hit
+
+// The id of the nearest thing on the ground this ray meets, if any.
+pick(doc: &Document, ray: Ray) -> Option[int] = pick_hit(doc, ray).map(p -> p.id)

@@ -1,0 +1,344 @@
+module sh.sysl.tekton.handles
+
+import sh.sysl.tekton.camera.Camera
+import sh.sysl.tekton.document.{Document, Node}
+import sh.sysl.tekton.space.{Vec3, vec3}
+import sysl.buf.{Buf, buf}
+import sysl.math.{max, min}
+
+// The handles on the selected shape, as they land on the screen.
+//
+// **Everything here is in viewport points and comes from projecting the shape**, so a handle stays one size
+// however far away the shape is, and what is drawn is exactly what a press is tested against. There is no
+// GPU in it and no interface: a renderer draws the strokes and a test asks `grip_at`.
+//
+// The arrangement: a thin box around the shape, a dot on each corner of its base to resize it, a dot in the
+// middle of its top for its height, an arrow standing above it to raise it, and three curved arrows, one
+// around each axis in that axis's colour, to turn it.
+
+// Radii and lengths, in points.
+const DOT_RADIUS: real = 6.0
+const DOT_RING: real = 2.0
+const LINE_RADIUS: real = 1.75
+const HALO: real = 1.5
+const BOX_RADIUS: real = 0.5
+const ARROW_GAP: real = 16.0
+const ARROW_LENGTH: real = 24.0
+const HEAD_LENGTH: real = 8.0
+const ARC_GAP: real = 26.0
+const ARC_LENGTH: real = 62.0
+
+// How far outside a handle's ink a press still takes it, in points.
+const HIT_SLACK: real = 4.0
+
+// How much bigger the handle under the pointer is drawn.
+const HOT_GROWTH: real = 1.3
+
+// How many pieces an arc is drawn in.
+const ARC_PIECES: int = 14
+
+// How far above the ground, as an angle, the two tilting arcs sit.
+const ARC_ELEVATION: real = 0.7
+
+val WHITE: [4]f32 = [1.0, 1.0, 1.0, 1.0]
+val SELECTION: [4]f32 = [0.04, 0.48, 1.0, 1.0]
+val BOX_LINE: [4]f32 = [0.04, 0.48, 1.0, 0.55]
+val ARROW_INK: [4]f32 = [0.12, 0.16, 0.24, 1.0]
+val AXIS_INK: [3][4]f32 = [[0.86, 0.22, 0.20, 1.0], [0.16, 0.66, 0.30, 1.0], [0.10, 0.40, 0.92, 1.0]]
+
+// A handle: which thing it does when dragged.
+enum Grip derives Eq
+    // The arrow above the shape: up and down, as it is.
+    Raise
+
+    // The dot on top: taller and shorter, along the shape's own up.
+    Stretch
+
+    // A dot on a corner of the base. `x` and `y` are which side of the shape's own axes, as -1 or 1.
+    Corner(x: real, y: real)
+
+    // A curved arrow: a turn about this world axis, 0 for x, 1 for y, 2 for z.
+    Turn(axis: int)
+end Grip
+
+// A line with round ends, or a dot when both ends are one point. It is what a renderer draws.
+struct Stroke
+    ax: real
+    ay: real
+    bx: real
+    by: real
+    radius: real
+    color: [4]f32
+
+    // How far a point is from the ink, negative inside it.
+    distance(self, x: real, y: real) -> real
+        val dx = self.bx - self.ax
+        val dy = self.by - self.ay
+        val across = dx * dx + dy * dy
+        val along = if across > 0.0 then ((x - self.ax) * dx + (y - self.ay) * dy) / across else 0.0
+        val h = max(0.0, min(along, 1.0))
+        val ex = x - (self.ax + dx * h)
+        val ey = y - (self.ay + dy * h)
+
+        (ex * ex + ey * ey).sqrt() - self.radius
+    end distance
+end Stroke
+
+// A handle's strokes, a run of a layout's.
+struct Span
+    grip: Grip
+    first: usize
+    last: usize
+
+// A point on the screen.
+private struct Dot
+    x: real
+    y: real
+
+    plus(self, o: Dot, k: real) -> Dot = Dot(self.x + o.x * k, self.y + o.y * k)
+
+    // The direction from here to there at length one, or `fallback` if they are one place.
+    toward(self, o: Dot, fallback: Dot) -> Dot
+        val dx = o.x - self.x
+        val dy = o.y - self.y
+        val n = (dx * dx + dy * dy).sqrt()
+
+        if n < 1.0e-6 then fallback else Dot(dx / n, dy / n)
+    end toward
+end Dot
+
+private struct Piece
+    a: Dot
+    b: Dot
+
+// What the selection puts on the screen this frame.
+struct Layout
+    strokes: Buf[Stroke]
+    spans: Buf[Span]
+
+    // The handle at a point of the viewport, if any: the one whose ink is nearest, the later drawn on a tie,
+    // so a dot sitting on an arc is the dot.
+    grip_at(&self, x: real, y: real) -> Option[Grip]
+        var best: Option[Grip] = None
+        var nearest = HIT_SLACK
+
+        for span in self.spans.view()
+            for i in span.first..<span.last
+                val d = self.strokes[i].distance(x, y)
+
+                if d <= nearest
+                    nearest = d
+                    best = Some(span.grip)
+
+        best
+    end grip_at
+
+    // A point on a handle's ink, for anything that has to aim at one.
+    spot(&self, grip: Grip) -> Option[(real, real)]
+        for span in self.spans.view()
+            if span.grip == grip
+                val s = self.strokes[span.first]
+
+                return Some(((s.ax + s.bx) * 0.5, (s.ay + s.by) * 0.5))
+
+        None
+    end spot
+
+    private line(&self, a: Dot, b: Dot, radius: real, color: [4]f32) =
+        self.strokes.push(Stroke(a.x, a.y, b.x, b.y, radius, color))
+
+    // One handle's pieces: a white halo under all of them, so it reads on any colour, then their ink.
+    private glyph(&self, grip: Grip, pieces: []Piece, radius: real, color: [4]f32)
+        val first = self.strokes.len()
+
+        for p in pieces do self.line(p.a, p.b, radius + HALO, WHITE)
+        for p in pieces do self.line(p.a, p.b, radius, color)
+
+        self.spans.push(Span(grip, first, self.strokes.len()))
+    end glyph
+
+    // A dot: a coloured ring with a white middle.
+    private dot(&self, grip: Grip, at: Dot, radius: real)
+        val first = self.strokes.len()
+
+        self.line(at, at, radius + HALO, WHITE)
+        self.line(at, at, radius, SELECTION)
+        self.line(at, at, radius - DOT_RING, WHITE)
+        self.spans.push(Span(grip, first, self.strokes.len()))
+    end dot
+end Layout
+
+// The two sides of an arrowhead, whose tip is at `tip` and which came from the direction `back` points.
+private head(pieces: *Buf[Piece], tip: Dot, back: Dot)
+    val left = Dot(back.x * 0.8 - back.y * 0.6, back.y * 0.8 + back.x * 0.6)
+    val right = Dot(back.x * 0.8 + back.y * 0.6, back.y * 0.8 - back.x * 0.6)
+
+    pieces.push(Piece(tip, tip.plus(left, HEAD_LENGTH)))
+    pieces.push(Piece(tip, tip.plus(right, HEAD_LENGTH)))
+end head
+
+// The direction along the ground that is `v` with its height taken out, at length one, or `fallback`.
+private flat(v: Vec3, fallback: Vec3) -> Vec3
+    val f = Vec3(v.x, v.y, 0.0)
+
+    if f.length() < 1.0e-6 then fallback else f.unit()
+
+// Where an arc around an axis sits: its middle's direction from its pivot. The turn about z lies level with
+// the shape's base in front of it, and the two tilts rise behind it, on the far side from the viewer, because
+// on the near side they would be drawn across the shape itself.
+private arc_direction(axis: int, camera: &Camera) -> Vec3
+    val away = camera.forward()
+    val c = ARC_ELEVATION.cos()
+    val s = ARC_ELEVATION.sin()
+
+    axis match
+        0 -> Vec3(0.0, if away.y < 0.0 then -c else c, s)
+        1 -> Vec3(if away.x < 0.0 then -c else c, 0.0, s)
+        _ -> flat(away * -1.0, Vec3(0.0, -1.0, 0.0))
+end arc_direction
+
+// The point an arc is drawn around, and a turn by it measured about: the shape's middle, or for the turn about
+// z the same line at the height of the shape's base. The shape still turns about its middle.
+pivot_of(doc: &Document, node: &Node, axis: int) -> Vec3
+    val c = node.transform.apply(doc.local_bounds(node).center())
+
+    if axis == 2 then Vec3(c.x, c.y, doc.bounds_of(node).min.z) else c
+
+// The world axis of a `Turn`.
+world_axis(axis: int) -> Vec3 = vec3(if axis == 0 then [1.0, 0.0, 0.0] else if axis == 1 then [0.0, 1.0, 0.0] else [0.0, 0.0, 1.0])
+
+// The handles of the selection, if there is one, through this camera, in a viewport this many points across.
+// `hot` is the handle to show as under the pointer.
+layout(doc: &Document, camera: &Camera, width: real, height: real, hot: Option[Grip] = None) -> &Layout
+    val out: &Layout = Layout(buf(), buf())
+
+    val node = doc.selected.and_then(id -> doc.find(id)) match
+        Some(n) -> n
+        None -> return out
+
+    if width <= 0.0 || height <= 0.0 then return out
+
+    val t = node.transform
+    val b = doc.local_bounds(node)
+
+    val at = (p: Vec3) ->
+        camera.project(p, width, height) match
+            Some((x, y)) -> Some(Dot(x, y))
+            None -> None
+
+    var corners: Buf[Option[Dot]] = buf()
+
+    for z in [b.min.z, b.max.z]
+        for (x, y) in [(b.min.x, b.min.y), (b.max.x, b.min.y), (b.max.x, b.max.y), (b.min.x, b.max.y)]
+            corners.push(at(t.apply(Vec3(x, y, z))))
+
+    for (i, j) in [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+        corners[i] match
+            Some(p) ->
+                corners[j] match
+                    Some(q) -> out.line(p, q, BOX_RADIUS, BOX_LINE)
+                    None -> ()
+            None -> ()
+
+    for axis in 0..<3 do add_arc(out, doc, node, camera, width, height, axis, hot)
+
+    add_arrow(out, doc, node, camera, width, height, hot)
+
+    // Height first, then the corners on top of it.
+    val top = t.apply(Vec3((b.min.x + b.max.x) * 0.5, (b.min.y + b.max.y) * 0.5, b.max.z))
+
+    at(top) match
+        Some(p) -> out.dot(Grip.Stretch, p, sized(DOT_RADIUS, Grip.Stretch, hot))
+        None -> ()
+
+    for (i, grip) in [(0, Grip.Corner(-1.0, -1.0)), (1, Grip.Corner(1.0, -1.0)), (2, Grip.Corner(1.0, 1.0)), (3, Grip.Corner(-1.0, 1.0))]
+        corners[i] match
+            Some(p) -> out.dot(grip, p, sized(DOT_RADIUS, grip, hot))
+            None -> ()
+
+    out
+end layout
+
+private sized(radius: real, grip: Grip, hot: Option[Grip]) -> real =
+    if hot == Some(grip) then radius * HOT_GROWTH else radius
+
+// The radius an arc runs at: clear of the shape's corners, by a gap that is the same on the screen.
+private arc_radius(doc: &Document, node: &Node, camera: &Camera, height: real) -> real
+    val size = doc.size_of(node)
+    val centre = node.transform.apply(doc.local_bounds(node).center())
+
+    size.length() * 0.5 + ARC_GAP * camera.world_per_point(centre, height)
+
+private add_arc(out: &Layout, doc: &Document, node: &Node, camera: &Camera, width: real, height: real, axis: int, hot: Option[Grip])
+    val centre = pivot_of(doc, node, axis)
+    val radius = arc_radius(doc, node, camera, height)
+    val per_point = camera.world_per_point(centre, height)
+    val half = min(ARC_LENGTH * per_point / radius, 1.2) * 0.5
+    val middle = arc_direction(axis, camera)
+    val beside = world_axis(axis).cross(middle)
+    val grip = Grip.Turn(axis)
+    var dots: Buf[Dot] = buf()
+
+    for i in 0..ARC_PIECES
+        val angle = -half + 2.0 * half * real(i) / real(ARC_PIECES)
+        val p = centre + (middle * angle.cos() + beside * angle.sin()) * radius
+
+        camera.project(p, width, height) match
+            Some((x, y)) -> dots.push(Dot(x, y))
+            None -> return
+
+    var pieces: Buf[Piece] = buf()
+
+    for i in 1..<dots.len() do pieces.push(Piece(dots[i - 1], dots[i]))
+
+    val n = dots.len()
+    val up = Dot(0.0, -1.0)
+
+    head(&pieces, dots[0], dots[0].toward(dots[2], up))
+    head(&pieces, dots[n - 1], dots[n - 1].toward(dots[n - 3], up))
+    out.glyph(grip, pieces.view(), sized(LINE_RADIUS, grip, hot), AXIS_INK[axis])
+end add_arc
+
+// Where the arrow stands: over the shape's middle, level with its highest point.
+above(doc: &Document, node: &Node) -> Vec3
+    val c = node.transform.apply(doc.local_bounds(node).center())
+
+    Vec3(c.x, c.y, doc.bounds_of(node).max.z)
+
+// Which way up is on the screen at a point, at length one: straight up the screen when looking so nearly
+// along the vertical that it has no direction of its own.
+private screen_up(camera: &Camera, p: Vec3, width: real, height: real) -> Dot
+    val straight = Dot(0.0, -1.0)
+    val step = camera.world_per_point(p, height) * 12.0
+    val a = camera.project(p, width, height)
+    val b = camera.project(p + Vec3(0.0, 0.0, step), width, height)
+
+    a match
+        Some((ax, ay)) ->
+            b match
+                Some((bx, by)) ->
+                    val from = Dot(ax, ay)
+                    val to = Dot(bx, by)
+                    val dx = to.x - from.x
+                    val dy = to.y - from.y
+
+                    if (dx * dx + dy * dy).sqrt() < 2.0 then straight else from.toward(to, straight)
+                None -> straight
+        None -> straight
+end screen_up
+
+private add_arrow(out: &Layout, doc: &Document, node: &Node, camera: &Camera, width: real, height: real, hot: Option[Grip])
+    val base = above(doc, node)
+
+    camera.project(base, width, height) match
+        Some((x, y)) ->
+            val up = screen_up(camera, base, width, height)
+            val from = Dot(x, y).plus(up, ARROW_GAP)
+            val tip = from.plus(up, ARROW_LENGTH)
+            var pieces: Buf[Piece] = buf()
+
+            pieces.push(Piece(from, tip))
+            head(&pieces, tip, Dot(-up.x, -up.y))
+            out.glyph(Grip.Raise, pieces.view(), sized(LINE_RADIUS + 0.5, Grip.Raise, hot), ARROW_INK)
+        None -> ()
+end add_arrow

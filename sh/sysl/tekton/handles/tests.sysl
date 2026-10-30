@@ -1,0 +1,514 @@
+module sh.sysl.tekton.handles
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.camera.{Camera, new_camera}
+import sh.sysl.tekton.document.{Document, MAX_SIZE, MIN_SIZE, POSITION_LIMIT, Primitive, Transform, new_document}
+import sh.sysl.tekton.space.{Ray, Vec3}
+
+// Handles and drags as numbers: no window, no GPU, no canvas.
+
+private const W: real = 900.0
+private const H: real = 600.0
+
+private near(a: real, b: real, tolerance: real = 1.0e-6) -> bool = (a - b).abs() <= tolerance
+
+private near_vec(a: Vec3, b: Vec3, tolerance: real = 1.0e-6) -> bool = (a - b).length() <= tolerance
+
+// Where the view can go, including its two limits: almost along the ground and almost straight down.
+private val TILTS: [3]real = [0.07, 0.5, 1.55]
+private val TURNS: [3]real = [0.3, 2.0, -2.6]
+
+private looking(turn: real, tilt: real) -> &Camera
+    val camera = new_camera()
+
+    camera.turn = turn
+    camera.tilt = tilt
+    camera
+end looking
+
+private box() -> &Document
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc
+end box
+
+private SNAPPED() -> DragKeys = DragKeys(1.0, false, false)
+private FREE() -> DragKeys = DragKeys(1.0, true, false)
+private KEEP() -> DragKeys = DragKeys(1.0, false, true)
+
+private ALL_GRIPS() -> [8]Grip =
+    [Grip.Raise, Grip.Stretch, Grip.Corner(-1.0, -1.0), Grip.Corner(1.0, -1.0), Grip.Corner(1.0, 1.0),
+     Grip.Corner(-1.0, 1.0), Grip.Turn(0), Grip.Turn(1)]
+
+// A drag of this handle, starting on its ink.
+private grab(doc: &Document, camera: &Camera, g: Grip) -> Drag
+    val (x, y) = layout(doc, camera, W, H).spot(g).unwrap()
+
+    drag_grip(doc, camera, doc.selected.unwrap(), g, W, H, x, y).unwrap()
+
+private selected_transform(doc: &Document) -> Transform = doc.find(doc.selected.unwrap()).unwrap().transform
+
+private all_finite(t: Transform) -> bool = t.is_usable()
+
+// ## The clamps
+
+@test
+a_ray_parallel_to_a_plane_stops_at_the_reach()
+    val ray = Ray(Vec3(0.0, 0.0, 10.0), Vec3(1.0, 0.0, 0.0))
+    val p = plane_point(ray, Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 500.0)
+
+    assert(near_vec(p, Vec3(500.0, 0.0, 0.0)), "on the plane, in the ray's heading")
+
+// Not parallel, and it does come down, but a very long way off: this is the one a real pointer makes.
+@test
+a_ray_barely_falling_toward_a_plane_stops_at_the_reach()
+    val ray = Ray(Vec3(0.0, 0.0, 10.0), Vec3(1.0, 0.0, -1.0e-5).unit())
+    val p = plane_point(ray, Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 500.0)
+
+    assert(near_vec(p, Vec3(500.0, 0.0, 0.0)), "not a million away")
+
+@test
+a_ray_rising_away_from_a_plane_stops_at_the_reach_in_its_heading()
+    val ray = Ray(Vec3(0.0, 0.0, 10.0), Vec3(0.6, 0.0, 0.8))
+    val p = plane_point(ray, Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 500.0)
+
+    assert(near_vec(p, Vec3(500.0, 0.0, 0.0)), "a ray that never meets the plane is not behind the eye")
+
+@test
+a_ray_that_meets_a_plane_within_the_reach_is_exact()
+    val ray = Ray(Vec3(0.0, 0.0, 10.0), Vec3(0.6, 0.0, -0.8))
+
+    assert(near_vec(plane_point(ray, Vec3(3.0, 3.0, 0.0), Vec3(0.0, 0.0, 1.0), 500.0), Vec3(7.5, 0.0, 0.0)), "where it lands")
+
+@test
+a_ray_square_to_a_plane_and_behind_it_has_no_heading_and_stays_finite()
+    val ray = Ray(Vec3(0.0, 0.0, 10.0), Vec3(0.0, 0.0, 1.0))
+
+    assert(plane_point(ray, Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 500.0).is_finite(), "finite")
+
+@test
+a_line_pointing_at_the_viewer_counts_as_up_the_screen_at_a_bounded_rate()
+    val camera = looking(0.3, 1.55)
+    val at = Vec3(0.0, 0.0, 10.0)
+    val up = Vec3(0.0, 0.0, 1.0)
+    val travel = line_travel(camera, at, up, W, H, 0.0, -100.0)
+    val per_point = camera.world_per_point(at, H)
+
+    assert(travel > 0.0, "a drag up the screen raises")
+    assert(travel <= 100.0 * per_point / LEAST_RATE + 1.0e-6, "and it does not run away")
+
+@test
+a_line_seen_side_on_follows_the_pointer_one_for_one()
+    val camera = looking(0.3, 0.07)
+    val at = Vec3(0.0, 0.0, 10.0)
+    val up = Vec3(0.0, 0.0, 1.0)
+    val travel = line_travel(camera, at, up, W, H, 0.0, -50.0)
+    val (_, y0) = camera.project(at, W, H).unwrap()
+    val (_, y1) = camera.project(at + up * travel, W, H).unwrap()
+
+    assert(near(y0 - y1, 50.0, 1.0), "the point stays under the pointer")
+
+// ## Every handle, every view, the wildest pointers
+
+@test
+every_handle_at_every_view_is_on_its_own_ink_and_stays_finite_wherever_the_pointer_goes()
+    for tilt in TILTS
+        for turn in TURNS
+            val camera = looking(turn, tilt)
+
+            for g in ALL_GRIPS()
+                val doc = box()
+                val (x, y) = layout(doc, camera, W, H).spot(g).unwrap()
+
+                assert(layout(doc, camera, W, H).grip_at(x, y).is_some(), "a handle answers on its ink")
+
+                val d = grab(doc, camera, g)
+
+                for (px, py) in [(0.0, 0.0), (W, 0.0), (0.0, H), (W, H), (-5000.0, -5000.0), (9000.0, 4000.0), (W / 2.0, -1.0e6), (x, y)]
+                    for k in [SNAPPED(), FREE(), KEEP()]
+                        val t = d.transform_at(camera, W, H, px, py, k)
+
+                        assert(all_finite(t), s"finite: ${tilt} ${turn}")
+                        assert(t.translation.x.abs() < 1.0e5 && t.translation.y.abs() < 1.0e5 && t.translation.z.abs() < 1.0e5, "and bounded")
+
+                        for i in 0..<3 do assert(t.scale.axis(i) * 20.0 <= MAX_SIZE + 1.0e-6 && t.scale.axis(i) * 20.0 >= MIN_SIZE - 1.0e-6, "sides inside the limits")
+
+@test
+sliding_along_the_ground_at_the_horizon_does_not_fly_away()
+    val doc = box()
+    val camera = looking(0.3, 0.07)
+    val (x, y) = camera.project(Vec3(0.0, 0.0, 10.0), W, H).unwrap()
+    val d = drag_body(doc, 1, Vec3(0.0, 0.0, 10.0), x, y).unwrap()
+
+    // The pointer goes above the horizon, where its ray never comes down to the shape's height.
+    val t = d.transform_at(camera, W, H, x, 0.0, FREE())
+
+    assert(t.translation.is_finite(), "finite")
+    assert(t.translation.x.abs() <= POSITION_LIMIT && t.translation.y.abs() <= POSITION_LIMIT, "held to the limit")
+    assert(near(t.translation.z, 0.0), "and still at its own height")
+
+@test
+sliding_is_held_to_the_position_limit()
+    val doc = box()
+    val camera = new_camera()
+
+    camera.distance = 2500.0
+
+    val (x, y) = camera.project(Vec3(0.0, 0.0, 10.0), W, H).unwrap()
+    val d = drag_body(doc, 1, Vec3(0.0, 0.0, 10.0), x, y).unwrap()
+    val t = d.transform_at(camera, W, H, W * 2.0, y - 280.0, SNAPPED())
+
+    assert(t.translation.x.abs() <= POSITION_LIMIT && t.translation.y.abs() <= POSITION_LIMIT, "no further")
+
+// ## The body
+
+@test
+sliding_without_the_snap_keeps_the_grabbed_point_under_the_pointer()
+    for tilt in [0.3, 0.5, 1.2, 1.55]
+        val doc = box()
+        val camera = looking(0.3, tilt)
+        val hit = Vec3(0.0, 0.0, 20.0)
+        val (x, y) = camera.project(hit, W, H).unwrap()
+        val d = drag_body(doc, 1, hit, x, y).unwrap()
+        val t = d.transform_at(camera, W, H, x + 37.0, y + 11.0, FREE())
+        val (nx, ny) = camera.project(hit + t.translation, W, H).unwrap()
+
+        assert(near(nx, x + 37.0, 1.0e-3) && near(ny, y + 11.0, 1.0e-3), "on the pointer")
+        assert(near(t.translation.z, 0.0), "and on the ground")
+
+@test
+sliding_snaps_to_the_grid_and_shift_lets_it_go()
+    val doc = box()
+    val camera = new_camera()
+    val hit = Vec3(0.0, 0.0, 20.0)
+    val (x, y) = camera.project(hit, W, H).unwrap()
+    val d = drag_body(doc, 1, hit, x, y).unwrap()
+    val snapped = d.transform_at(camera, W, H, x + 37.0, y + 11.0, SNAPPED()).translation
+    val free = d.transform_at(camera, W, H, x + 37.0, y + 11.0, FREE()).translation
+    val five = d.transform_at(camera, W, H, x + 37.0, y + 11.0, DragKeys(5.0, false, false)).translation
+
+    assert(near(snapped.x, snapped.x.round()) && near(snapped.y, snapped.y.round()), "whole millimetres")
+    assert(!near(free.x, free.x.round(), 1.0e-3), "not with shift")
+    assert(near((snapped - free).length(), 0.0, 1.0), "and the two agree to the grid")
+    assert(near(five.x / 5.0, (five.x / 5.0).round()) && near(five.y / 5.0, (five.y / 5.0).round()), "the grid is a setting")
+
+// ## Raising
+
+@test
+the_arrow_raises_the_shape_as_it_is_and_snaps()
+    val doc = box()
+    val camera = new_camera()
+    val d = grab(doc, camera, Grip.Raise)
+    val up = d.transform_at(camera, W, H, d.press_x, d.press_y - 40.0, SNAPPED())
+    val free = d.transform_at(camera, W, H, d.press_x, d.press_y - 40.0, FREE())
+
+    assert(up.translation.z > 1.0, "up")
+    assert(near(up.translation.z, up.translation.z.round()), "to the grid")
+    assert(!near(free.translation.z, free.translation.z.round(), 1.0e-3), "and with shift, not")
+    assert(near(up.translation.x, 0.0) && near(up.translation.y, 0.0), "only up")
+    assert(near(up.scale.z, 1.0), "the same size")
+
+@test
+the_arrow_stops_when_the_shape_reaches_the_ground()
+    val doc = box()
+    val camera = new_camera()
+    val d = grab(doc, camera, Grip.Raise)
+
+    assert(near(d.transform_at(camera, W, H, d.press_x, d.press_y + 300.0, FREE()).translation.z, 0.0), "at the ground")
+
+@test
+a_shape_already_under_the_ground_is_not_jumped_back_up()
+    val doc = box()
+    val camera = new_camera()
+
+    assert(doc.move_to(1, Vec3(0.0, 0.0, -30.0)).is_ok(), "put there")
+
+    val d = grab(doc, camera, Grip.Raise)
+
+    assert(near(d.transform_at(camera, W, H, d.press_x, d.press_y + 1.0, SNAPPED()).translation.z, -30.0), "still there")
+
+@test
+a_turned_shape_rests_on_its_lowest_point()
+    val doc = box()
+    val camera = new_camera()
+    val tipped = Quaternion.from_axis_angle([1.0, 0.0, 0.0], 0.7854)
+
+    doc.set_transform(1, Transform(Vec3(0.0, 0.0, 40.0), tipped, Vec3(1.0, 1.0, 1.0)))
+
+    val d = grab(doc, camera, Grip.Raise)
+    val t = d.transform_at(camera, W, H, d.press_x, d.press_y + 2000.0, FREE())
+
+    doc.set_transform(1, t)
+    assert(near(doc.bounds_of(doc.find(1).unwrap()).min.z, 0.0, 1.0e-3), "its low edge on the ground")
+
+// ## Resizing
+
+private opposite_stays(doc: &Document, camera: &Camera, cx: real, cy: real, px: real, py: real, k: DragKeys)
+    val d = grab(doc, camera, Grip.Corner(cx, cy))
+    val fixed = Vec3(if cx > 0.0 then d.local.min.x else d.local.max.x, if cy > 0.0 then d.local.min.y else d.local.max.y, d.local.min.z)
+    val t = d.transform_at(camera, W, H, d.press_x + px, d.press_y + py, k)
+
+    assert(near_vec(t.apply(fixed), d.start.apply(fixed), 1.0e-3), "the corner across stays put")
+
+@test
+a_corner_holds_the_corner_across_from_it_still()
+    for g in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+        opposite_stays(box(), new_camera(), g.0, g.1, 30.0, 20.0, SNAPPED())
+        opposite_stays(box(), new_camera(), g.0, g.1, -30.0, -20.0, FREE())
+
+@test
+a_corner_of_a_turned_shape_resizes_along_its_own_axes()
+    val doc = box()
+    val turned = Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.6)
+
+    doc.set_transform(1, Transform(Vec3(5.0, 5.0, 0.0), turned, Vec3(1.5, 1.0, 1.0)))
+    opposite_stays(doc, new_camera(), 1.0, 1.0, 40.0, 0.0, SNAPPED())
+
+    val d = grab(doc, new_camera(), Grip.Corner(1.0, 1.0))
+    val t = d.transform_at(new_camera(), W, H, d.press_x + 40.0, d.press_y, SNAPPED())
+
+    assert(near(t.rotation.w, turned.w) && near(t.rotation.z, turned.z), "the rotation stays")
+
+@test
+a_corner_changes_the_plan_and_not_the_height_and_snaps_each_side()
+    val doc = box()
+    val camera = new_camera()
+    val d = grab(doc, camera, Grip.Corner(1.0, -1.0))
+    val t = d.transform_at(camera, W, H, d.press_x + 33.0, d.press_y + 21.0, SNAPPED())
+    val s = d.local.size().times(t.scale)
+
+    assert(s.x != 20.0 || s.y != 20.0, "it changed")
+    assert(near(s.x, s.x.round()) && near(s.y, s.y.round()), "to the grid")
+    assert(near(s.z, 20.0), "and the height did not")
+
+@test
+a_corner_dragged_through_zero_and_past_it_stops_at_the_least_size()
+    val doc = box()
+    val camera = new_camera()
+    val d = grab(doc, camera, Grip.Corner(1.0, -1.0))
+    val (ox, oy) = camera.project(Vec3(-10.0, 10.0, 0.0), W, H).unwrap()
+    val dx = ox - d.press_x
+    val dy = oy - d.press_y
+
+    // Onto the corner across, past it, and far past it: no flip, and the corner across never moves.
+    for far in [1.0, 1.5, 3.0, 30.0]
+        for k in [SNAPPED(), FREE()]
+            val t = d.transform_at(camera, W, H, d.press_x + dx * far, d.press_y + dy * far, k)
+
+            assert(near(t.scale.x * 20.0, MIN_SIZE, 1.0e-6), s"width at the least, ${far}")
+            assert(near(t.scale.y * 20.0, MIN_SIZE, 1.0e-6), s"depth at the least, ${far}")
+            assert(near_vec(t.apply(Vec3(-10.0, 10.0, 0.0)), Vec3(-10.0, 10.0, 0.0), 1.0e-6), "the corner across, still")
+
+@test
+a_corner_keeps_proportions_only_with_the_modifier()
+    val doc = box()
+    val camera = new_camera()
+
+    assert(doc.resize_to(1, Vec3(20.0, 40.0, 10.0)).is_ok(), "an uneven box")
+
+    val d = grab(doc, camera, Grip.Corner(1.0, -1.0))
+    val t = d.transform_at(camera, W, H, d.press_x + 60.0, d.press_y + 30.0, KEEP())
+    val kept = d.local.size().times(t.scale)
+    val plain = d.local.size().times(d.transform_at(camera, W, H, d.press_x + 60.0, d.press_y + 30.0, SNAPPED()).scale)
+
+    assert(kept.x != 20.0, "it resized")
+    assert(near(kept.y / kept.x, 2.0, 1.0e-6) && near(kept.z / kept.x, 0.5, 1.0e-6), "in proportion")
+    assert(near(kept.x, kept.x.round()), "with its first side on the grid")
+    assert(near(plain.z, 10.0) && !near(plain.y / plain.x, 2.0, 1.0e-3), "and without it, not")
+
+@test
+keeping_proportions_stops_when_the_smallest_side_reaches_the_least_size()
+    val doc = box()
+    val camera = new_camera()
+
+    assert(doc.resize_to(1, Vec3(20.0, 40.0, 10.0)).is_ok(), "an uneven box")
+
+    val d = grab(doc, camera, Grip.Corner(1.0, -1.0))
+    val t = d.transform_at(camera, W, H, d.press_x - 2000.0, d.press_y - 1000.0, KEEP())
+    val s = d.local.size().times(t.scale)
+
+    assert(near(s.z, MIN_SIZE, 1.0e-6), "the shortest at the least")
+    assert(near(s.y / s.z, 4.0, 1.0e-6), "and still in proportion")
+
+@test
+the_top_dot_changes_the_height_and_keeps_the_base_where_it_is()
+    val doc = box()
+    val camera = new_camera()
+    val d = grab(doc, camera, Grip.Stretch)
+    val t = d.transform_at(camera, W, H, d.press_x, d.press_y - 40.0, SNAPPED())
+    val s = d.local.size().times(t.scale)
+
+    assert(s.z > 21.0, "taller")
+    assert(near(s.z, s.z.round()), "to the grid")
+    assert(near(s.x, 20.0) && near(s.y, 20.0), "and no wider")
+    assert(near_vec(t.apply(Vec3(0.0, 0.0, 0.0)), Vec3(0.0, 0.0, 0.0), 1.0e-6), "the base stays")
+
+@test
+the_top_dot_dragged_through_the_base_stops_at_the_least_size()
+    val doc = box()
+    val camera = new_camera()
+    val d = grab(doc, camera, Grip.Stretch)
+    val t = d.transform_at(camera, W, H, d.press_x, d.press_y + 3000.0, SNAPPED())
+
+    assert(near(t.scale.z * 20.0, MIN_SIZE, 1.0e-6), "no lower")
+
+// ## Turning
+
+@test
+a_turn_keeps_the_middle_of_the_shape_where_it_is_and_snaps()
+    for axis in 0..<3
+        val doc = box()
+        val camera = new_camera()
+        val middle = Vec3(0.0, 0.0, 10.0)
+        val d = grab(doc, camera, Grip.Turn(axis))
+        val t = d.transform_at(camera, W, H, d.press_x + 25.0, d.press_y + 25.0, SNAPPED())
+        val free = d.transform_at(camera, W, H, d.press_x + 25.0, d.press_y + 25.0, FREE())
+
+        assert(near_vec(t.apply(middle), middle, 1.0e-6), "the middle stays")
+        assert(near_vec(free.apply(middle), middle, 1.0e-6), "with shift too")
+        assert(near(t.rotation.norm(), 1.0, 1.0e-9), "a rotation still")
+
+        // A snapped turn is a whole number of steps from where it began.
+        val half = (t.rotation.w).acos() * 2.0 / (TURN_STEP * DEGREES)
+
+        assert(near(half, half.round(), 1.0e-6), s"a whole number of steps: ${half}")
+
+@test
+following_the_ring_with_the_pointer_turns_by_the_angle_it_went_through()
+    val doc = box()
+    val camera = looking(0.3, 1.2)
+    val d = grab(doc, camera, Grip.Turn(2))
+
+    assert(d.on_ring, "seen from above, the ring is open")
+
+    // Put the pointer on the ring's point a quarter of the way round from the handle, through the eye.
+    val from = d.grab - d.pivot
+    val to = Vec3(-from.y, from.x, from.z)
+    val (x, y) = camera.project(d.pivot + to, W, H).unwrap()
+    val t = d.transform_at(camera, W, H, x, y, FREE())
+    val turned = t.rotation.rotate([1.0, 0.0, 0.0])
+
+    assert(near(turned[0], 0.0, 1.0e-6) && near(turned[1], 1.0, 1.0e-6), "a quarter turn, the way it went")
+
+@test
+a_ring_seen_edge_on_turns_by_the_angle_on_the_screen_the_same_way_round()
+    val doc = box()
+    val edge = looking(0.3, 0.07)
+    val d = grab(doc, edge, Grip.Turn(2))
+
+    assert(!d.on_ring, "the ring has no opening to follow")
+
+    val (cx, cy) = edge.project(d.pivot, W, H).unwrap()
+
+    // Clockwise on the screen, from a point right of the middle to a point below it. The axis comes up toward
+    // this camera, so that is a negative turn about it, as it would be on the ring.
+    val manual = Drag(d.id, d.grip, d.start, d.local, cx + 50.0, cy, d.grab, d.floor, false, d.pivot)
+    val t = manual.transform_at(edge, W, H, cx, cy + 50.0, FREE())
+    val turned = t.rotation.rotate([1.0, 0.0, 0.0])
+
+    assert(near(turned[0], 0.0, 1.0e-6) && near(turned[1], -1.0, 1.0e-6), "a quarter turn, clockwise")
+
+@test
+a_pointer_right_on_the_middle_of_an_edge_on_ring_is_no_turn()
+    val doc = box()
+    val edge = looking(0.3, 0.07)
+    val d = grab(doc, edge, Grip.Turn(2))
+    val (cx, cy) = edge.project(d.pivot, W, H).unwrap()
+    val t = d.transform_at(edge, W, H, cx, cy, FREE())
+
+    assert(all_finite(t), "finite")
+    assert(near(t.rotation.w, 1.0), "and no turn")
+
+// ## Hit testing and size on the screen
+
+@test
+nothing_selected_has_no_handles()
+    val doc = box()
+
+    doc.select(None)
+    assert_eq(layout(doc, new_camera(), W, H).strokes.len(), 0usize, "none")
+
+@test
+handles_are_the_same_size_on_the_screen_near_and_far()
+    val doc = box()
+    val near_camera = new_camera()
+    val far_camera = new_camera()
+
+    near_camera.distance = 120.0
+    far_camera.distance = 900.0
+
+    val a = layout(doc, near_camera, W, H)
+    val b = layout(doc, far_camera, W, H)
+
+    assert_eq(a.strokes.len(), b.strokes.len(), "the same strokes")
+
+    for grip in [Grip.Raise, Grip.Corner(1.0, 1.0)]
+        for span in a.spans.view()
+            if span.grip == grip
+                for i in span.first..<span.last do assert(near(a.strokes[i].radius, b.strokes[i].radius), "the same radius")
+
+    // The arrow: its shaft is one fixed length, in points, at any distance.
+    val shaft = (s: Stroke) -> ((s.bx - s.ax) * (s.bx - s.ax) + (s.by - s.ay) * (s.by - s.ay)).sqrt()
+
+    for layout_of in [a, b]
+        for span in layout_of.spans.view()
+            if span.grip == Grip.Raise then assert(near(shaft(layout_of.strokes[span.first]), ARROW_LENGTH, 1.0e-6), "the same length")
+
+@test
+a_press_beside_every_handle_misses()
+    val doc = box()
+    val out = layout(doc, new_camera(), W, H)
+
+    assert(out.grip_at(1.0, 1.0).is_none(), "the corner of the viewport has none")
+
+@test
+the_nearer_of_two_handles_wins()
+    val doc = box()
+    val camera = new_camera()
+    val out = layout(doc, camera, W, H)
+
+    for g in [Grip.Corner(1.0, -1.0), Grip.Corner(-1.0, -1.0), Grip.Stretch, Grip.Raise, Grip.Turn(0), Grip.Turn(1), Grip.Turn(2)]
+        val (x, y) = out.spot(g).unwrap()
+
+        assert(out.grip_at(x, y) == Some(g), "on its own ink, it")
+
+@test
+the_hot_handle_grows_and_the_others_do_not()
+    val doc = box()
+    val camera = new_camera()
+    val plain = layout(doc, camera, W, H)
+    val hot = layout(doc, camera, W, H, Some(Grip.Stretch))
+
+    for i in 0..<plain.spans.len()
+        val span = plain.spans[i]
+        val grown = hot.strokes[span.first + 1].radius > plain.strokes[span.first + 1].radius
+
+        assert(grown == (span.grip == Grip.Stretch), "only the one")
+
+// ## The kernel stays out of it
+
+@test
+moving_turning_and_resizing_by_every_handle_never_asks_the_kernel()
+    val doc = box()
+    val camera = new_camera()
+
+    layout(doc, camera, W, H)
+
+    val before = doc.builds
+    val node = doc.find(1).unwrap()
+    val mesh = doc.mesh_of(node)
+
+    for g in ALL_GRIPS()
+        val d = grab(doc, camera, g)
+
+        doc.set_transform(1, d.transform_at(camera, W, H, d.press_x + 15.0, d.press_y - 15.0, SNAPPED()))
+        layout(doc, camera, W, H)
+        doc.bounds_of(node)
+
+    val d = drag_body(doc, 1, Vec3(0.0, 0.0, 10.0), 450.0, 300.0).unwrap()
+
+    doc.set_transform(1, d.transform_at(camera, W, H, 500.0, 320.0, SNAPPED()))
+    assert_eq(doc.builds, before, "not once")
+    assert_eq(doc.mesh_of(node).revision, mesh.revision, "and the triangles are the same triangles")

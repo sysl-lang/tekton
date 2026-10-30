@@ -1,7 +1,11 @@
 module sh.sysl.tekton.interface
 @tests
 
-import sh.sysl.tekton.document.Primitive
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.document.{Primitive, Transform}
+import sh.sysl.tekton.handles.{Grip, Layout, layout}
+import sh.sysl.tekton.picking.pick
+import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
 
 // The pointer, from a press to what it did, through the same canvas calls a window makes. No window and no
@@ -66,8 +70,44 @@ a_press_and_release_with_no_paint_between_still_selects()
     paint_frame(w, &c)
     assert(w.doc.selected == Some(a), "a tap faster than a frame")
 
+// A press here, a move there, and a release there, with a frame painted around each.
+private drag_from(w: &Workspace, c: *Recorder, x: int, y: int, to_x: int, to_y: int)
+    paint_frame(w, c)
+    c.point(x, y, true)
+    paint_frame(w, c)
+    c.point(to_x, to_y, true)
+    paint_frame(w, c)
+    c.release(to_x, to_y)
+    paint_frame(w, c)
+end drag_from
+
+private spot_of(w: &Workspace, g: Grip) -> (int, int)
+    val (x, y) = layout(w.doc, w.camera, 900.0, 600.0).spot(g).unwrap()
+
+    (int(x.round()), int(y.round()))
+
+private transform_of(w: &Workspace, id: int) -> Transform = w.doc.find(id).unwrap().transform
+
+// ## What a drag starts as
+
 @test
-a_drag_turns_the_camera_and_does_not_select()
+a_drag_on_empty_space_turns_the_camera_and_moves_nothing()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+
+    w.doc.select(None)
+
+    var c = recorder()
+    val turn = w.camera.turn
+    val was = transform_of(w, a).translation
+
+    drag_from(w, &c, 5, 5, 45, 5)
+    assert(w.camera.turn != turn, "it orbited")
+    assert(transform_of(w, a).translation == was, "and the shape stayed")
+    assert(w.doc.selected.is_none(), "and nothing was selected")
+
+@test
+a_drag_on_a_shape_moves_it_and_selects_it_and_leaves_the_view_alone()
     val w = new_workspace()
     val a = w.doc.add_shape(Primitive.Box)
 
@@ -76,17 +116,567 @@ a_drag_turns_the_camera_and_does_not_select()
     var c = recorder()
     val (x, y) = centre_of(w, a)
     val turn = w.camera.turn
+    val tilt = w.camera.tilt
+
+    drag_from(w, &c, x, y, x + 40, y)
+
+    val p = transform_of(w, a).translation
+
+    assert(p.x != 0.0 || p.y != 0.0, "it moved")
+    assert(p.z == 0.0, "along the ground")
+    assert(p.x == p.x.round() && p.y == p.y.round(), "to the grid")
+    assert(w.doc.selected == Some(a), "and it is selected")
+    assert(w.camera.turn == turn && w.camera.tilt == tilt, "and the view stayed")
+
+@test
+a_wobble_too_small_to_be_a_drag_moves_nothing()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
 
     paint_frame(w, &c)
     c.point(x, y, true)
     paint_frame(w, &c)
-    c.point(x + 40, y, true)
+    c.point(x + CLICK_SLOP, y, true)
     paint_frame(w, &c)
-    c.release(x + 40, y)
+    assert(transform_of(w, a).translation.x == 0.0, "still a click")
+
+@test
+a_drag_moves_each_frame_and_ends_at_the_release()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+
     paint_frame(w, &c)
+    c.point(x, y, true)
     paint_frame(w, &c)
-    assert(w.camera.turn != turn, "it orbited")
-    assert(w.doc.selected.is_none(), "and a drag starting on a shape selected nothing")
+    c.point(x + 20, y, true)
+    paint_frame(w, &c)
+
+    val first = transform_of(w, a).translation.x
+
+    c.point(x + 60, y, true)
+    paint_frame(w, &c)
+
+    val second = transform_of(w, a).translation.x
+
+    assert(first > 0.0 && second > first, "following along")
+
+    // The release is further along than the last frame saw.
+    c.release(x + 100, y)
+    paint_frame(w, &c)
+
+    val last = transform_of(w, a).translation.x
+
+    assert(last > second, "the release's own place counts")
+
+    c.point(x + 200, y, false)
+    paint_frame(w, &c)
+    assert(transform_of(w, a).translation.x == last, "and after it, nothing follows")
+
+@test
+shift_held_lets_go_of_the_grid_and_letting_it_go_comes_back_to_it()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.point(x + 37, y + 11, true)
+    paint_frame(w, &c)
+
+    val snapped = transform_of(w, a).translation
+
+    c.chord.keys = Modifiers(true, false, false, false)
+    paint_frame(w, &c)
+
+    val free = transform_of(w, a).translation
+
+    c.chord.keys = no_modifiers()
+    paint_frame(w, &c)
+    assert(snapped.x == snapped.x.round(), "snapped")
+    assert(free.x != free.x.round(), "shift, with the pointer still, lets it go")
+    assert(transform_of(w, a).translation == snapped, "and back")
+
+@test
+option_keeps_proportions_on_a_corner()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = spot_of(w, Grip.Corner(1.0, -1.0))
+
+    c.chord.keys = Modifiers(false, false, true, false)
+    drag_from(w, &c, x, y, x + 40, y + 20)
+
+    val s = transform_of(w, a).scale
+
+    assert(s.x > 1.0, "it grew")
+    assert((s.x - s.y).abs() < 1.0e-9 && (s.x - s.z).abs() < 1.0e-9, "evenly")
+
+@test
+a_drag_that_leaves_the_viewport_keeps_going_and_ends_at_the_release_out_there()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.point(1400, y, true)
+    paint_frame(w, &c)
+
+    val out_there = transform_of(w, a).translation
+
+    assert(out_there.x > 20.0, "it kept following")
+    assert(out_there.is_finite(), "to somewhere finite")
+
+    c.point(-800, -900, true)
+    paint_frame(w, &c)
+    assert(transform_of(w, a).translation.is_finite(), "above the horizon too")
+
+    c.release(-800, -900)
+    paint_frame(w, &c)
+
+    val ended = transform_of(w, a).translation
+
+    c.point(x, y, false)
+    paint_frame(w, &c)
+    assert(transform_of(w, a).translation == ended, "and the release out there ended it")
+
+    val turn = w.camera.turn
+
+    drag_from(w, &c, 5, 5, 45, 5)
+    assert(w.camera.turn != turn, "the next drag on empty space orbits")
+
+@test
+a_press_outside_that_comes_into_the_viewport_is_nothing_to_do_with_it()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+    val turn = w.camera.turn
+
+    paint_frame(w, &c)
+    c.point(-50, y, true)
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.release(x, y)
+    paint_frame(w, &c)
+    assert(transform_of(w, a).translation.x == 0.0, "the shape stayed")
+    assert(w.camera.turn == turn, "and the view")
+
+@test
+a_right_drag_during_a_left_drag_does_not_pan_or_end_it()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+    val target = w.camera.target
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.point(x + 20, y, true)
+    paint_frame(w, &c)
+
+    val during = transform_of(w, a).translation.x
+
+    c.press(x + 20, y, PointerButton.Secondary)
+    paint_frame(w, &c)
+    c.point(x + 60, y + 30, true)
+    paint_frame(w, &c)
+    assert(w.camera.target == target, "no pan")
+
+    val after_press = transform_of(w, a).translation.x
+
+    assert(after_press > during, "the left drag still follows")
+
+    c.let_go(x + 60, y + 30, PointerButton.Secondary)
+    paint_frame(w, &c)
+    c.point(x + 100, y + 30, true)
+    paint_frame(w, &c)
+    assert(transform_of(w, a).translation.x > after_press, "and still, once the right is up")
+    assert(w.camera.target == target, "and no pan then either")
+
+    c.release(x + 100, y + 30)
+    paint_frame(w, &c)
+
+    // The next right-drag is a pan again.
+    c.press(100, 100, PointerButton.Secondary)
+    paint_frame(w, &c)
+    c.point(140, 110, false)
+    paint_frame(w, &c)
+    c.let_go(140, 110, PointerButton.Secondary)
+    paint_frame(w, &c)
+    assert(w.camera.target != target, "it pans once the left is up")
+
+@test
+a_left_drag_of_a_shape_begun_during_a_right_drag_stops_the_pan()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+
+    paint_frame(w, &c)
+    c.press(x, y, PointerButton.Secondary)
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+
+    val target = w.camera.target
+
+    c.point(x + 30, y, true)
+    paint_frame(w, &c)
+    assert(transform_of(w, a).translation.x > 0.0, "the shape moves")
+    assert(w.camera.target == target, "and the view holds")
+
+@test
+the_wheel_during_a_drag_of_a_shape_does_not_zoom()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = centre_of(w, a)
+    val far = w.camera.distance
+
+    paint_frame(w, &c)
+    c.point(x, y, true)
+    paint_frame(w, &c)
+    c.point(x + 20, y, true)
+    paint_frame(w, &c)
+    c.spin(0.0, 50.0)
+    paint_frame(w, &c)
+    assert(w.camera.distance == far, "the view holds")
+
+// ## Handles against shapes
+
+@test
+a_handle_in_front_of_another_shape_wins_the_press_over_it()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val behind = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    w.doc.select(Some(a))
+
+    val (x, y) = spot_of(w, Grip.Corner(1.0, 1.0))
+
+    // The other shape, moved to fill the place where the handle is.
+    w.doc.set_transform(behind, Transform(Vec3(10.0, 10.0, 0.0), Quaternion.identity(), Vec3(4.0, 4.0, 4.0)))
+
+    val ray = w.camera.ray(real(x), real(y), 900.0, 600.0)
+
+    assert(pick(w.doc, ray) == Some(behind), "without the handle, a click there would have the other shape")
+
+    click_at(w, &c, x, y)
+    assert(w.doc.selected == Some(a), "a click on the handle leaves the selection")
+
+    val other_was = transform_of(w, behind).translation
+
+    drag_from(w, &c, x, y, x + 30, y)
+    assert(w.doc.selected == Some(a), "a drag on it too")
+    assert(transform_of(w, behind).translation == other_was, "and the other shape did not move")
+    assert(transform_of(w, a).scale.x != 1.0, "the handle did its work")
+
+@test
+a_selected_shape_hidden_behind_another_can_still_be_worked_by_its_handles()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val front = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val toward = w.camera.forward() * -40.0
+
+    w.doc.set_transform(front, Transform(Vec3(toward.x, toward.y, 0.0), Quaternion.identity(), Vec3(5.0, 5.0, 5.0)))
+    w.doc.select(Some(a))
+
+    val (x, y) = spot_of(w, Grip.Stretch)
+
+    assert(pick(w.doc, w.camera.ray(real(x), real(y), 900.0, 600.0)) == Some(front), "it is behind the other")
+
+    paint_frame(w, &c)
+    assert(w.overlay.strokes.len() > 0, "and its handles are there")
+
+    drag_from(w, &c, x, y, x, y - 40)
+    assert(w.doc.selected == Some(a), "still selected")
+    assert(transform_of(w, a).scale.z > 1.0, "and taller")
+
+@test
+a_click_on_a_handle_keeps_the_selection_and_changes_nothing()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val (x, y) = spot_of(w, Grip.Raise)
+
+    click_at(w, &c, x, y)
+    assert(w.doc.selected == Some(a), "still selected")
+    assert(transform_of(w, a).translation.z == 0.0, "and not moved")
+
+@test
+the_handle_under_the_pointer_is_drawn_hot_and_the_drag_keeps_it_hot()
+    val w = new_workspace()
+
+    w.doc.add_shape(Primitive.Box)
+
+    var c = recorder()
+    val (x, y) = spot_of(w, Grip.Stretch)
+    val plain = layout(w.doc, w.camera, 900.0, 600.0)
+    val hot = (l: &Layout) ->
+        var grown = false
+
+        for i in 0..<plain.strokes.len()
+            if l.strokes[i].radius > plain.strokes[i].radius then grown = true
+
+        grown
+
+    c.point(5, 5, false)
+    paint_frame(w, &c)
+    assert(!hot(w.overlay), "not with the pointer away")
+    c.point(x, y, false)
+    paint_frame(w, &c)
+    assert(hot(w.overlay), "with it there")
+
+// ## The kernel stays out of it, through the whole path a pointer takes
+
+@test
+a_drag_of_a_shape_through_the_interface_never_asks_the_kernel()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    paint_frame(w, &c)
+
+    val before = w.doc.builds
+    val (x, y) = centre_of(w, a)
+
+    drag_from(w, &c, x, y, x + 40, y + 10)
+
+    for g in [Grip.Raise, Grip.Stretch, Grip.Corner(1.0, 1.0), Grip.Turn(0), Grip.Turn(1), Grip.Turn(2)]
+        val (hx, hy) = spot_of(w, g)
+
+        drag_from(w, &c, hx, hy, hx + 20, hy - 20)
+
+    assert_eq(w.doc.builds, before, "not once, in seven drags")
+
+// ## Typed numbers
+
+private field_of(w: &Workspace, q: int, axis: int) -> &NumberField = w.number_fields()[q * 3 + axis]
+
+private const POSITION: int = 0
+private const SIZE: int = 1
+private const ROTATION: int = 2
+private val FIELD_RECT: Rect = Rect(0, 0, 52, 30)
+
+private paint_field(f: &NumberField, c: *Recorder) = render(f.view(), c, FIELD_RECT)
+
+// Into a field, the way the keyboard does it: focus, a replaced text, a key.
+private type_into(f: &NumberField, c: *Recorder, s: string, finish: Key)
+    paint_field(f, c)
+    c.take_focus(f.id)
+    paint_field(f, c)
+    f.text.set(s)
+    c.key(press(finish))
+    paint_field(f, c)
+end type_into
+
+@test
+a_field_shows_the_selection_and_follows_it()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    assert(w.doc.move_to(a, Vec3(12.5, -3.0, 0.0)).is_ok(), "placed")
+    paint_field(field_of(w, POSITION, 0), &c)
+    assert_eq(field_of(w, POSITION, 0).text.read(), "12.5", "its x")
+    paint_field(field_of(w, POSITION, 1), &c)
+    assert_eq(field_of(w, POSITION, 1).text.read(), "-3", "its y")
+    paint_field(field_of(w, SIZE, 2), &c)
+    assert_eq(field_of(w, SIZE, 2).text.read(), "20", "its height")
+
+    w.doc.select(None)
+    paint_field(field_of(w, SIZE, 2), &c)
+    assert_eq(field_of(w, SIZE, 2).text.read(), "", "and nothing, with nothing selected")
+
+@test
+typing_a_position_size_or_rotation_sets_it_exactly()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    type_into(field_of(w, POSITION, 1), &c, "17.25", Key.Enter)
+    assert(transform_of(w, a).translation.y == 17.25, "y, unsnapped")
+
+    type_into(field_of(w, SIZE, 0), &c, "33", Key.Enter)
+    assert((w.doc.size_of(w.doc.find(a).unwrap()).x - 33.0).abs() < 1.0e-3, "the width")
+    assert(transform_of(w, a).scale.y == 1.0, "and only the width")
+
+    type_into(field_of(w, ROTATION, 2), &c, "30", Key.Enter)
+
+    val shown = field_of(w, ROTATION, 2)
+
+    paint_field(shown, &c)
+    assert_eq(shown.text.read(), "30", "the turn, read back")
+    assert(w.problem.read() == "", "and nothing is wrong")
+
+@test
+typed_keys_really_reach_the_field()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 2)
+
+    paint_field(f, &c)
+    c.take_focus(f.id)
+    c.edit(Selection(0, 1))
+    c.key(typed("8"))
+    paint_field(f, &c)
+    assert(transform_of(w, a).translation.z == 0.0, "nothing until it is finished with")
+    c.key(press(Key.Enter))
+    paint_field(f, &c)
+    assert(transform_of(w, a).translation.z == 8.0, "and enter sends it")
+
+@test
+every_bad_value_is_refused_visibly_and_keeps_the_old_one()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, SIZE, 0)
+    val r = field_of(w, ROTATION, 0)
+
+    for bad in ["", "abc", "12x", "1,5", "0", "-4", "0.5", "99999", "nan", "inf", "-"]
+        type_into(f, &c, bad, Key.Enter)
+        assert(transform_of(w, a).scale.x == 1.0, s"kept, for '${bad}'")
+        assert(f.wrong, s"marked, for '${bad}'")
+        assert(w.problem.read() != "", s"and explained, for '${bad}'")
+        assert_eq(f.text.read(), bad, "with the text left there to fix")
+
+    type_into(f, &c, "25", Key.Enter)
+    assert(!f.wrong, "a good one clears the mark")
+    assert_eq(w.problem.read(), "", "and the words")
+
+    for bad in ["nan", "inf"]
+        type_into(r, &c, bad, Key.Enter)
+        assert(r.wrong, s"and a rotation of ${bad} too")
+
+    for bad in ["1e9", "inf"]
+        type_into(field_of(w, POSITION, 0), &c, bad, Key.Enter)
+        assert(transform_of(w, a).translation.x == 0.0, s"and a position of ${bad}")
+
+@test
+the_refusal_draws_a_mark_on_the_field()
+    val w = new_workspace()
+
+    w.doc.add_shape(Primitive.Box)
+
+    var c = recorder()
+    val f = field_of(w, SIZE, 0)
+
+    type_into(f, &c, "abc", Key.Enter)
+    paint_field(f, &c)
+    assert(c.dump().contains(s"stroke 0,0 52x30 #${WRONG_INK} w2"), "in the colour of a mistake")
+
+@test
+leaving_a_field_sends_what_is_in_it()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 0)
+
+    paint_field(f, &c)
+    c.take_focus(f.id)
+    paint_field(f, &c)
+    f.text.set("44")
+    paint_field(f, &c)
+    assert(transform_of(w, a).translation.x == 0.0, "not yet")
+
+    c.point(500, 500, true)
+    paint_field(f, &c)
+    assert(transform_of(w, a).translation.x == 44.0, "the press elsewhere took the keyboard, and it went")
+
+@test
+leaving_a_field_with_a_bad_value_puts_the_old_one_back_and_says_so()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 0)
+
+    paint_field(f, &c)
+    c.take_focus(f.id)
+    paint_field(f, &c)
+    f.text.set("")
+    paint_field(f, &c)
+    c.point(500, 500, true)
+    paint_field(f, &c)
+    assert(transform_of(w, a).translation.x == 0.0, "the old value")
+    assert_eq(f.text.read(), "0", "shown again")
+    assert(w.problem.read() != "", "and said")
+
+@test
+escape_puts_the_old_text_back_and_changes_nothing()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 0)
+
+    type_into(f, &c, "77", Key.Escape)
+    paint_field(f, &c)
+    assert(transform_of(w, a).translation.x == 0.0, "nothing")
+    assert_eq(f.text.read(), "0", "the old text")
+    assert(c.focus() != f.id, "and the keyboard let go")
+
+@test
+leaving_a_field_untouched_does_not_round_the_value_it_shows()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 0)
+
+    assert(w.doc.move_to(a, Vec3(1.23456, 0.0, 0.0)).is_ok(), "more places than it shows")
+    paint_field(f, &c)
+    c.take_focus(f.id)
+    paint_field(f, &c)
+    c.point(500, 500, true)
+    paint_field(f, &c)
+    assert(transform_of(w, a).translation.x == 1.23456, "as it was")
+
+@test
+a_field_being_typed_in_is_not_overwritten_by_the_document()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 0)
+
+    paint_field(f, &c)
+    c.take_focus(f.id)
+    paint_field(f, &c)
+    f.text.set("9")
+    assert(w.doc.move_to(a, Vec3(3.0, 0.0, 0.0)).is_ok(), "moved from elsewhere")
+    paint_field(f, &c)
+    assert_eq(f.text.read(), "9", "what is being typed stays")
+
+@test
+a_typed_edit_never_asks_the_kernel()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    w.doc.mesh_of(w.doc.find(a).unwrap())
+
+    val before = w.doc.builds
+
+    type_into(field_of(w, POSITION, 0), &c, "5", Key.Enter)
+    type_into(field_of(w, SIZE, 0), &c, "5", Key.Enter)
+    type_into(field_of(w, ROTATION, 0), &c, "5", Key.Enter)
+    assert_eq(w.doc.builds, before, "not once")
+
+@test
+a_number_is_shown_at_two_places_at_most()
+    for (v, shown) in [(0.0, "0"), (20.0, "20"), (100.0, "100"), (1.5, "1.5"), (1.25, "1.25"), (1.2345, "1.23"), (-0.001, "0"), (-3.0, "-3"), (-0.0, "0"), (1000.0, "1000")]
+        assert_eq(format_number(v), shown, "as written")
 
 @test
 a_small_wobble_is_still_a_click()

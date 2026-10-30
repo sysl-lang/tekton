@@ -1,0 +1,280 @@
+module sh.sysl.tekton.handles
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.camera.Camera
+import sh.sysl.tekton.document.{Document, MAX_SIZE, MIN_SIZE, POSITION_LIMIT, Transform, keeping, scale_for}
+import sh.sysl.tekton.space.{Aabb, Ray, Vec3, vec3}
+import sysl.math.{clamp, max, min}
+
+// What a drag does to a shape.
+//
+// **A drag is a function of where it began and where the pointer is now**, never a sum of what the frames
+// added up to, so a modifier let go in the middle of one or a frame missed changes nothing it should not. A
+// drag only ever answers a transform; the document's command takes it from there.
+//
+// **Every way of turning a pointer into a distance has an edge where it blows up**: a ray nearly parallel to
+// a plane meets it at infinity, or behind the eye, and a vertical line seen from straight above has no length
+// on the screen. Each is clamped here, so the worst a pointer can do is reach the limit in one frame.
+
+// How far a pointer may reach along a plane, as a multiple of how far away the plane is.
+const REACH: real = 4.0
+
+// The fewest points on the screen a millimetre of a drag along a line counts as, as a share of what a
+// millimetre across the screen covers there. Below this a line is pointing at the viewer.
+const LEAST_RATE: real = 0.15
+
+// A turn is snapped to this many degrees.
+const TURN_STEP: real = 15.0
+
+// A ray this far from square to a turn's plane, as a cosine, or nearer, turns by the angle on the screen
+// instead, the ring being too thin to follow.
+const TURN_EDGE_ON: real = 0.2
+
+const DEGREES: real = real.pi() / 180.0
+
+// How a drag is held right now.
+struct DragKeys
+    grid: real
+
+    // Shift: no snapping.
+    free: bool
+
+    // Option: the proportions stay.
+    keep: bool
+
+private snapped(v: real, step: real) -> real = (v / step).round() * step
+
+private to_grid(v: real, k: DragKeys) -> real = if k.free then v else snapped(v, k.grid)
+
+// Where a ray meets a plane through `anchor`, or as near as it gets: a ray that misses, or that would meet it
+// further than `reach` away, stops at `reach` along the plane in the ray's own heading, so the answer is
+// always a finite point not far from where the ray was looking.
+plane_point(ray: Ray, anchor: Vec3, normal: Vec3, reach: real) -> Vec3
+    val height = (anchor - ray.origin).dot(normal)
+    val rate = ray.direction.dot(normal)
+    val t = if rate != 0.0 then height / rate else real.infinity()
+
+    if t > 0.0 && t <= reach then return ray.at(t)
+
+    val heading = (ray.direction - normal * rate).unit()
+
+    ray.origin + normal * height + heading * reach
+end plane_point
+
+// How far along a line through `at` a pointer's travel across the screen amounts to, in world units. A line
+// pointing at the viewer counts as if it were `LEAST_RATE` of the way across, and straight up the screen when
+// it has no direction there at all.
+line_travel(camera: &Camera, at: Vec3, along: Vec3, width: real, height: real, dx: real, dy: real) -> real
+    val per_point = camera.world_per_point(at, height)
+    val step = per_point * 10.0
+    val least = LEAST_RATE / per_point
+    val a = camera.project(at, width, height)
+    val b = camera.project(at + along * step, width, height)
+    var rate = (0.0, 0.0)
+
+    a match
+        Some((ax, ay)) ->
+            b match
+                Some((bx, by)) -> rate = ((bx - ax) / step, (by - ay) / step)
+                None -> ()
+        None -> ()
+
+    val n = (rate.0 * rate.0 + rate.1 * rate.1).sqrt()
+
+    if n < least
+        // The line has too little length here to say which way it goes, so a drag up the screen is along it.
+        return -dy * (1.0 / least)
+
+    (dx * rate.0 + dy * rate.1) / (n * n)
+end line_travel
+
+// The drag in progress.
+struct Drag
+    id: int
+
+    // The handle, or `None` for the body of the shape.
+    grip: Option[Grip]
+    start: Transform
+    local: Aabb
+
+    // Where the pointer went down, on the screen and on the drag's plane.
+    press_x: real
+    press_y: real
+    grab: Vec3
+
+    // How low a raise may take the shape's origin.
+    floor: real
+
+    // Whether a turn follows the ring in the world, or the angle on the screen, and what it goes around.
+    on_ring: bool
+    pivot: Vec3
+
+    private sides(self) -> Vec3 = self.local.size().times(self.start.scale)
+
+    private corner(self, x: real, y: real) -> Vec3 =
+        Vec3(if x > 0.0 then self.local.max.x else self.local.min.x,
+             if y > 0.0 then self.local.max.y else self.local.min.y, self.local.min.z)
+
+    private base_middle(self) -> Vec3 = Vec3(self.local.center().x, self.local.center().y, self.local.min.z)
+
+    private top_middle(self) -> Vec3 = Vec3(self.local.center().x, self.local.center().y, self.local.max.z)
+
+    // The transform with these sides, and this point of the shape's own space staying where it was.
+    private resized(self, sides: Vec3, fixed: Vec3) -> Transform =
+        keeping(Transform(self.start.translation, self.start.rotation, scale_for(self.local, sides)), fixed, self.start)
+
+    // The transform the shape should have with the pointer here.
+    transform_at(self, camera: &Camera, width: real, height: real, x: real, y: real, k: DragKeys) -> Transform
+        val ray = camera.ray(x, y, width, height)
+        val dx = x - self.press_x
+        val dy = y - self.press_y
+
+        self.grip match
+            None -> self.slide(camera, ray, k)
+            Some(g) ->
+                g match
+                    Raise -> self.raise(camera, width, height, dx, dy, k)
+                    Stretch -> self.stretch(camera, width, height, dx, dy, k)
+                    Corner(cx, cy) -> self.resize_corner(camera, ray, cx, cy, k)
+                    Turn(axis) -> self.turn(camera, ray, width, height, x, y, axis, k)
+    end transform_at
+
+    private slide(self, camera: &Camera, ray: Ray, k: DragKeys) -> Transform
+        val p = plane_point(ray, self.grab, Vec3(0.0, 0.0, 1.0), reach_of(camera, self.grab))
+        val t = self.start.translation + (p - self.grab)
+        val limit = POSITION_LIMIT
+
+        Transform(Vec3(clamp(to_grid(t.x, k), -limit, limit), clamp(to_grid(t.y, k), -limit, limit),
+                       self.start.translation.z), self.start.rotation, self.start.scale)
+    end slide
+
+    private raise(self, camera: &Camera, width: real, height: real, dx: real, dy: real, k: DragKeys) -> Transform
+        val travel = line_travel(camera, self.grab, Vec3(0.0, 0.0, 1.0), width, height, dx, dy)
+        val t = self.start.translation
+        val z = clamp(to_grid(t.z + travel, k), self.floor, POSITION_LIMIT)
+
+        Transform(Vec3(t.x, t.y, z), self.start.rotation, self.start.scale)
+    end raise
+
+    private stretch(self, camera: &Camera, width: real, height: real, dx: real, dy: real, k: DragKeys) -> Transform
+        val up = self.start.turned(Vec3(0.0, 0.0, 1.0))
+        val travel = line_travel(camera, self.grab, up, width, height, dx, dy)
+        val s = self.sides()
+        val z = clamp(to_grid(s.z + travel, k), MIN_SIZE, MAX_SIZE)
+
+        if !k.keep then return self.resized(Vec3(s.x, s.y, z), self.base_middle())
+
+        self.resized(proportional(s, z / s.z), self.base_middle())
+    end stretch
+
+    private resize_corner(self, camera: &Camera, ray: Ray, cx: real, cy: real, k: DragKeys) -> Transform
+        val up = self.start.turned(Vec3(0.0, 0.0, 1.0))
+        val from = self.start.apply(self.corner(cx, cy))
+        val fixed = self.corner(-cx, -cy)
+        val pinned = self.start.apply(fixed)
+        val p = plane_point(ray, self.grab, up, reach_of(camera, self.grab))
+
+        // The corner in the shape's own axes, measured from the corner across from it.
+        val along = vec_back(self.start, from + (p - self.grab) - pinned)
+        val s = self.sides()
+
+        if k.keep
+            val w = along.x * cx
+            val d = along.y * cy
+            val ratio = (w * s.x + d * s.y) / (s.x * s.x + s.y * s.y)
+            val wanted = to_grid(s.x * ratio, k) / s.x
+
+            return self.resized(proportional(s, wanted), fixed)
+
+        self.resized(Vec3(clamp(to_grid(along.x * cx, k), MIN_SIZE, MAX_SIZE),
+                          clamp(to_grid(along.y * cy, k), MIN_SIZE, MAX_SIZE), s.z), fixed)
+    end resize_corner
+
+    private turn(self, camera: &Camera, ray: Ray, width: real, height: real, x: real, y: real, axis: int, k: DragKeys) -> Transform
+        val around = world_axis(axis)
+        val angle = if self.on_ring then ring_angle(camera, ray, self.pivot, around, self.grab) else
+            screen_angle(camera, self.pivot, around, width, height, self.press_x, self.press_y, x, y)
+        val step = TURN_STEP * DEGREES
+        val settled = if k.free then angle else snapped(angle, step)
+        val q = (Quaternion.from_axis_angle(around.array(), settled) * self.start.rotation).normalize()
+
+        keeping(Transform(self.start.translation, q, self.start.scale), self.local.center(), self.start)
+    end turn
+end Drag
+
+// A direction in the world, along the shape's own axes, its lengths unchanged.
+private vec_back(t: Transform, v: Vec3) -> Vec3 = vec3(t.rotation.conjugate().rotate(v.array()))
+
+// Every side scaled by one number, which is held to where no side leaves its limits.
+private proportional(s: Vec3, ratio: real) -> Vec3
+    val least = MIN_SIZE / min(s.x, min(s.y, s.z))
+    val most = MAX_SIZE / max(s.x, max(s.y, s.z))
+    val k = clamp(ratio, least, most)
+
+    s * k
+
+private reach_of(camera: &Camera, at: Vec3) -> real =
+    max(camera.distance, (at - camera.eye()).length()) * REACH
+
+// The signed angle about `around` from the grab to where this ray meets the ring's plane.
+private ring_angle(camera: &Camera, ray: Ray, c: Vec3, around: Vec3, grab: Vec3) -> real
+    val p = plane_point(ray, c, around, reach_of(camera, c))
+    val from = grab - c
+    val to = p - c
+
+    around.dot(from.cross(to)).atan2(from.dot(to))
+
+// The signed angle about `around` from one pointer position to another, as it looks around the shape's middle
+// on the screen. A point right on the middle has no angle, and counts as no turn.
+private screen_angle(camera: &Camera, c: Vec3, around: Vec3, width: real, height: real, x0: real, y0: real, x: real, y: real) -> real
+    camera.project(c, width, height) match
+        Some((cx, cy)) ->
+            val (ax, ay) = (x0 - cx, y0 - cy)
+            val (bx, by) = (x - cx, y - cy)
+
+            if bx * bx + by * by < 1.0 then return 0.0
+
+            val towards = if around.dot(camera.eye() - c) >= 0.0 then 1.0 else -1.0
+
+            -(ax * by - ay * bx).atan2(ax * bx + ay * by) * towards
+        None -> 0.0
+end screen_angle
+
+// A drag of the shape's body, whose surface the pointer went down on at `hit`.
+drag_body(doc: &Document, id: int, hit: Vec3, x: real, y: real) -> Option[Drag]
+    val node = doc.find(id)?
+
+    Some(Drag(id, None, node.transform, doc.local_bounds(node), x, y, hit, 0.0, false, hit))
+end drag_body
+
+// A drag of a handle of the selected shape, which went down at this point of the viewport.
+drag_grip(doc: &Document, camera: &Camera, id: int, grip: Grip, width: real, height: real, x: real, y: real) -> Option[Drag]
+    val node = doc.find(id)?
+    val t = node.transform
+    val local = doc.local_bounds(node)
+    val ray = camera.ray(x, y, width, height)
+    val up = t.turned(Vec3(0.0, 0.0, 1.0))
+    var on_ring = false
+    var pivot = t.apply(local.center())
+
+    val grab = grip match
+        Raise -> above(doc, node)
+        Stretch -> t.apply(Vec3(local.center().x, local.center().y, local.max.z))
+        Corner(cx, cy) ->
+            val corner = t.apply(Vec3(if cx > 0.0 then local.max.x else local.min.x,
+                                      if cy > 0.0 then local.max.y else local.min.y, local.min.z))
+
+            plane_point(ray, corner, up, reach_of(camera, corner))
+        Turn(axis) ->
+            val around = world_axis(axis)
+
+            on_ring = ray.direction.dot(around).abs() > TURN_EDGE_ON
+            pivot = pivot_of(doc, node, axis)
+            plane_point(ray, pivot, around, reach_of(camera, pivot))
+
+    // A shape is lowered until its lowest point reaches the ground, or stays where it is if it is already under.
+    val lowest = doc.bounds_of(node).min.z
+    val floor = min(t.translation.z, t.translation.z - lowest)
+
+    Some(Drag(id, Some(grip), t, local, x, y, grab, floor, on_ring, pivot))
+end drag_grip

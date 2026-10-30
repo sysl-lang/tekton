@@ -2,8 +2,9 @@ module sh.sysl.tekton.document
 
 import sh.sysl.manifold.{Manifold, circle, cube, cylinder, sphere, batch, empty, Vec3 as KernelVec3, Op}
 import sh.sysl.quaternion.Quaternion
-import sh.sysl.tekton.space.{Aabb, Vec3, vec3}
+import sh.sysl.tekton.space.{Aabb, Mat4, Vec3, vec3}
 import sysl.buf.{Buf, buf}
+import sysl.math.{max, min}
 
 // A document is a tree of operations, not a mesh.
 //
@@ -12,6 +13,16 @@ import sysl.buf.{Buf, buf}
 // the edited node to the root, and every other node keeps what it has. This same tree is what a script
 // will produce. Nothing here knows about an interface or a GPU, so a command can be run and checked with
 // neither.
+//
+// **A mesh is in its node's own space, before the transform**, and a renderer and a ray test take the
+// transform as a matrix. So moving, turning or resizing a shape asks the kernel for nothing: its triangles
+// are the same triangles, and only a parent that joins them, or something asking for `solid_of`, ever makes
+// the kernel apply the transform.
+
+// The smallest and largest a side may be, and how far from the origin a shape may stand, in millimetres.
+const MIN_SIZE: real = 1.0
+const MAX_SIZE: real = 4000.0
+const POSITION_LIMIT: real = 2000.0
 
 // The shapes a palette offers.
 enum Primitive
@@ -43,12 +54,59 @@ struct Transform
     rotation: Quaternion[real]
     scale: Vec3
 
+    // Where a point of the node's own space lands in its parent's.
+    apply(self, p: Vec3) -> Vec3 = self.translation + self.turned(p.times(self.scale))
+
+    // A direction after only the rotation.
+    turned(self, v: Vec3) -> Vec3 = vec3(self.rotation.rotate(v.array()))
+
+    // A point of the parent's space, back in the node's own.
+    unapply(self, p: Vec3) -> Vec3 = self.unmapped(p - self.translation)
+
+    // A direction of the parent's space, back in the node's own: not at length one, so a distance along a
+    // ray means the same on both sides.
+    unmapped(self, v: Vec3) -> Vec3
+        val back = vec3(self.rotation.conjugate().rotate(v.array()))
+
+        Vec3(back.x / self.scale.x, back.y / self.scale.y, back.z / self.scale.z)
+    end unmapped
+
+    // The transform a shader takes a mesh's positions through.
+    matrix(self) -> Mat4
+        val a = self.turned(Vec3(self.scale.x, 0.0, 0.0))
+        val b = self.turned(Vec3(0.0, self.scale.y, 0.0))
+        val c = self.turned(Vec3(0.0, 0.0, self.scale.z))
+        val t = self.translation
+
+        Mat4([a.x, a.y, a.z, 0.0, b.x, b.y, b.z, 0.0, c.x, c.y, c.z, 0.0, t.x, t.y, t.z, 1.0])
+    end matrix
+
+    // The transform a shader takes a mesh's normals through: the rotation, with the scale undone, which
+    // keeps a normal square to a stretched face.
+    normal_matrix(self) -> Mat4
+        val a = self.turned(Vec3(1.0 / self.scale.x, 0.0, 0.0))
+        val b = self.turned(Vec3(0.0, 1.0 / self.scale.y, 0.0))
+        val c = self.turned(Vec3(0.0, 0.0, 1.0 / self.scale.z))
+
+        Mat4([a.x, a.y, a.z, 0.0, b.x, b.y, b.z, 0.0, c.x, c.y, c.z, 0.0, 0.0, 0.0, 0.0, 1.0])
+    end normal_matrix
+
+    // Whether this could be drawn: every number finite, no side of no size, a rotation with a length.
+    is_usable(self) -> bool
+        val q = self.rotation
+        val n = q.norm()
+
+        self.translation.is_finite() && self.scale.is_finite() && n.is_finite() && n > 0.0 &&
+        self.scale.x > 0.0 && self.scale.y > 0.0 && self.scale.z > 0.0
+    end is_usable
+end Transform
+
 identity_transform() -> Transform =
     Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0))
 
 moved_to(p: Vec3) -> Transform = Transform(p, Quaternion.identity(), Vec3(1.0, 1.0, 1.0))
 
-// The triangles of a solid, as a renderer and a ray test want them.
+// The triangles of a node's own solid, as a renderer and a ray test want them, before its transform.
 //
 // `vertices` holds six floats a vertex: the position, then the normal averaged over the faces meeting
 // there, which is what pushes an outline out evenly. Facets are shaded from the triangles themselves, so
@@ -67,6 +125,22 @@ struct Mesh
         val at = usize(i) * FLOATS_PER_VERTEX
 
         Vec3(real(self.vertices[at]), real(self.vertices[at + 1]), real(self.vertices[at + 2]))
+
+    // The box around the triangles after a transform, which is tight however it turned them.
+    bounds_after(&self, t: Transform) -> Aabb
+        if self.vertex_count() == 0 then return Aabb(t.translation, t.translation)
+
+        var low = t.apply(self.position(0))
+        var high = low
+
+        for i in 1..<self.vertex_count()
+            val p = t.apply(self.position(u32(i)))
+
+            low = Vec3(min(low.x, p.x), min(low.y, p.y), min(low.z, p.z))
+            high = Vec3(max(high.x, p.x), max(high.y, p.y), max(high.z, p.z))
+
+        Aabb(low, high)
+    end bounds_after
 
     // The enclosed volume, from the triangles alone: the signed tetrahedra they make with the origin.
     volume(&self) -> real
@@ -94,17 +168,29 @@ struct Node
     transform: Transform
     tint: int
     children: Buf[&Node]
+
+    // The solid in the node's own space, then in its parent's; the triangles of the first, and where they
+    // land.
+    local: Option[&Manifold]
     solid: Option[&Manifold]
     mesh: Option[&Mesh]
+    bounds: Option[Aabb]
+
+    private clear_placed(&self)
+        self.solid = None
+        self.bounds = None
 
     private clear_cache(&self)
-        self.solid = None
+        self.clear_placed()
+        self.local = None
         self.mesh = None
 
-    // Clear the cache along the path from this node down to `id`, and say whether `id` was below here.
+    // Clear the cache along the path from this node down to `id`, and say whether `id` was below here. A
+    // new transform leaves the node's own solid and triangles as they are, and changes what its parents
+    // are made of.
     private invalidate_path(&self, id: int) -> bool
         if self.id == id
-            self.clear_cache()
+            self.clear_placed()
             return true
 
         for child in self.children.view()
@@ -140,12 +226,13 @@ struct Document
     last_placed: Option[int]
     next_id: int
 
-    // How many times the kernel has been asked to compute a node, so a test can see a cache working.
+    // How many times the kernel has been asked for a solid or its triangles on a node's behalf, so a test
+    // can see a cache working.
     builds: int
     next_revision: int
 
     private add_node(&self, operation: Operation, transform: Transform) -> &Node
-        val node = Node(self.next_id, operation, transform, self.next_id - 1, buf(), None, None)
+        val node = Node(self.next_id, operation, transform, self.next_id - 1, buf(), None, None, None, None)
 
         self.next_id += 1
         self.root.children.push(node)
@@ -169,14 +256,63 @@ struct Document
         node.id
     end add_shape
 
-    // The command that changes where a node is. Only the path to the root is computed again.
+    // The command that changes where a node is, and every other edit of a transform comes through it. Only
+    // the path to the root is computed again, and only when something asks. A transform nothing could draw
+    // is refused, so the document never holds one.
     set_transform(&self, id: int, t: Transform)
+        if !t.is_usable() then return
+
         self.find(id) match
             Some(node) ->
                 node.transform = t
                 self.root.invalidate_path(id)
             None -> ()
     end set_transform
+
+    // The command behind a typed position.
+    move_to(&self, id: int, p: Vec3) -> Result[unit, string]
+        val node = self.find(id).ok_or("nothing selected")?
+
+        if !p.is_finite() || p.x.abs() > POSITION_LIMIT || p.y.abs() > POSITION_LIMIT || p.z.abs() > POSITION_LIMIT
+            return Err(s"Position is limited to ${POSITION_LIMIT.round()} mm")
+
+        val t = node.transform
+
+        self.set_transform(id, Transform(p, t.rotation, t.scale))
+        Ok(())
+    end move_to
+
+    // The command behind a typed rotation: the shape turns about its own middle, which stays where it is.
+    rotate_to(&self, id: int, q: Quaternion[real]) -> Result[unit, string]
+        val node = self.find(id).ok_or("nothing selected")?
+        val t = node.transform
+        val turned = Transform(t.translation, q.normalize(), t.scale)
+
+        if !turned.is_usable() then return Err("Rotation must be a number of degrees")
+
+        self.set_transform(id, keeping(turned, self.local_bounds(node).center(), t))
+        Ok(())
+    end rotate_to
+
+    // The command behind a typed size: the sides along the shape's own axes, in millimetres, growing from
+    // its own origin.
+    resize_to(&self, id: int, size: Vec3) -> Result[unit, string]
+        val node = self.find(id).ok_or("nothing selected")?
+
+        for i in 0..<3
+            val side = size.axis(i)
+
+            if !side.is_finite() || side < MIN_SIZE || side > MAX_SIZE
+                return Err(s"Size must be from ${MIN_SIZE.round()} to ${MAX_SIZE.round()} mm")
+
+        val t = node.transform
+
+        self.set_transform(id, Transform(t.translation, t.rotation, scale_for(self.local_bounds(node), size)))
+        Ok(())
+    end resize_to
+
+    // A node's sides along its own axes, in millimetres.
+    size_of(&self, node: &Node) -> Vec3 = self.local_bounds(node).size().times(node.transform.scale)
 
     select(&self, id: Option[int]) = self.selected = id
 
@@ -212,15 +348,15 @@ struct Document
         None
     end blocker
 
-    // A node's solid in its parent's space, computed once until an edit clears it.
-    solid_of(&self, node: &Node) -> &Manifold
-        node.solid match
+    // A node's solid in its own space, computed once until something below it changes.
+    private local_of(&self, node: &Node) -> &Manifold
+        node.local match
             Some(s) -> return s
             None -> ()
 
         self.builds += 1
 
-        val local = node.operation match
+        val s = node.operation match
             Shape(p) -> primitive_solid(p)
             Group ->
                 var parts: Buf[&Manifold] = buf()
@@ -228,30 +364,78 @@ struct Document
                 for child in node.children.view() do parts.push(self.solid_of(child))
 
                 if parts.len() == 0 then empty() else batch(parts.view(), Op.Add)
+
+        node.local = Some(s)
+        s
+    end local_of
+
+    // A node's solid in its parent's space, computed once until an edit clears it.
+    solid_of(&self, node: &Node) -> &Manifold
+        node.solid match
+            Some(s) -> return s
+            None -> ()
+
+        val local = self.local_of(node)
+
+        self.builds += 1
+
         val s = transformed(local, node.transform)
 
         node.solid = Some(s)
         s
     end solid_of
 
-    // A node's triangles, derived from its solid and kept with it.
+    // A node's triangles in its own space, derived from its own solid and kept with it. A new transform
+    // does not touch them.
     mesh_of(&self, node: &Node) -> &Mesh
         node.mesh match
             Some(m) -> return m
             None -> ()
 
-        val m = mesh_from(self.solid_of(node), self.next_revision)
+        val local = self.local_of(node)
+
+        self.builds += 1
+
+        val m = mesh_from(local, self.next_revision)
 
         self.next_revision += 1
         node.mesh = Some(m)
         m
     end mesh_of
 
-    bounds_of(&self, node: &Node) -> Aabb = bounds_of_solid(self.solid_of(node))
+    // A node's box in its own space, before its transform.
+    local_bounds(&self, node: &Node) -> Aabb = self.mesh_of(node).bounds
+
+    // A node's box where it stands, from its triangles and its transform, so an edit never needs the
+    // kernel to answer it.
+    bounds_of(&self, node: &Node) -> Aabb
+        node.bounds match
+            Some(b) -> return b
+            None -> ()
+
+        val b = self.mesh_of(node).bounds_after(node.transform)
+
+        node.bounds = Some(b)
+        b
+    end bounds_of
 end Document
 
 new_document() -> &Document =
-    Document(Node(0, Operation.Group, identity_transform(), 0, buf(), None, None), None, None, 1, 0, 1)
+    Document(Node(0, Operation.Group, identity_transform(), 0, buf(), None, None, None, None), None, None, 1, 0, 1)
+
+// The scale that gives a node with this box these sides. A box with no extent along an axis has no scale
+// to find there, and keeps one.
+scale_for(local: Aabb, size: Vec3) -> Vec3
+    val have = local.size()
+
+    Vec3(if have.x > 0.0 then size.x / have.x else 1.0,
+         if have.y > 0.0 then size.y / have.y else 1.0,
+         if have.z > 0.0 then size.z / have.z else 1.0)
+end scale_for
+
+// This transform moved so that a point of the node's own space lands where it landed under `before`.
+keeping(t: Transform, point: Vec3, before: Transform) -> Transform =
+    Transform(before.apply(point) - t.turned(point.times(t.scale)), t.rotation, t.scale)
 
 private snapped(v: real) -> real = (v / 5.0).ceil() * 5.0
 

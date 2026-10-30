@@ -4,13 +4,17 @@ module sh.sysl.tekton.renderer
 //
 // Four pipelines share one set of uniforms. The ground fades its grid into the background, the shadow
 // flattens each mesh onto the ground along the light, the surface shades facets from the triangles'
-// own slopes, and the outline pushes the selected mesh's back faces out by a fixed number of pixels.
+// own slopes, and the outline pushes the selected mesh's back faces out by a fixed number of pixels. A
+// fifth draws the handles' strokes over all of it, tested against no depth, so a handle shows through
+// whatever stands in front of its shape.
 val SHADERS: string = raw"""
     #include <metal_stdlib>
     using namespace metal;
 
     struct Uniforms {
         float4x4 view_projection;
+        float4x4 model;     // where this mesh's own space goes in the world
+        float4x4 normals;   // and what that does to a normal
         float4 eye;
         float4 light;
         float4 color;
@@ -30,9 +34,10 @@ val SHADERS: string = raw"""
 
     vertex Surface surface_vertex(Vertex in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
         Surface out;
+        float4 world = u.model * float4(in.position, 1.0);
 
-        out.position = u.view_projection * float4(in.position, 1.0);
-        out.world = in.position;
+        out.position = u.view_projection * world;
+        out.world = world.xyz;
         return out;
     }
 
@@ -56,8 +61,9 @@ val SHADERS: string = raw"""
     // The mesh pushed out along its smoothed normals, as measured on the screen, so the width is the
     // same near and far.
     vertex float4 outline_vertex(Vertex in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
-        float4 clip = u.view_projection * float4(in.position, 1.0);
-        float2 along = (u.view_projection * float4(in.normal, 0.0)).xy * u.size.xy;
+        float4 clip = u.view_projection * u.model * float4(in.position, 1.0);
+        float3 normal = normalize((u.normals * float4(in.normal, 0.0)).xyz);
+        float2 along = (u.view_projection * float4(normal, 0.0)).xy * u.size.xy;
         float n = length(along);
 
         if (n > 0.0) clip.xy += along / n * 2.0 / u.size.xy * u.size.z * clip.w;
@@ -71,7 +77,8 @@ val SHADERS: string = raw"""
 
     // The mesh along the light until it reaches the ground.
     vertex float4 shadow_vertex(Vertex in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
-        float3 p = in.position - u.light.xyz * (in.position.z / u.light.z);
+        float3 world = (u.model * float4(in.position, 1.0)).xyz;
+        float3 p = world - u.light.xyz * (world.z / u.light.z);
 
         return u.view_projection * float4(p.x, p.y, 0.0, 1.0);
     }
@@ -124,5 +131,45 @@ val SHADERS: string = raw"""
         float fade = smoothstep(u.ground.w * 0.12, u.ground.w * 0.6, away);
 
         return float4(mix(c, u.color.rgb, fade), 1.0);
+    }
+
+    struct StrokeUniforms {
+        float4 ends;        // the two ends, in pixels
+        float4 color;
+        float4 size;        // the target in pixels, and the radius in pixels
+    };
+
+    struct Mark {
+        float4 position [[position]];
+        float2 pixel;
+    };
+
+    // A quad around a line with round ends, in pixels, a pixel larger than it for the soft edge.
+    vertex Mark stroke_vertex(uint id [[vertex_id]], constant StrokeUniforms& s [[buffer(0)]]) {
+        const float2 corners[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
+        float2 a = s.ends.xy;
+        float2 b = s.ends.zw;
+        float n = length(b - a);
+        float2 along = n > 0.0 ? (b - a) / n : float2(1.0, 0.0);
+        float2 across = float2(-along.y, along.x);
+        float reach = s.size.z + 1.0;
+        float2 c = corners[id];
+        float2 p = (c.x < 0.0 ? a : b) + along * c.x * reach + across * c.y * reach;
+        Mark out;
+
+        out.position = float4(p.x / s.size.x * 2.0 - 1.0, 1.0 - p.y / s.size.y * 2.0, 0.0, 1.0);
+        out.pixel = p;
+        return out;
+    }
+
+    // Coverage from the distance to the line, which is what keeps a handle smooth with no multisampling.
+    fragment float4 stroke_fragment(Mark in [[stage_in]], constant StrokeUniforms& s [[buffer(0)]]) {
+        float2 a = s.ends.xy;
+        float2 ab = s.ends.zw - a;
+        float2 ap = in.pixel - a;
+        float h = clamp(dot(ap, ab) / max(dot(ab, ab), 1.0e-6), 0.0, 1.0);
+        float d = length(ap - ab * h);
+
+        return float4(s.color.rgb, s.color.a * clamp(s.size.z - d + 0.5, 0.0, 1.0));
     }
     """

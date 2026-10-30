@@ -24,6 +24,21 @@ struct Vec3 derives Eq
         if n == 0.0 then self else self * (1.0 / n)
 
     array(self) -> [3]real = [self.x, self.y, self.z]
+
+    // Each axis of the two multiplied, which is what a scale does to a point.
+    times(self, o: Vec3) -> Vec3 = Vec3(self.x * o.x, self.y * o.y, self.z * o.z)
+
+    // One axis by its number: 0 is x, 1 is y, 2 is z.
+    axis(self, i: int) -> real = self.array()[i]
+
+    // The same vector with one axis replaced.
+    with_axis(self, i: int, v: real) -> Vec3
+        var a = self.array()
+
+        a[i] = v
+        vec3(a)
+
+    is_finite(self) -> bool = self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
 end Vec3
 
 vec3(a: [3]real) -> Vec3 = Vec3(a[0], a[1], a[2])

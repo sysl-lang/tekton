@@ -110,6 +110,10 @@ struct Camera
     // Half the view's height, in world units, at the target's depth.
     private half_height(&self) -> real = self.distance * (self.fov * 0.5).tan()
 
+    // How many world units one point of a viewport this many points tall covers, at the depth of `p`.
+    world_per_point(&self, p: Vec3, height: real) -> real =
+        max((p - self.eye()).dot(self.forward()), NEAR_PLANE) * (self.fov * 0.5).tan() * 2.0 / height
+
     // The ray through a point of a viewport of this size, with `y` running down it as a pointer's does.
     ray(&self, x: real, y: real, width: real, height: real) -> Ray
         val tangent = (self.fov * 0.5).tan()

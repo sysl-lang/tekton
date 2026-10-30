@@ -1,22 +1,49 @@
 module sh.sysl.tekton.interface
 
+import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
 import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, new_document, primitive_name}
-import sh.sysl.tekton.picking.pick
+import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
+import sh.sysl.tekton.picking.{pick, pick_hit}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
 import sh.sysl.ui.*
 import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, viewport, viewport_depth_format}
 import sysl.buf.{Buf, buf}
-import sysl.text.to_lower
+import sysl.text.{parse_real, to_lower}
 
 // The window: a palette beside one viewport.
 //
 // Everything the pointer can do arrives here and leaves as a command on the document or a move of the
 // camera. **The slop is what tells a click from a drag**: a press that travels further than this over the
-// viewport is the camera's, and the canvas then does not report it as a tap.
+// viewport is a drag, and the canvas then does not report it as a tap. **What a drag is, is settled by where
+// it began**: on a handle it works that handle, on a shape it moves that shape, and on empty space it turns
+// the view.
 
 // How far a press may wander, in points, and still be a click.
 const CLICK_SLOP: int = 3
+
+// The grid a drag snaps to unless told otherwise, in millimetres.
+const DEFAULT_GRID: real = 1.0
+
+const RADIANS_PER_DEGREE: real = real.pi() / 180.0
+
+// How wide each of a row of three number fields is, and the keyboard id of the first.
+const NUMBER_WIDTH: int = 52
+const FIRST_FIELD_ID: int = 100
+
+const WRONG_INK: u32 = 0xD92D20u32
+
+// What the primary button is doing.
+enum Gesture
+    Idle
+    Orbit
+    Edit(drag: Drag)
+
+// Which of the selection's numbers a field shows.
+enum Quantity
+    Position
+    Size
+    Rotation
 
 // A click selected or cleared the selection, or the palette added a shape. What a document's panel
 // shows follows this.
@@ -28,8 +55,19 @@ struct Workspace
     changes: &Signal[int]
 
     // The viewport's size in points as last painted, which a frame's pixels are divided by for its density.
+    width: int
     height: int
     tap_waiting: bool
+
+    gesture: Gesture
+    grid: real
+
+    // What the selection last put on the screen.
+    overlay: &Layout
+    fields: Buf[&NumberField]
+
+    // What is wrong with the number last typed, or nothing.
+    problem: &Signal[string]
 
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
@@ -37,33 +75,112 @@ struct Workspace
     add(&self, p: Primitive)
         self.doc.add_shape(p)
         self.camera.frame_if_out_of_view(self.doc)
+        self.problem.set("")
         self.changed()
     end add
 
-    // A click at this point of a viewport at this rectangle.
+    // A click at this point of a viewport at this rectangle. On a handle it does nothing: the handle is
+    // part of what is already selected.
     click(&self, x: int, y: int, r: Rect)
-        val ray = self.camera.ray(real(x - r.x), real(y - r.y), real(r.w), real(r.h))
+        val lx = real(x - r.x)
+        val ly = real(y - r.y)
+
+        if layout(self.doc, self.camera, real(r.w), real(r.h)).grip_at(lx, ly).is_some() then return
+
+        val ray = self.camera.ray(lx, ly, real(r.w), real(r.h))
 
         self.doc.select(pick(self.doc, ray))
+        self.problem.set("")
         self.changed()
     end click
 
+    // A drag has just begun at this point. A handle of the selection comes first, whatever stands in front
+    // of it, then the nearest shape, which it selects, and failing both the view.
+    private begin(&self, x: int, y: int, r: Rect)
+        val lx = real(x - r.x)
+        val ly = real(y - r.y)
+        val w = real(r.w)
+        val h = real(r.h)
+
+        layout(self.doc, self.camera, w, h).grip_at(lx, ly) match
+            Some(grip) ->
+                self.doc.selected.and_then(id -> drag_grip(self.doc, self.camera, id, grip, w, h, lx, ly)) match
+                    Some(d) -> self.gesture = Gesture.Edit(d)
+                    None -> ()
+
+                return
+            None -> ()
+
+        val ray = self.camera.ray(lx, ly, w, h)
+
+        pick_hit(self.doc, ray) match
+            Some(p) ->
+                self.doc.select(Some(p.id))
+                self.problem.set("")
+                self.changed()
+
+                drag_body(self.doc, p.id, ray.at(p.distance), lx, ly) match
+                    Some(d) -> self.gesture = Gesture.Edit(d)
+                    None -> ()
+            None -> self.gesture = Gesture.Orbit
+    end begin
+
+    // Bring the shape to where the pointer has it now. Nothing is told if that is where it already is, so a
+    // pointer held still costs no rebuild.
+    private follow(&self, d: Drag, c: *Canvas, r: Rect)
+        val (x, y) = c.pointer()
+        val keys = c.modifiers()
+        val t = d.transform_at(self.camera, real(r.w), real(r.h), real(x - r.x), real(y - r.y),
+                               DragKeys(self.grid, keys.shift, keys.alt))
+
+        self.doc.find(d.id) match
+            Some(node) ->
+                val was = node.transform
+
+                if was.translation != t.translation || was.scale != t.scale || was.rotation != t.rotation
+                    self.doc.set_transform(d.id, t)
+                    self.changed()
+            None -> ()
+    end follow
+
+    private is_editing(&self) -> bool =
+        self.gesture match
+            Edit(_) -> true
+            _ -> false
+
     // What the pointer did over the viewport this frame.
     private input(&self, c: *Canvas, r: Rect)
+        self.width = r.w
         self.height = r.h
 
         val (ox, oy) = c.drag_by(r, 1, PointerButton.Primary, CLICK_SLOP, CLICK_SLOP)
 
-        if ox != 0 || oy != 0 then self.camera.orbit(real(ox), real(oy))
+        if ox != 0 || oy != 0
+            self.gesture match
+                Idle ->
+                    val (bx, by) = c.press_origin()
 
+                    self.begin(bx, by, r)
+                _ -> ()
+
+        self.gesture match
+            Idle -> ()
+            Orbit -> if ox != 0 || oy != 0 then self.camera.orbit(real(ox), real(oy))
+            Edit(d) -> self.follow(d, c, r)
+
+        // The other buttons and the wheel are still read while a shape is being dragged, so they are taken
+        // from whatever would have them, and do nothing: the view holding still is what keeps the shape
+        // under the pointer.
         for button in [PointerButton.Middle, PointerButton.Secondary]
             val (px, py) = c.drag_by(r, 2, button, 0, 0)
 
-            if px != 0 || py != 0 then self.camera.pan(real(px), real(py), real(r.h))
+            if (px != 0 || py != 0) && !self.is_editing() then self.camera.pan(real(px), real(py), real(r.h))
 
         val (_, wheel) = c.wheel(r)
 
-        if wheel != 0 then self.camera.zoom(real(wheel))
+        if wheel != 0 && !self.is_editing() then self.camera.zoom(real(wheel))
+
+        if !c.held(PointerButton.Primary) then self.gesture = Gesture.Idle
 
         // A tap's action is called at the release, between paints, with no canvas to ask where the press
         // was; the next paint asks, and the press may have come and gone since this one.
@@ -74,7 +191,23 @@ struct Workspace
             self.click(x, y, r)
 
         c.hit(r, () -> self.tap_waiting = true)
+
+        self.overlay = layout(self.doc, self.camera, real(r.w), real(r.h), self.hot_grip(c, r))
     end input
+
+    // The handle to show as being under the pointer: the one being dragged, or else whatever is there.
+    private hot_grip(&self, c: *Canvas, r: Rect) -> Option[Grip]
+        self.gesture match
+            Edit(d) -> return d.grip
+            Orbit -> return None
+            Idle -> ()
+
+        val (x, y) = c.pointer()
+
+        if !r.holds(x, y) then return None
+
+        layout(self.doc, self.camera, real(r.w), real(r.h)).grip_at(real(x - r.x), real(y - r.y))
+    end hot_grip
 
     // The viewport, made once: it holds the targets the 3D is drawn into.
     viewport(&self) -> &Viewport
@@ -86,7 +219,7 @@ struct Workspace
             val scale = if self.height > 0 then real(f.rect.h) / real(self.height) else 1.0
 
             self.renderer.draw(f.device, f.cmd, f.color, f.depth, viewport_depth_format(f.device), VIEWPORT_COLOR_FORMAT,
-                               self.doc, self.camera, real(f.rect.w), real(f.rect.h), scale)
+                               self.doc, self.camera, real(f.rect.w), real(f.rect.h), scale, self.overlay.strokes.view())
         , (c, r) -> self.input(c, r))
 
         self.view = Some(v)
@@ -112,26 +245,188 @@ struct Workspace
 
         parts.push(spacer().flex())
         parts.push(self.selection_panel())
-        parts.push(column([text("Drag to orbit").font_size(11.0), text("Right-drag to pan").font_size(11.0),
-                           text("Wheel to zoom").font_size(11.0)], 2))
+        parts.push(column([text("Drag a shape to move it").font_size(11.0), text("Drag empty space to orbit").font_size(11.0),
+                           text("Right-drag to pan").font_size(11.0), text("Wheel to zoom").font_size(11.0),
+                           text("Shift: no snapping").font_size(11.0), text("Option: keep proportions").font_size(11.0)], 2))
 
-        row([column(parts.view(), 10).padding(16).frame(190, 0).background(0xFFFFFFu32).restyle(t -> light()),
+        row([column(parts.view(), 10).padding(16).frame(206, 0).background(0xFFFFFFu32).restyle(t -> light()),
              spacer().frame(1, 0).background(0xCBD2DCu32)])
     end panel
+
+    // The nine number fields, made once, because each remembers what is being typed in it.
+    number_fields(&self) -> []&NumberField
+        if self.fields.len() == 0
+            for q in [Quantity.Position, Quantity.Size, Quantity.Rotation]
+                for axis in 0..<3
+                    val id = FIRST_FIELD_ID + int(self.fields.len())
+
+                    self.fields.push(new_number_field(self, q, axis, id))
+
+        self.fields.view()
+    end number_fields
 
     private selection_panel(&self) -> &View
         self.doc.selected.and_then(id -> self.doc.find(id)) match
             Some(node) ->
-                val size = self.doc.bounds_of(node).size()
                 val name = node.operation match
                     Shape(p) -> primitive_name(p)
                     Group -> "Group"
+                val fields = self.number_fields()
+                var parts: Buf[&View] = buf()
 
-                column([text(name).font_size(16.0),
-                        text(s"${size.x.round()} x ${size.y.round()} x ${size.z.round()} mm").font_size(12.0)], 4)
+                parts.push(text(name).font_size(16.0))
+
+                for (i, label) in [(0, "Position, mm"), (3, "Size, mm"), (6, "Rotation, degrees")]
+                    parts.push(text(label).font_size(11.0))
+                    parts.push(row([fields[i].view(), fields[i + 1].view(), fields[i + 2].view()], 3))
+
+                if self.problem.read() != ""
+                    parts.push(text(self.problem.read()).font_size(11.0).foreground(WRONG_INK))
+
+                column(parts.view(), 4)
             None -> text("Nothing selected").font_size(12.0)
     end selection_panel
+
+    // What a field should show now.
+    private number(&self, q: Quantity, axis: int) -> Option[real]
+        val node = self.doc.selected.and_then(id -> self.doc.find(id))?
+
+        Some(q match
+            Position -> node.transform.translation.axis(axis)
+            Size -> self.doc.size_of(node).axis(axis)
+            Rotation -> euler_degrees(node.transform.rotation)[axis])
+    end number
+
+    // The command behind a number typed into a field.
+    private put(&self, q: Quantity, axis: int, value: real) -> Result[unit, string]
+        val id = self.doc.selected.ok_or("nothing selected")?
+        val node = self.doc.find(id).ok_or("nothing selected")?
+
+        val done = q match
+            Position -> self.doc.move_to(id, node.transform.translation.with_axis(axis, value))
+            Size -> self.doc.resize_to(id, self.doc.size_of(node).with_axis(axis, value))
+            Rotation ->
+                if !value.is_finite()
+                    Err("Rotation must be a number of degrees")
+                else
+                    var angles = euler_degrees(node.transform.rotation)
+
+                    angles[axis] = value
+                    self.doc.rotate_to(id, Quaternion.from_euler(angles[2] * RADIANS_PER_DEGREE,
+                                                                 angles[1] * RADIANS_PER_DEGREE,
+                                                                 angles[0] * RADIANS_PER_DEGREE))
+
+        done?
+        self.changed()
+        Ok(())
+    end put
 end Workspace
 
+// A rotation as the three angles a panel shows, about x, y and z, in degrees.
+private euler_degrees(q: Quaternion[real]) -> [3]real
+    val (yaw, pitch, roll) = q.to_euler()
+
+    [roll / RADIANS_PER_DEGREE, pitch / RADIANS_PER_DEGREE, yaw / RADIANS_PER_DEGREE]
+
+// A number the way a field shows it: at most two places, with no zeros trailing and no negative zero.
+format_number(v: real) -> string
+    val rounded = (v * 100.0).round() / 100.0
+    val written = f"${rounded + 0.0}%.2f"
+    var end_at = written.len
+
+    while written[end_at - 1] == u8('0') do end_at -= 1
+
+    if written[end_at - 1] == u8('.') then end_at -= 1
+
+    val shown = written[0..<end_at]
+
+    if shown == "-0" then "0" else shown
+end format_number
+
+// One of the selection's numbers, in a text field.
+//
+// **Typing changes nothing until it is finished with**: enter, or the field losing the keyboard, sends it to
+// the document. A value the document refuses, or text that is no number, keeps the old value, marks the field
+// and says why. Escape puts the old text back. A field nobody is typing in follows the document.
+struct NumberField
+    owner: &Workspace
+    quantity: Quantity
+    axis: int
+    id: int
+    text: &Signal[string]
+    field: &View
+    was_mine: bool
+    wrong: bool
+
+    view(&self) -> &View = self
+
+    // The text says what is already there, so there is nothing to send. Otherwise, send it.
+    private accept(&self, shown: string)
+        val typed = self.text.read()
+
+        if typed == shown
+            self.wrong = false
+            return
+
+        val answer = parse_real(typed) match
+            Ok(v) -> self.owner.put(self.quantity, self.axis, v)
+            Err(_) -> if typed == "" then Err("A number is needed here") else Err(s"\"${typed}\" is not a number")
+
+        answer match
+            Ok(_) ->
+                self.wrong = false
+                self.owner.problem.set("")
+            Err(why) ->
+                self.wrong = true
+                self.owner.problem.set(why)
+    end accept
+end NumberField
+
+impl View for NumberField
+    measure(&self, c: *Canvas, avail: Size) -> Size = self.field.measure(c, avail)
+
+    paint(&self, c: *Canvas, r: Rect)
+        val mine = c.focus() == self.id
+        val value = self.owner.number(self.quantity, self.axis)
+        val shown = value match
+            Some(v) -> format_number(v)
+            None -> ""
+
+        if mine
+            for p in c.keys()
+                if p.key == Key.Enter
+                    self.accept(shown)
+
+                    if !self.wrong then self.text.set(format_number(self.owner.number(self.quantity, self.axis).unwrap_or(0.0)))
+
+                if p.key == Key.Escape
+                    self.wrong = false
+                    self.owner.problem.set("")
+                    self.text.set(shown)
+                    c.take_focus(NOBODY)
+        else
+            if self.was_mine then self.accept(shown)
+
+            val now = self.owner.number(self.quantity, self.axis) match
+                Some(v) -> format_number(v)
+                None -> ""
+
+            if self.text.read() != now then self.text.set(now)
+
+            self.wrong = false
+
+        self.was_mine = c.focus() == self.id
+        self.field.paint(c, r)
+
+        if self.wrong then c.stroke(r, WRONG_INK, 2, c.theme().radius)
+    end paint
+end NumberField
+
+private new_number_field(owner: &Workspace, q: Quantity, axis: int, id: int) -> &NumberField
+    val shown = signal("")
+
+    NumberField(owner, q, axis, id, shown, text_field(shown, id, NUMBER_WIDTH).font_size(11.0), false, false)
+
 new_workspace() -> &Workspace =
-    Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, false)
+    Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
+              layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""))
