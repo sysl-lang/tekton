@@ -1,0 +1,73 @@
+module sh.sysl.tekton.picking
+
+import sh.sysl.tekton.document.{Document, Mesh}
+import sh.sysl.tekton.space.{Ray, Vec3}
+
+// Which shape a ray meets first, against the triangles the kernel made.
+
+// How far along the ray it first meets a triangle of this mesh, if it does. Both sides of a triangle
+// count, so a camera that has ended up inside a shape can still select it.
+ray_mesh(ray: Ray, mesh: &Mesh) -> Option[real]
+    if !mesh.bounds.hit_by(ray) then return None
+
+    var nearest: Option[real] = None
+    var i = 0usize
+
+    while i < mesh.indices.len()
+        val a = mesh.position(mesh.indices[i])
+        val b = mesh.position(mesh.indices[i + 1])
+        val c = mesh.position(mesh.indices[i + 2])
+
+        ray_triangle(ray, a, b, c) match
+            Some(t) ->
+                nearest = nearest match
+                    Some(n) -> if t < n then Some(t) else Some(n)
+                    None -> Some(t)
+            None -> ()
+
+        i += 3
+
+    nearest
+end ray_mesh
+
+// The Möller-Trumbore intersection: the point's barycentric coordinates and its distance, from three
+// scalar triple products.
+private ray_triangle(ray: Ray, a: Vec3, b: Vec3, c: Vec3) -> Option[real]
+    val ab = b - a
+    val ac = c - a
+    val p = ray.direction.cross(ac)
+    val det = ab.dot(p)
+
+    if det.abs() < 1.0e-12 then return None
+
+    val inverse = 1.0 / det
+    val s = ray.origin - a
+    val u = s.dot(p) * inverse
+
+    if u < 0.0 || u > 1.0 then return None
+
+    val q = s.cross(ab)
+    val v = ray.direction.dot(q) * inverse
+
+    if v < 0.0 || u + v > 1.0 then return None
+
+    val t = ac.dot(q) * inverse
+
+    if t > 0.0 then Some(t) else None
+end ray_triangle
+
+// The id of the nearest thing on the ground this ray meets, if any.
+pick(doc: &Document, ray: Ray) -> Option[int]
+    var best: Option[int] = None
+    var best_t = real.infinity()
+
+    for item in doc.items()
+        ray_mesh(ray, doc.mesh_of(item)) match
+            Some(t) ->
+                if t < best_t
+                    best_t = t
+                    best = Some(item.id)
+            None -> ()
+
+    best
+end pick

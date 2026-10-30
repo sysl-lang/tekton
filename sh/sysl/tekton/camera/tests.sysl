@@ -1,0 +1,127 @@
+module sh.sysl.tekton.camera
+@tests
+
+import sh.sysl.tekton.space.Vec3
+import sysl.math.pi
+
+private close(a: real, b: real) -> bool = (a - b).abs() < 1.0e-6
+
+@test
+the_tilt_stops_short_of_the_ground_however_far_it_is_dragged()
+    val c = new_camera()
+
+    c.orbit(0.0, -100000.0)
+    assert_eq(c.tilt, MIN_TILT, "at the low stop")
+    assert(c.eye().z > 0.0, "and the eye is above the ground")
+
+@test
+the_tilt_stops_short_of_straight_down_so_the_view_cannot_flip()
+    val c = new_camera()
+
+    c.orbit(0.0, 100000.0)
+    assert_eq(c.tilt, MAX_TILT, "at the high stop")
+    assert(c.up().z > 0.0, "up still points up")
+    assert(c.forward().z < 0.0, "and the view still looks down")
+
+@test
+the_eye_stays_above_the_ground_at_every_stop_of_every_control()
+    val c = new_camera()
+
+    c.pan(0.0, -1.0e7, 600.0)
+    c.orbit(0.0, -1.0e7)
+    c.zoom(-1.0e7)
+    assert(c.target.z >= 0.0, "the target cannot be panned under the ground")
+    assert(c.eye().z > 0.0, "and neither can the eye")
+
+@test
+a_turn_all_the_way_around_comes_back()
+    val c = new_camera()
+    val before = c.eye()
+
+    c.orbit(2.0 * pi / ORBIT_RATE, 0.0)
+
+    val after = c.eye()
+
+    assert(close(after.x, before.x) && close(after.y, before.y) && close(after.z, before.z), "the same eye")
+
+@test
+zoom_moves_toward_the_centre_and_is_clamped_both_ways()
+    val c = new_camera()
+    val target = c.target
+    val far = c.distance
+
+    c.zoom(100.0)
+    assert(c.distance < far, "positive is nearer")
+    assert_eq(c.target.x, target.x, "and the centre stays")
+
+    c.zoom(1.0e6)
+    assert_eq(c.distance, MIN_DISTANCE, "never closer than the stop")
+
+    c.zoom(-1.0e6)
+    assert_eq(c.distance, MAX_DISTANCE, "and never farther")
+
+@test
+a_pan_keeps_what_is_at_the_target_under_the_pointer()
+    val c = new_camera()
+    val anchor = c.target
+    val (x0, y0) = c.project(anchor, 800.0, 600.0).unwrap()
+
+    c.pan(40.0, 25.0, 600.0)
+
+    val (x1, y1) = c.project(anchor, 800.0, 600.0).unwrap()
+
+    assert((x1 - x0 - 40.0).abs() < 1.0e-6, "right by what the pointer moved")
+    assert((y1 - y0 - 25.0).abs() < 1.0e-6, "down by what the pointer moved")
+
+@test
+a_pan_is_clamped_to_the_working_area()
+    val c = new_camera()
+
+    c.pan(1.0e9, 0.0, 600.0)
+    assert(c.target.x.abs() <= PAN_LIMIT && c.target.y.abs() <= PAN_LIMIT, "stays on the ground plan")
+
+@test
+the_ray_through_a_projected_point_passes_through_that_point()
+    val c = new_camera()
+    val p = Vec3(12.0, -7.0, 5.0)
+
+    c.orbit(130.0, -20.0)
+
+    val (x, y) = c.project(p, 1024.0, 640.0).unwrap()
+    val ray = c.ray(x, y, 1024.0, 640.0)
+    val to = p - ray.origin
+    val off = to - ray.direction * to.dot(ray.direction)
+
+    assert(off.length() < 1.0e-6, "the matrix a shader uses and the ray a click uses agree")
+
+@test
+the_centre_of_the_viewport_looks_at_the_target()
+    val c = new_camera()
+    val ray = c.ray(400.0, 300.0, 800.0, 600.0)
+    val on = ray.at(c.distance)
+
+    assert(close(on.x, c.target.x) && close(on.y, c.target.y) && close(on.z, c.target.z), "straight ahead")
+
+@test
+a_point_higher_in_the_world_is_higher_on_the_screen()
+    val c = new_camera()
+    val (_, low) = c.project(Vec3(0.0, 0.0, 0.0), 800.0, 600.0).unwrap()
+    val (_, high) = c.project(Vec3(0.0, 0.0, 20.0), 800.0, 600.0).unwrap()
+
+    assert(high < low, "y runs down the screen and z runs up the world")
+
+@test
+a_point_behind_the_camera_projects_to_nothing()
+    val c = new_camera()
+
+    assert(c.project(c.eye() - c.forward() * 10.0, 800.0, 600.0).is_none(), "behind the eye")
+
+@test
+depth_runs_from_zero_at_the_near_plane_to_one_at_the_far()
+    val c = new_camera()
+    val m = c.view_projection(1.0)
+    val (near_clip, near_w) = m.apply(c.eye() + c.forward() * NEAR_PLANE)
+    val (far_clip, far_w) = m.apply(c.eye() + c.forward() * FAR_PLANE)
+
+    assert((near_clip.z / near_w).abs() < 1.0e-6, "near is zero")
+    assert((far_clip.z / far_w - 1.0).abs() < 1.0e-6, "far is one")

@@ -1,0 +1,30 @@
+// A 3D modeller with an uncomplicated interface.
+//
+//     sysl build .
+//     ./tekton
+//     ./tekton --demo --shot frame.png --size 1400x900
+
+package {
+  name    = "tekton"
+  version = "0.0.1"
+  sysl    = "0.8.6"
+}
+
+optimization = "2"
+
+// **`os` and `heap`** for meshes and the screenshot; **`posix`** because SDL opens a window and Manifold
+// runs a thread pool.
+requires {
+  os    = true
+  posix = true
+  heap  = true
+}
+
+// `manifold` is the kernel every mesh comes from; `quaternion` turns the camera; `syslui-sdl` is the
+// window, and `syslui` the interface in it.
+dependencies {
+  manifold   { git = "github.com/sysl-lang/manifold",   version = "0.1.1" }
+  quaternion { git = "github.com/sysl-lang/quaternion", version = "0.1.0" }
+  syslui     { git = "github.com/sysl-lang/syslui",     version = "0.1.12" }
+  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.12" }
+}

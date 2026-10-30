@@ -1,0 +1,114 @@
+module sh.sysl.tekton.camera
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.{Mat4, Ray, Vec3, vec3}
+import sysl.math.clamp
+
+// A camera orbiting a point near the ground.
+//
+// **It keeps a turn and a tilt rather than an orientation**, because those are what a clamp can speak to:
+// the tilt stays above the ground and short of straight down, so the view can neither flip over nor go
+// under the model. The quaternion is what turns them into directions, with no gimbal to fall into at the
+// top of the range.
+
+const MIN_TILT: real = 0.07
+const MAX_TILT: real = 1.55
+const MIN_DISTANCE: real = 15.0
+const MAX_DISTANCE: real = 2500.0
+
+// How far the view's centre may wander from the origin along the ground, and above it.
+const PAN_LIMIT: real = 2000.0
+const LIFT_LIMIT: real = 500.0
+
+const NEAR_PLANE: real = 1.0
+const FAR_PLANE: real = 8000.0
+
+// Radians a drag of one point turns the view.
+const ORBIT_RATE: real = 0.008
+
+// How much one point of wheel changes the distance, as a power of e.
+const ZOOM_RATE: real = 0.002
+
+struct Camera
+    target: Vec3
+    turn: real
+    tilt: real
+    distance: real
+    fov: real
+
+    private orientation(&self) -> Quaternion[real] =
+        Quaternion.from_axis_angle([0.0, 0.0, 1.0], self.turn) *
+        Quaternion.from_axis_angle([1.0, 0.0, 0.0], -self.tilt)
+
+    forward(&self) -> Vec3 = vec3(self.orientation().rotate([0.0, 1.0, 0.0]))
+
+    right(&self) -> Vec3 = vec3(self.orientation().rotate([1.0, 0.0, 0.0]))
+
+    up(&self) -> Vec3 = vec3(self.orientation().rotate([0.0, 0.0, 1.0]))
+
+    eye(&self) -> Vec3 = self.target - self.forward() * self.distance
+
+    // Turn the view by a drag of this many points. The model follows the pointer.
+    orbit(&self, dx: real, dy: real)
+        self.turn -= dx * ORBIT_RATE
+        self.tilt = clamp(self.tilt + dy * ORBIT_RATE, MIN_TILT, MAX_TILT)
+
+    // Slide the view by a drag of this many points, across a viewport this many points tall, so what is at
+    // the target's depth stays under the pointer.
+    pan(&self, dx: real, dy: real, height: real)
+        val scale = self.half_height() * 2.0 / height
+        val t = self.target - self.right() * (dx * scale) + self.up() * (dy * scale)
+
+        self.target = Vec3(clamp(t.x, -PAN_LIMIT, PAN_LIMIT), clamp(t.y, -PAN_LIMIT, PAN_LIMIT),
+                           clamp(t.z, 0.0, LIFT_LIMIT))
+    end pan
+
+    // Move toward the view's centre, or away, by a turn of the wheel in points. Positive is toward.
+    zoom(&self, amount: real) =
+        self.distance = clamp(self.distance * (-amount * ZOOM_RATE).exp(), MIN_DISTANCE, MAX_DISTANCE)
+
+    // Half the view's height, in world units, at the target's depth.
+    private half_height(&self) -> real = self.distance * (self.fov * 0.5).tan()
+
+    // The ray through a point of a viewport of this size, with `y` running down it as a pointer's does.
+    ray(&self, x: real, y: real, width: real, height: real) -> Ray
+        val tangent = (self.fov * 0.5).tan()
+        val across = (x / width * 2.0 - 1.0) * tangent * width / height
+        val down = (y / height * 2.0 - 1.0) * tangent
+        val direction = self.forward() + self.right() * across - self.up() * down
+
+        Ray(self.eye(), direction.unit())
+    end ray
+
+    // Where a point lands in a viewport of this size, and whether it is in front of the camera at all.
+    project(&self, p: Vec3, width: real, height: real) -> Option[(real, real)]
+        val (clip, w) = self.view_projection(width / height).apply(p)
+
+        if w <= 0.0 then return None
+
+        Some(((clip.x / w + 1.0) * 0.5 * width, (1.0 - clip.y / w) * 0.5 * height))
+    end project
+
+    // The matrix a shader takes world positions through, for a depth range of 0 to 1 at this aspect ratio.
+    view_projection(&self, aspect: real) -> Mat4
+        val r = self.right()
+        val u = self.up()
+        val f = self.forward()
+        val e = self.eye()
+        val view = Mat4([r.x, u.x, f.x, 0.0,
+                         r.y, u.y, f.y, 0.0,
+                         r.z, u.z, f.z, 0.0,
+                         -r.dot(e), -u.dot(e), -f.dot(e), 1.0])
+        val focal = 1.0 / (self.fov * 0.5).tan()
+        val depth = FAR_PLANE / (FAR_PLANE - NEAR_PLANE)
+        val projection = Mat4([focal / aspect, 0.0, 0.0, 0.0,
+                               0.0, focal, 0.0, 0.0,
+                               0.0, 0.0, depth, 1.0,
+                               0.0, 0.0, -NEAR_PLANE * depth, 0.0])
+
+        projection * view
+    end view_projection
+end Camera
+
+// The view a new document opens on: from the front and to the right, looking down a little.
+new_camera() -> &Camera = Camera(Vec3(0.0, 0.0, 8.0), 0.65, 0.5, 150.0, 0.7)

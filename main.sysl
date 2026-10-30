@@ -1,0 +1,5 @@
+// Tekton, a modeller for building solid objects.
+
+main(args: []string) -> Result[unit, string]
+    Ok(())
+end main

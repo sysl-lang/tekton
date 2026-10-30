@@ -1,0 +1,120 @@
+module sh.sysl.tekton.space
+
+// Points, directions, rays, boxes and the one matrix a camera hands a shader.
+//
+// **These are values small enough to pass around a triangle at a time**, because a ray test visits every
+// triangle of a mesh on a click. Z is up, and the ground is the plane z = 0.
+
+struct Vec3 derives Eq
+    x: real
+    y: real
+    z: real
+
+    dot(self, o: Vec3) -> real = self.x * o.x + self.y * o.y + self.z * o.z
+
+    cross(self, o: Vec3) -> Vec3 =
+        Vec3(self.y * o.z - self.z * o.y, self.z * o.x - self.x * o.z, self.x * o.y - self.y * o.x)
+
+    length(self) -> real = self.dot(self).sqrt()
+
+    // This direction at length one. The zero vector stays zero, having no direction to keep.
+    unit(self) -> Vec3
+        val n = self.length()
+
+        if n == 0.0 then self else self * (1.0 / n)
+
+    array(self) -> [3]real = [self.x, self.y, self.z]
+end Vec3
+
+vec3(a: [3]real) -> Vec3 = Vec3(a[0], a[1], a[2])
+
+impl Add for Vec3
+    add(self, o: Vec3) -> Vec3 = Vec3(self.x + o.x, self.y + o.y, self.z + o.z)
+
+impl Sub for Vec3
+    sub(self, o: Vec3) -> Vec3 = Vec3(self.x - o.x, self.y - o.y, self.z - o.z)
+
+impl Mul[real] for Vec3
+    mul(self, k: real) -> Vec3 = Vec3(self.x * k, self.y * k, self.z * k)
+
+// A half-line: every `origin + direction * t` with t at or above zero.
+struct Ray
+    origin: Vec3
+    direction: Vec3
+
+    at(self, t: real) -> Vec3 = self.origin + self.direction * t
+
+// An axis-aligned box.
+struct Aabb derives Eq
+    min: Vec3
+    max: Vec3
+
+    center(self) -> Vec3 = (self.min + self.max) * 0.5
+
+    size(self) -> Vec3 = self.max - self.min
+
+    // Whether the two share any area when seen from above, leaving `gap` between them to count as apart.
+    overlaps_plan(self, o: Aabb, gap: real = 0.0) -> bool =
+        self.min.x < o.max.x + gap && o.min.x < self.max.x + gap &&
+        self.min.y < o.max.y + gap && o.min.y < self.max.y + gap
+
+    // Whether a ray meets the box at all, by the slabs of its three axes. A ray parallel to a slab divides
+    // by zero, and the infinities that gives compare the way this needs, except from exactly on a face,
+    // where 0/0 is not a number: a NaN fails both comparisons below and leaves the interval as it was.
+    hit_by(self, r: Ray) -> bool
+        var near = 0.0
+        var far = real.infinity()
+
+        for (lo, hi, o, d) in [(self.min.x, self.max.x, r.origin.x, r.direction.x),
+                               (self.min.y, self.max.y, r.origin.y, r.direction.y),
+                               (self.min.z, self.max.z, r.origin.z, r.direction.z)]
+            val a = (lo - o) / d
+            val b = (hi - o) / d
+            val first = if a < b then a else b
+            val last = if a < b then b else a
+
+            if first > near then near = first
+            if last < far then far = last
+
+        near <= far
+    end hit_by
+end Aabb
+
+// A 4x4 matrix, column by column, the way a shader reads one.
+struct Mat4
+    m: [16]real
+
+    // The point after the matrix, and the `w` a projection leaves it to be divided by.
+    apply(self, p: Vec3) -> (Vec3, real)
+        val a = self.m
+        val w = a[3] * p.x + a[7] * p.y + a[11] * p.z + a[15]
+
+        (Vec3(a[0] * p.x + a[4] * p.y + a[8] * p.z + a[12],
+              a[1] * p.x + a[5] * p.y + a[9] * p.z + a[13],
+              a[2] * p.x + a[6] * p.y + a[10] * p.z + a[14]), w)
+    end apply
+
+    // The same matrix at the width a shader's uniforms hold.
+    floats(self) -> [16]f32
+        var out: [16]f32 = [0.0; 16]
+
+        for i in 0..<16 do out[i] = f32(self.m[i])
+
+        out
+    end floats
+end Mat4
+
+impl Mul for Mat4
+    mul(self, o: Mat4) -> Mat4
+        var out: [16]real = [0.0; 16]
+
+        for col in 0..<4
+            for row in 0..<4
+                var sum = 0.0
+
+                for k in 0..<4 do sum += self.m[k * 4 + row] * o.m[col * 4 + k]
+
+                out[col * 4 + row] = sum
+
+        Mat4(out)
+    end mul

@@ -1,0 +1,115 @@
+module sh.sysl.tekton.picking
+@tests
+
+import sh.sysl.tekton.camera.new_camera
+import sh.sysl.tekton.document.{Primitive, moved_to, new_document}
+import sh.sysl.tekton.space.{Ray, Vec3}
+
+// A box 20 across from (-10, -10, 0) to (10, 10, 20), which is where the first shape lands.
+private looking_along_x(y: real, z: real, from: real = -100.0) -> Ray =
+    Ray(Vec3(from, y, z), Vec3(1.0, 0.0, 0.0))
+
+@test
+a_ray_through_a_box_hits_its_near_face()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val t = ray_mesh(looking_along_x(0.5, 10.5), doc.mesh_of(doc.find(id).unwrap())).unwrap()
+
+    assert((t - 90.0).abs() < 1.0e-4, "at x = -10, ninety along")
+    assert(pick(doc, looking_along_x(0.5, 10.5)) == Some(id), "and pick names the box")
+
+@test
+a_ray_beside_or_above_a_box_misses()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    assert(pick(doc, looking_along_x(10.5, 10.0)).is_none(), "just beside")
+    assert(pick(doc, looking_along_x(0.0, 20.5)).is_none(), "just above")
+
+@test
+a_ray_just_inside_the_edge_hits()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+
+    assert(pick(doc, looking_along_x(9.5, 10.0)) == Some(id), "just inside y")
+    assert(pick(doc, looking_along_x(0.0, 19.5)) == Some(id), "just inside z")
+
+@test
+a_shape_behind_the_ray_is_not_hit()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    assert(pick(doc, looking_along_x(0.0, 10.0, from = 50.0)).is_none(), "the box is behind the origin")
+
+@test
+a_ray_from_inside_hits_the_far_wall_from_behind()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val mesh = doc.mesh_of(doc.find(id).unwrap())
+    val t = ray_mesh(looking_along_x(0.5, 10.5, from = 0.0), mesh).unwrap()
+
+    assert((t - 10.0).abs() < 1.0e-4, "the wall at x = 10, from its back")
+
+@test
+a_ray_from_the_far_side_sees_the_far_face_first()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val back = Ray(Vec3(100.0, 0.5, 10.5), Vec3(-1.0, 0.0, 0.0))
+
+    assert((ray_mesh(back, doc.mesh_of(doc.find(id).unwrap())).unwrap() - 90.0).abs() < 1.0e-4, "x = 10, ninety along")
+
+@test
+the_nearer_of_two_overlapping_shapes_wins_whichever_was_placed_first()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    doc.set_transform(b, moved_to(Vec3(15.0, 0.0, 0.0)))
+
+    assert(pick(doc, looking_along_x(0.5, 10.5)) == Some(a), "from the left, the left one")
+    assert(pick(doc, Ray(Vec3(100.0, 0.5, 10.5), Vec3(-1.0, 0.0, 0.0))) == Some(b), "from the right, the right one")
+
+@test
+a_sphere_is_picked_by_its_surface_and_not_its_bounds()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Sphere)
+    assert(pick(doc, looking_along_x(9.0, 19.0)).is_none(), "inside the bounding box's corner, outside the sphere")
+    assert(pick(doc, looking_along_x(0.0, 10.0)).is_some(), "through its middle")
+
+@test
+the_hole_of_a_torus_is_empty()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Torus)
+
+    assert(pick(doc, Ray(Vec3(0.0, 0.0, 100.0), Vec3(0.0, 0.0, -1.0))).is_none(), "down through the middle")
+    assert(pick(doc, Ray(Vec3(7.0, 0.0, 100.0), Vec3(0.0, 0.0, -1.0))) == Some(id), "down onto the ring")
+
+@test
+a_click_after_orbiting_still_finds_what_is_under_it()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Sphere)
+    val camera = new_camera()
+
+    camera.orbit(310.0, 45.0)
+
+    for (id, centre) in [(a, doc.bounds_of(doc.find(a).unwrap()).center()), (b, doc.bounds_of(doc.find(b).unwrap()).center())]
+        val (x, y) = camera.project(centre, 900.0, 600.0).unwrap()
+
+        assert(pick(doc, camera.ray(x, y, 900.0, 600.0)) == Some(id), s"shape ${id} under its own centre")
+
+    assert(pick(doc, camera.ray(2.0, 2.0, 900.0, 600.0)).is_none(), "and a corner of the view is empty")
+
+@test
+picking_does_not_recompute_a_cached_mesh()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    pick(doc, looking_along_x(0.0, 10.0))
+
+    val before = doc.builds
+
+    pick(doc, looking_along_x(0.0, 10.0))
+    assert_eq(doc.builds, before, "the second click used what the first left")

@@ -1,0 +1,197 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.tekton.space.Vec3
+import sysl.math.pi
+
+private near(a: real, b: real, tolerance: real) -> bool = (a - b).abs() <= tolerance
+
+// ## What the kernel makes, against closed form
+
+// A regular n-gon of radius `r` has this area, which is what a prism or a cone of it is built on.
+private polygon_area(r: real, n: int) -> real = 0.5 * real(n) * r * r * (2.0 * pi/ real(n)).sin()
+
+private volume_of(p: Primitive) -> real
+    val doc = new_document()
+
+    doc.add_shape(p)
+    doc.mesh_of(doc.items()[0]).volume()
+
+@test
+a_box_mesh_has_the_volume_of_a_box()
+    assert(near(volume_of(Primitive.Box), 8000.0, 1.0e-3), "20 x 20 x 20")
+
+@test
+a_cylinder_mesh_has_the_volume_of_its_prism()
+    assert(near(volume_of(Primitive.Cylinder), polygon_area(10.0, ROUND_SEGMENTS) * 20.0, 1.0e-2), "area x height")
+
+@test
+a_cone_mesh_has_a_third_of_that()
+    assert(near(volume_of(Primitive.Cone), polygon_area(10.0, ROUND_SEGMENTS) * 20.0 / 3.0, 1.0e-2), "area x height / 3")
+
+@test
+a_sphere_mesh_converges_on_four_thirds_pi_r_cubed()
+    val exact = 4.0 / 3.0 * pi* 1000.0
+    val got = volume_of(Primitive.Sphere)
+
+    assert(got < exact, "a polyhedron inside the sphere")
+    assert(got > exact * 0.99, "within one percent")
+
+@test
+a_torus_mesh_converges_on_two_pi_squared_ring_tube_squared()
+    val exact = 2.0 * pi* pi* TORUS_RING * TORUS_TUBE * TORUS_TUBE
+    val got = volume_of(Primitive.Torus)
+
+    assert(got < exact, "a polyhedron inside the torus")
+    assert(got > exact * 0.98, "within two percent")
+
+@test
+every_primitive_stands_on_the_ground_centred_on_its_axis()
+    for p in PRIMITIVES
+        val b = primitive_solid(p)
+        val doc = new_document()
+
+        doc.add_shape(p)
+
+        val bounds = doc.bounds_of(doc.items()[0])
+
+        assert(b.status() == sh.sysl.manifold.Status.NoError, s"${primitive_name(p)} is a valid solid")
+        assert(near(bounds.min.z, 0.0, 1.0e-4), s"${primitive_name(p)} rests on z = 0")
+        assert(near(bounds.center().x, 0.0, 1.0e-4), s"${primitive_name(p)} is centred across")
+        assert(near(bounds.center().y, 0.0, 1.0e-4), s"${primitive_name(p)} and along")
+
+// ## Placement
+
+@test
+the_first_shape_lands_on_the_origin_and_is_selected()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+
+    assert(doc.selected == Some(id), "selected")
+    assert(near(doc.bounds_of(doc.items()[0]).center().x, 0.0, 1.0e-4), "at the origin")
+
+@test
+each_new_shape_clears_every_shape_already_placed()
+    val doc = new_document()
+
+    for round in 0..<8
+        for p in PRIMITIVES
+            val id = doc.add_shape(p)
+
+            assert(doc.selected == Some(id), "the new one is selected")
+
+            val items = doc.items()
+            val fresh = doc.bounds_of(items[items.len - 1])
+
+            for i in 0..<items.len - 1
+                assert(!fresh.overlaps_plan(doc.bounds_of(items[i])), s"shape ${id} clear of ${items[i].id}")
+
+    assert_eq(doc.items().len, 40usize, "all of them are in the document")
+
+@test
+placement_goes_past_a_shape_standing_in_the_way()
+    val doc = new_document()
+    val first = doc.add_shape(Primitive.Box)
+    val second = doc.add_shape(Primitive.Box)
+
+    // The first is moved to where the third would otherwise land.
+    doc.set_transform(first, moved_to(Vec3(60.0, 0.0, 0.0)))
+
+    val third = doc.add_shape(Primitive.Box)
+    val b = doc.bounds_of(doc.find(third).unwrap())
+
+    assert(!b.overlaps_plan(doc.bounds_of(doc.find(first).unwrap())), "clear of the moved one")
+    assert(!b.overlaps_plan(doc.bounds_of(doc.find(second).unwrap())), "and of the last placed")
+
+@test
+placement_starts_a_new_row_when_a_row_is_long()
+    val doc = new_document()
+
+    for i in 0..<12 do doc.add_shape(Primitive.Box)
+
+    var rows = 0
+    var widest = 0.0
+
+    for item in doc.items()
+        val b = doc.bounds_of(item)
+
+        if b.center().y != 0.0 then rows += 1
+        if b.max.x > widest then widest = b.max.x
+
+    assert(rows > 0, "some went to another row")
+    assert(widest < ROW_LENGTH + 40.0, "and the first row stopped")
+
+// ## The cache
+
+@test
+an_untouched_nodes_mesh_is_not_computed_again()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Sphere)
+    val a_node = doc.find(a).unwrap()
+    val b_node = doc.find(b).unwrap()
+    val b_mesh = doc.mesh_of(b_node)
+
+    doc.mesh_of(a_node)
+
+    val before = doc.builds
+
+    doc.mesh_of(a_node)
+    doc.mesh_of(b_node)
+    assert_eq(doc.builds, before, "asking twice computes nothing")
+
+    doc.set_transform(a, moved_to(Vec3(100.0, 0.0, 0.0)))
+    doc.mesh_of(a_node)
+    assert_eq(doc.builds, before + 1, "the edited node, once")
+    assert_eq(doc.mesh_of(b_node).revision, b_mesh.revision, "and its neighbour is the same mesh")
+
+@test
+a_new_revision_tells_a_renderer_the_mesh_changed()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val node = doc.find(a).unwrap()
+    val first = doc.mesh_of(node).revision
+
+    doc.set_transform(a, moved_to(Vec3(100.0, 0.0, 0.0)))
+    assert(doc.mesh_of(node).revision != first, "an edit made a new mesh")
+    assert(near(doc.mesh_of(node).bounds.center().x, 100.0, 1.0e-4), "and it is where the edit put it")
+
+@test
+an_edit_recomputes_only_the_path_from_the_node_to_the_root()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Cone)
+    val root_volume = doc.solid_of(doc.root).volume()
+
+    assert(near(root_volume, 8000.0 + polygon_area(10.0, ROUND_SEGMENTS) * 20.0 / 3.0, 1.0e-1), "the root joins them")
+
+    val before = doc.builds
+
+    doc.set_transform(a, moved_to(Vec3(0.0, 100.0, 0.0)))
+    doc.solid_of(doc.root)
+    assert_eq(doc.builds, before + 2, "the edited node and the root; not the other shape")
+    assert(doc.find(b).unwrap().solid.is_some(), "whose cache was left alone")
+
+@test
+a_transform_rotates_and_scales_what_the_kernel_makes()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val half_turn = sh.sysl.quaternion.Quaternion.from_axis_angle([1.0, 0.0, 0.0], pi/ 2.0)
+
+    doc.set_transform(a, Transform(Vec3(0.0, 0.0, 0.0), half_turn, Vec3(1.0, 2.0, 1.0)))
+
+    val mesh = doc.mesh_of(doc.find(a).unwrap())
+
+    assert(near(mesh.volume(), 16000.0, 1.0e-2), "scaling doubled the volume")
+    assert(near(mesh.bounds.size().z, 40.0, 1.0e-3), "and the long y axis was turned to z")
+
+@test
+selecting_an_id_that_was_edited_keeps_it()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+
+    doc.add_shape(Primitive.Box)
+    doc.select(Some(a))
+    assert(doc.selected == Some(a), "the older one")
+    doc.select(None)
+    assert(doc.selected.is_none(), "and none")

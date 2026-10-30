@@ -1,0 +1,336 @@
+module sh.sysl.tekton.document
+
+import sh.sysl.manifold.{Manifold, circle, cube, cylinder, sphere, batch, empty, Vec3 as KernelVec3, Op}
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.{Aabb, Vec3, vec3}
+import sysl.buf.{Buf, buf}
+
+// A document is a tree of operations, not a mesh.
+//
+// A node says what to do: make this primitive, or combine these children. Its solid and its mesh are
+// **derived** by the kernel and cached on the node, so an edit clears the cache only along the path from
+// the edited node to the root, and every other node keeps what it has. This same tree is what a script
+// will produce. Nothing here knows about an interface or a GPU, so a command can be run and checked with
+// neither.
+
+// The shapes a palette offers.
+enum Primitive
+    Box
+    Cylinder
+    Sphere
+    Cone
+    Torus
+
+// Every primitive, in the order a palette shows them.
+val PRIMITIVES = [Primitive.Box, Primitive.Cylinder, Primitive.Sphere, Primitive.Cone, Primitive.Torus]
+
+primitive_name(p: Primitive) -> string =
+    p match
+        Box -> "Box"
+        Cylinder -> "Cylinder"
+        Sphere -> "Sphere"
+        Cone -> "Cone"
+        Torus -> "Torus"
+
+// What a node computes. A group's solid is its children's, joined.
+enum Operation
+    Shape(primitive: Primitive)
+    Group
+
+// Where a node's solid goes in its parent's space: scaled, then rotated, then moved.
+struct Transform
+    translation: Vec3
+    rotation: Quaternion[real]
+    scale: Vec3
+
+identity_transform() -> Transform =
+    Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0))
+
+moved_to(p: Vec3) -> Transform = Transform(p, Quaternion.identity(), Vec3(1.0, 1.0, 1.0))
+
+// The triangles of a solid, as a renderer and a ray test want them.
+//
+// `vertices` holds six floats a vertex: the position, then the normal averaged over the faces meeting
+// there, which is what pushes an outline out evenly. Facets are shaded from the triangles themselves, so
+// no normal here decides how a surface looks.
+struct Mesh
+    vertices: Buf[f32]
+    indices: Buf[u32]
+    bounds: Aabb
+    revision: int
+
+    vertex_count(&self) -> usize = self.vertices.len() / FLOATS_PER_VERTEX
+
+    triangle_count(&self) -> usize = self.indices.len() / 3
+
+    position(&self, i: u32) -> Vec3
+        val at = usize(i) * FLOATS_PER_VERTEX
+
+        Vec3(real(self.vertices[at]), real(self.vertices[at + 1]), real(self.vertices[at + 2]))
+
+    // The enclosed volume, from the triangles alone: the signed tetrahedra they make with the origin.
+    volume(&self) -> real
+        var sum = 0.0
+        var i = 0usize
+
+        while i < self.indices.len()
+            val a = self.position(self.indices[i])
+            val b = self.position(self.indices[i + 1])
+            val c = self.position(self.indices[i + 2])
+
+            sum += a.dot(b.cross(c)) / 6.0
+            i += 3
+
+        sum
+    end volume
+end Mesh
+
+const FLOATS_PER_VERTEX: usize = 6
+
+// One operation in the tree, with what the kernel last derived from it.
+struct Node
+    id: int
+    operation: Operation
+    transform: Transform
+    tint: int
+    children: Buf[&Node]
+    solid: Option[&Manifold]
+    mesh: Option[&Mesh]
+
+    private clear_cache(&self)
+        self.solid = None
+        self.mesh = None
+
+    // Clear the cache along the path from this node down to `id`, and say whether `id` was below here.
+    private invalidate_path(&self, id: int) -> bool
+        if self.id == id
+            self.clear_cache()
+            return true
+
+        for child in self.children.view()
+            if child.invalidate_path(id)
+                self.clear_cache()
+                return true
+
+        false
+    end invalidate_path
+
+    private find(&self, id: int) -> Option[&Node]
+        if self.id == id then return Some(self)
+
+        for child in self.children.view()
+            child.find(id) match
+                Some(found) -> return Some(found)
+                None -> ()
+
+        None
+    end find
+end Node
+
+// The space a new shape leaves between itself and the shapes around it, in millimetres.
+const PLACEMENT_GAP: real = 10.0
+
+// How far along x a row of shapes runs before the next one starts a new row.
+const ROW_LENGTH: real = 120.0
+
+// A model, and which of its shapes is selected.
+struct Document
+    root: &Node
+    selected: Option[int]
+    last_placed: Option[int]
+    next_id: int
+
+    // How many times the kernel has been asked to compute a node, so a test can see a cache working.
+    builds: int
+    next_revision: int
+
+    private add_node(&self, operation: Operation, transform: Transform) -> &Node
+        val node = Node(self.next_id, operation, transform, self.next_id - 1, buf(), None, None)
+
+        self.next_id += 1
+        self.root.children.push(node)
+        self.root.clear_cache()
+        node
+    end add_node
+
+    // The things that stand on the ground as one: what a click picks and what a renderer draws. A group
+    // is one of them, however many parts it remembers.
+    items(&self) -> []&Node = self.root.children.view()
+
+    find(&self, id: int) -> Option[&Node] = self.root.find(id)
+
+    // The command behind the palette: a new shape on the ground, clear of what is already there, selected.
+    add_shape(&self, p: Primitive) -> int
+        val at = self.next_place(bounds_of_solid(primitive_solid(p)))
+        val node = self.add_node(Operation.Shape(p), moved_to(at))
+
+        self.last_placed = Some(node.id)
+        self.selected = Some(node.id)
+        node.id
+    end add_shape
+
+    // The command that changes where a node is. Only the path to the root is computed again.
+    set_transform(&self, id: int, t: Transform)
+        self.find(id) match
+            Some(node) ->
+                node.transform = t
+                self.root.invalidate_path(id)
+            None -> ()
+    end set_transform
+
+    select(&self, id: Option[int]) = self.selected = id
+
+    // Where a shape with these bounds goes: to the right of the last one placed, starting a new row when
+    // the row is long enough, and on past anything already standing there.
+    private next_place(&self, shape: Aabb) -> Vec3
+        val last = self.last_placed.and_then(id -> self.find(id))
+        var at = last match
+            Some(node) ->
+                val b = self.bounds_of(node)
+
+                Vec3(snapped(b.max.x + PLACEMENT_GAP - shape.min.x), snapped(b.center().y), 0.0)
+            None -> Vec3(0.0, 0.0, 0.0)
+
+        loop
+            if at.x > ROW_LENGTH
+                at = Vec3(0.0, at.y + shape.size().y + PLACEMENT_GAP, 0.0)
+
+            self.blocker(shape, at) match
+                Some(b) -> at = Vec3(snapped(b.max.x + PLACEMENT_GAP - shape.min.x), at.y, 0.0)
+                None -> return at
+    end next_place
+
+    // Whatever already stands where a shape would land, if anything does.
+    private blocker(&self, shape: Aabb, at: Vec3) -> Option[Aabb]
+        val landed = Aabb(shape.min + at, shape.max + at)
+
+        for item in self.items()
+            val b = self.bounds_of(item)
+
+            if landed.overlaps_plan(b) then return Some(b)
+
+        None
+    end blocker
+
+    // A node's solid in its parent's space, computed once until an edit clears it.
+    solid_of(&self, node: &Node) -> &Manifold
+        node.solid match
+            Some(s) -> return s
+            None -> ()
+
+        self.builds += 1
+
+        val local = node.operation match
+            Shape(p) -> primitive_solid(p)
+            Group ->
+                var parts: Buf[&Manifold] = buf()
+
+                for child in node.children.view() do parts.push(self.solid_of(child))
+
+                if parts.len() == 0 then empty() else batch(parts.view(), Op.Add)
+        val s = transformed(local, node.transform)
+
+        node.solid = Some(s)
+        s
+    end solid_of
+
+    // A node's triangles, derived from its solid and kept with it.
+    mesh_of(&self, node: &Node) -> &Mesh
+        node.mesh match
+            Some(m) -> return m
+            None -> ()
+
+        val m = mesh_from(self.solid_of(node), self.next_revision)
+
+        self.next_revision += 1
+        node.mesh = Some(m)
+        m
+    end mesh_of
+
+    bounds_of(&self, node: &Node) -> Aabb = bounds_of_solid(self.solid_of(node))
+end Document
+
+new_document() -> &Document =
+    Document(Node(0, Operation.Group, identity_transform(), 0, buf(), None, None), None, None, 1, 0, 1)
+
+private snapped(v: real) -> real = (v / 5.0).ceil() * 5.0
+
+// The solid of a primitive as a palette makes it: 20 mm across, centred on the z axis, standing on the
+// ground.
+primitive_solid(p: Primitive) -> &Manifold =
+    p match
+        Box -> cube(20.0, 20.0, 20.0, center = true).translate(0.0, 0.0, 10.0)
+        Cylinder -> cylinder(20.0, 10.0, 10.0, ROUND_SEGMENTS)
+        Sphere -> sphere(10.0, ROUND_SEGMENTS).translate(0.0, 0.0, 10.0)
+        Cone -> cylinder(20.0, 10.0, 0.0, ROUND_SEGMENTS)
+        Torus -> circle(TORUS_TUBE, 24).translate(TORUS_RING, 0.0).revolve(ROUND_SEGMENTS).translate(0.0, 0.0, TORUS_TUBE)
+
+// How many sides a round primitive has around its axis.
+const ROUND_SEGMENTS: int = 64
+
+// The ring and tube radii of the palette's torus, in millimetres.
+const TORUS_RING: real = 7.0
+const TORUS_TUBE: real = 3.0
+
+private bounds_of_solid(m: &Manifold) -> Aabb
+    val b = m.bounding_box()
+
+    Aabb(from_kernel(b.min()), from_kernel(b.max()))
+
+private from_kernel(v: KernelVec3) -> Vec3 = Vec3(v.x, v.y, v.z)
+
+private to_kernel(v: Vec3) -> KernelVec3 = KernelVec3(v.x, v.y, v.z)
+
+// The kernel's affine map of a transform: the rotated, scaled axes and the translation.
+private transformed(m: &Manifold, t: Transform) -> &Manifold =
+    m.transform(to_kernel(vec3(t.rotation.rotate([t.scale.x, 0.0, 0.0]))),
+                to_kernel(vec3(t.rotation.rotate([0.0, t.scale.y, 0.0]))),
+                to_kernel(vec3(t.rotation.rotate([0.0, 0.0, t.scale.z]))),
+                to_kernel(t.translation))
+
+// A solid's triangles, with the normal at each vertex averaged over its faces by their areas.
+private mesh_from(solid: &Manifold, revision: int) -> &Mesh
+    val out = solid.to_mesh()
+    val stride = out.num_prop()
+    val props = out.vert_properties()
+    val indices = out.tri_verts()
+    val count = props.len() / stride
+    var vertices: Buf[f32] = buf()
+    var normals: Buf[real] = buf()
+
+    for i in 0..<count
+        for k in 0..<3 do vertices.push(props[i * stride + k])
+        for k in 0..<3 do vertices.push(0.0)
+        for k in 0..<3 do normals.push(0.0)
+
+    var t = 0usize
+
+    while t < indices.len()
+        val a = point(props, stride, indices[t])
+        val b = point(props, stride, indices[t + 1])
+        val c = point(props, stride, indices[t + 2])
+        val area = (b - a).cross(c - a)
+
+        for corner in [indices[t], indices[t + 1], indices[t + 2]]
+            val at = usize(corner) * 3
+
+            normals[at] += area.x
+            normals[at + 1] += area.y
+            normals[at + 2] += area.z
+
+        t += 3
+
+    for i in 0..<count
+        val n = Vec3(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]).unit()
+
+        vertices[i * FLOATS_PER_VERTEX + 3] = f32(n.x)
+        vertices[i * FLOATS_PER_VERTEX + 4] = f32(n.y)
+        vertices[i * FLOATS_PER_VERTEX + 5] = f32(n.z)
+
+    Mesh(vertices, indices, bounds_of_solid(solid), revision)
+end mesh_from
+
+private point(props: Buf[f32], stride: usize, i: u32) -> Vec3
+    val at = usize(i) * stride
+
+    Vec3(real(props[at]), real(props[at + 1]), real(props[at + 2]))
