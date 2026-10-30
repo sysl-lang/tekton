@@ -37,10 +37,28 @@ only the path from that node to the root. This same tree is what a script will p
 SDL's `SDL_CreateGPURenderer` lets one GPU device drive both the 2D renderer syslui-sdl already uses
 and the 3D pass, so the interface and the viewport share a window.
 
+## Driving it without a person
+
+Everything runs without a window, so a test or an agent can use the application the way a person does:
+
+- **The document is a library.** Every edit is a command with no interface attached, so model
+  behaviour is tested directly, and undo is tested against every command.
+- **`tekton --drive <script>`** runs offscreen. A script is lines of input and questions: `click`,
+  `drag`, `key`, `type`, `shot <file>` and `state`, which prints the document, selection and camera as
+  text. It feeds the same event path a real window does, so a click that misses a handle misses here too.
+- **Screenshots are real frames**: the same GPU pass and interface, read back into a PNG. Pixel
+  assertions run against a fixed camera and size.
+
+The event scripting belongs in syslui-sdl, not Tekton, so every application on it gets the same driver.
+
+**Building stays fast by keeping layers apart.** The document, kernel glue and renderer are modules with
+their own tests, so most changes never need the whole application linked or a window opened.
+
 ## Stages
 
 1. SDL_GPU in the sdl3 binding, proved by rendering offscreen and reading the pixels back.
-2. A viewport in syslUI and syslui-sdl: a view whose rectangle the application draws 3D into.
+2. A viewport in syslUI and syslui-sdl: a view whose rectangle the application draws 3D into, plus the
+   offscreen driver.
 3. Shapes, orbit camera, picking, and handles.
 4. Solid or hole, groups, undo.
 5. Saving, STL and 3MF export.
