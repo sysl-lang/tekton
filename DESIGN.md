@@ -43,15 +43,18 @@ Everything runs without a window, so a test or an agent can use the application 
 
 - **The document is a library.** Every edit is a command with no interface attached, so model
   behaviour is tested directly, and undo is tested against every command.
-- **`tekton --drive <script>`** runs offscreen. A script is lines of input and questions: `click`,
-  `drag`, `key`, `type`, `shot <file>` and `state`, which prints the document, selection and camera as
-  text. It feeds the same event path a real window does, so a click that misses a handle misses here too.
+- **A running application can be controlled live, the way a browser is through its developer tools.**
+  Started with `--control <socket>`, in a window or offscreen, it listens on a private Unix socket for
+  commands: `snapshot` (the controls on screen, each with a reference), `click`, `drag`, `key`, `type`,
+  `shot <file>`, `wait` and `state`, which prints the document, selection and camera as text. Input
+  feeds the same event path a real window does, so a click that misses a handle misses here too. A
+  script is a file of the same commands. Without the flag, nothing listens.
 - **Screenshots are real frames**: the same GPU pass and interface, read back into a PNG. Pixel
   assertions run against a fixed camera and size.
 
-Most of this belongs below Tekton, so every application gets it. syslUI owns the script language, named
-controls and the dump of what is on screen. syslui-sdl owns running a real frame offscreen and writing the
-PNG. Tekton adds only its own `state` report and its viewport.
+Most of this belongs below Tekton, so every application gets it. syslUI owns the commands, named
+controls and the snapshot of what is on screen. syslui-sdl owns the socket, running a real frame offscreen
+and writing the PNG. Tekton adds only its own `state` report and its viewport.
 
 **Building stays fast by keeping layers apart.** The document, kernel glue and renderer are modules with
 their own tests, so most changes never need the whole application linked or a window opened.
