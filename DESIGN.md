@@ -44,8 +44,8 @@ Everything runs without a window, so a test or an agent can use the application 
 - **The document is a library.** Every edit is a command with no interface attached, so model
   behaviour is tested directly, and undo is tested against every command.
 - **A running application can be controlled live, the way a browser is through its developer tools.**
-  Started with `--control <socket>`, in a window or offscreen, it listens on a private Unix socket for
-  commands: `snapshot` (the controls on screen, each with a reference), `click`, `drag`, `key`, `type`,
+  Started with `--control <socket>`, in a window or offscreen, it serves HTTP on a private Unix socket, so
+  `curl --unix-socket <socket> http://tekton/snapshot` is a complete client. Its commands are: `snapshot` (the controls on screen, each with a reference), `click`, `drag`, `key`, `type`,
   `shot <file>`, `wait` and `state`, which prints the document, selection and camera as text. Input
   feeds the same event path a real window does, so a click that misses a handle misses here too. A
   script is a file of the same commands. Without the flag, nothing listens.
