@@ -49,7 +49,9 @@ Everything runs without a window, so a test or an agent can use the application 
 - **Screenshots are real frames**: the same GPU pass and interface, read back into a PNG. Pixel
   assertions run against a fixed camera and size.
 
-The event scripting belongs in syslui-sdl, not Tekton, so every application on it gets the same driver.
+Most of this belongs below Tekton, so every application gets it. syslUI owns the script language, named
+controls and the dump of what is on screen. syslui-sdl owns running a real frame offscreen and writing the
+PNG. Tekton adds only its own `state` report and its viewport.
 
 **Building stays fast by keeping layers apart.** The document, kernel glue and renderer are modules with
 their own tests, so most changes never need the whole application linked or a window opened.
