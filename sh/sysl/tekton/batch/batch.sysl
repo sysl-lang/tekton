@@ -6,10 +6,12 @@ import sh.sysl.tekton.document.new_document
 import sh.sysl.tekton.export.{export_file, export_format}
 import sh.sysl.tekton.files.load_file
 import sh.sysl.tekton.options.Options
+import sh.sysl.tekton.printer.CORE_ONE
 import sh.sysl.tekton.scenes.{add_demo_scene, add_hole_scene}
 
 // Build the document the options name — the file, then the `--holes` and `--demo` scenes on top, as the window
-// would show it — and write it to `o.export` in the format its extension names; or say why not, in one line.
+// would show it — and write it to `o.export` in the format its extension names, a 3MF placed on the CORE One's
+// bed; or say why not, in one line.
 export_command(o: Options) -> Result[unit, string]
     export_format(o.export)?
 
@@ -18,5 +20,5 @@ export_command(o: Options) -> Result[unit, string]
     if o.holes then add_hole_scene(doc)
     if o.demo then add_demo_scene(doc)
 
-    export_file(doc, o.export)
+    export_file(doc, o.export, CORE_ONE)
 end export_command
