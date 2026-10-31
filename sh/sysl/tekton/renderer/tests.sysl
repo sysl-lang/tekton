@@ -7,8 +7,9 @@ import sh.sysl.sdl3.{GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNO
 import sysl.buf.{Buf, buf}
 import sh.sysl.tekton.camera.new_camera
 import sh.sysl.quaternion.Quaternion
-import sh.sysl.tekton.document.{Document, Primitive, Transform, moved_to, new_document}
+import sh.sysl.tekton.document.{Document, FLOATS_PER_VERTEX, Primitive, Transform, moved_to, new_document}
 import sh.sysl.tekton.handles.Stroke
+import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.space.Vec3
 import sysl.process
 
@@ -34,14 +35,15 @@ private device() -> &GpuDevice
     gpu_device(GPU_SHADERFORMAT_MSL).unwrap()
 
 // A frame of this document, as bytes of RGBA, drawn by this renderer on the device that made it.
-private frame(dev: &GpuDevice, r: &Renderer, doc: &Document, strokes: []Stroke = []) -> Buf[u8]
+private frame(dev: &GpuDevice, r: &Renderer, doc: &Document, strokes: []Stroke = [], printer: Printer = CORE_ONE,
+              volume: bool = true) -> Buf[u8]
     val color = dev.texture(GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, GPU_TEXTUREUSAGE_COLOR_TARGET, SIZE, SIZE).unwrap()
     val depth = dev.texture(GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, SIZE, SIZE).unwrap()
     val readback = dev.transfer_buffer(GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, SIZE * SIZE * 4).unwrap()
     val cmd = dev.command_buffer().unwrap()
 
     r.draw(dev, cmd, color, depth, GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, doc, new_camera(),
-           real(SIZE), real(SIZE), 1.0, strokes)
+           real(SIZE), real(SIZE), 1.0, strokes, printer, volume)
 
     val out = cmd.copy_pass().unwrap()
 
@@ -289,3 +291,112 @@ handles_show_through_a_shape_standing_in_front()
 
     assert(p[at + 1] > 240 && p[at] < 20 && p[at + 2] < 20, "the stroke's colour, in front of everything")
     assert(warm_at(frame(dev, new_renderer(), doc), x, y), "and without it, the shape that hides it")
+
+// A printer small enough that the default camera sees all of its bed and volume in a test's frame.
+private val SMALL = Printer("small", 46.0, 46.0, 30.0)
+
+// One so large that nothing of its edge is in the frame.
+private val HUGE = Printer("huge", 2000.0, 2000.0, 2000.0)
+
+// Whether any pixel within one of this point differs between the two frames: a line one pixel wide lands on
+// whichever pixel the rasteriser picks, which can be the projected point's neighbour.
+private differs_near(a: Buf[u8], b: Buf[u8], x: real, y: real) -> bool
+    for dy in [-1.0, 0.0, 1.0]
+        for dx in [-1.0, 0.0, 1.0]
+            if pixel_at(a, x + dx, y + dy) != pixel_at(b, x + dx, y + dy) then return true
+
+    false
+end differs_near
+
+@test
+private the_volume_goes_up_as_two_vertices_an_edge_laid_out_as_a_mesh()
+    val v = volume_vertices(CORE_ONE)
+    val edges = CORE_ONE.volume_edges()
+
+    assert_eq(VOLUME_VERTICES, 24)
+    assert_eq(v.len(), VOLUME_VERTICES * FLOATS_PER_VERTEX)
+
+    for i in 0..<VOLUME_VERTICES
+        val at = i * FLOATS_PER_VERTEX
+
+        assert_eq(v[at], f32(edges[i].x))
+        assert_eq(v[at + 1], f32(edges[i].y))
+        assert_eq(v[at + 2], f32(edges[i].z))
+
+        for k in 3..<6 do assert_eq(v[at + k], 0.0, "no normal")
+end the_volume_goes_up_as_two_vertices_an_edge_laid_out_as_a_mesh
+
+// The bed's edge is drawn as a border, and past it the floor is not the bed: both differ from the same pixels
+// on a bed so large its edge is out of sight.
+@test
+private the_bed_has_a_border_and_ends_there()
+    if !can_use_gpu("the_bed_has_a_border_and_ends_there") then return
+
+    val dev = device()
+    val doc = new_document()
+    val camera = new_camera()
+    val small = frame(dev, new_renderer(), doc, printer = SMALL, volume = false)
+    val huge = frame(dev, new_renderer(), doc, printer = HUGE, volume = false)
+    val (bx, by) = camera.project(Vec3(23.0, 3.0, 0.0), real(SIZE), real(SIZE)).unwrap()
+    val (ox, oy) = camera.project(Vec3(33.0, 3.0, 0.0), real(SIZE), real(SIZE)).unwrap()
+    val (ix, iy) = camera.project(Vec3(13.0, 3.0, 0.0), real(SIZE), real(SIZE)).unwrap()
+
+    assert(pixel_at(small, bx, by) != pixel_at(huge, bx, by), "the border")
+    assert(pixel_at(small, ox, oy) != pixel_at(huge, ox, oy), "the floor past it")
+    assert(pixel_at(small, ix, iy) == pixel_at(huge, ix, iy), "and inside, a bed is a bed whatever its size")
+
+    val (r, g, b) = pixel_at(small, bx, by)
+    val (r0, g0, b0) = pixel_at(small, ix, iy)
+
+    assert(int(r) + int(g) + int(b) < int(r0) + int(g0) + int(b0) - 60, "the border is clearly darker than the bed")
+end the_bed_has_a_border_and_ends_there
+
+// The volume's edges show where `volume` asks for them, and a solid standing in front of one hides it.
+@test
+private the_volume_outline_shows_when_asked_and_hides_behind_a_solid()
+    if !can_use_gpu("the_volume_outline_shows_when_asked") then return
+
+    val dev = device()
+    val camera = new_camera()
+    val empty = new_document()
+    val (x, y) = camera.project(Vec3(23.0, 23.0, 15.0), real(SIZE), real(SIZE)).unwrap()
+    val (tx, ty) = camera.project(Vec3(0.0, 23.0, 30.0), real(SIZE), real(SIZE)).unwrap()
+    val shown = frame(dev, new_renderer(), empty, printer = SMALL)
+    val hidden = frame(dev, new_renderer(), empty, printer = SMALL, volume = false)
+
+    assert(differs_near(shown, hidden, x, y), "an upright edge")
+    assert(differs_near(shown, hidden, tx, ty), "and a top one")
+
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(id, Transform(Vec3(23.0, 23.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    doc.select(None)
+
+    assert(!differs_near(frame(dev, new_renderer(), doc, printer = SMALL), frame(dev, new_renderer(), doc, printer = SMALL, volume = false), x, y),
+           "the box in front of the edge hides it")
+end the_volume_outline_shows_when_asked_and_hides_behind_a_solid
+
+private sent_for(r: &Renderer) -> Option[Printer] =
+    r.volume match
+        Some((printer, _)) -> Some(printer)
+        None -> None
+
+// The edges go to the GPU for the printer they are drawn for, and again when the printer changes.
+@test
+private the_volume_follows_the_printer()
+    if !can_use_gpu("the_volume_follows_the_printer") then return
+
+    val dev = device()
+    val r = new_renderer()
+    val doc = new_document()
+
+    frame(dev, r, doc, volume = false)
+    assert(r.volume.is_none(), "nothing sent while hidden")
+
+    frame(dev, r, doc, printer = SMALL)
+    assert(sent_for(r) == Some(SMALL), "sent for the small printer")
+
+    frame(dev, r, doc)
+    assert(sent_for(r) == Some(CORE_ONE), "and again for the CORE One")
+end the_volume_follows_the_printer

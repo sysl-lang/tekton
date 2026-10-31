@@ -9,6 +9,7 @@ import sh.sysl.tekton.export.export_stl
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
 import sh.sysl.tekton.picking.{pick, pick_hit}
+import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
 import sh.sysl.ui.*
 import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, set_title, stop, viewport, viewport_depth_format, window}
@@ -148,6 +149,10 @@ struct Workspace
     // Whether this frame has already asked about quitting. Closing the window sends two events, and the second
     // must not ask again after the first was answered.
     quit_asked: bool
+
+    // The printer the bed and the build volume are drawn for, and whether the volume's outline shows.
+    printer: Printer
+    show_volume: bool
 
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
@@ -364,6 +369,11 @@ struct Workspace
         self.camera.frame(self.doc)
         self.changed()
     end frame_all
+
+    // Show the build volume's outline if it is hidden, and hide it if it shows.
+    toggle_volume(&self)
+        self.show_volume = !self.show_volume
+        self.changed()
 
     // A key the toolkit does not see, as the window reports it: `code` is the layout's own, so the letters are
     // where the keyboard has them. Says whether it was a shortcut, and so whether anyone else should see it.
@@ -595,7 +605,8 @@ struct Workspace
             val scale = if self.height > 0 then real(f.rect.h) / real(self.height) else 1.0
 
             self.renderer.draw(f.device, f.cmd, f.color, f.depth, viewport_depth_format(f.device), VIEWPORT_COLOR_FORMAT,
-                               self.doc, self.camera, real(f.rect.w), real(f.rect.h), scale, self.overlay.strokes.view())
+                               self.doc, self.camera, real(f.rect.w), real(f.rect.h), scale, self.overlay.strokes.view(),
+                               self.printer, self.show_volume)
         , (c, r) -> self.input(c, r))
 
         self.view = Some(v)
@@ -634,7 +645,8 @@ struct Workspace
                                separator(),
                                item("Solid", () -> self.set_hole(false), enabled = doc.can_set_hole(false)),
                                item("Hole", () -> self.set_hole(true), enabled = doc.can_set_hole(true))]))
-        all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0)]))
+        all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0),
+                               item("Build Volume", () -> self.toggle_volume())]))
         all
     end menus
 
@@ -978,4 +990,4 @@ new_workspace() -> &Workspace =
               (answer, parent) -> ask_open_file(answer, parent, document_filters().view(), title = "Open"),
               (answer, parent) -> ask_save_file(answer, parent, document_filters().view(), title = "Save As"),
               (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"), false,
-              () -> window(), title -> set_title(title), "", false)
+              () -> window(), title -> set_title(title), "", false, CORE_ONE, true)

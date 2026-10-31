@@ -145,4 +145,7 @@ their own tests, so most changes never need the whole application linked or a wi
 5. Saving and opening, then STL and 3MF export.
 6. Printing: the printer's bed in the viewport, control over facets on round shapes, measuring, align, mirror
    and array, hole clearances, chamfers, text.
+   The bed is done: the Prusa CORE One's 250 × 220 mm bed, gridded and bordered, with its 270 mm build
+   volume outlined (View → Build Volume), all from one `Printer` value, and `/tekton/state` reports
+   `outside_volume` when a solid reaches past it.
 7. nex scripting.

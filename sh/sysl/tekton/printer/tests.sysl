@@ -1,0 +1,108 @@
+module sh.sysl.tekton.printer
+@tests
+
+import sh.sysl.tekton.space.{Aabb, Vec3}
+
+private box(min: Vec3, max: Vec3) -> Aabb = Aabb(min, max)
+
+@test
+private the_core_one_is_250_by_220_by_270()
+    assert_eq(CORE_ONE.width, 250.0)
+    assert_eq(CORE_ONE.depth, 220.0)
+    assert_eq(CORE_ONE.height, 270.0)
+    assert_eq(CORE_ONE.name, "Prusa CORE One")
+
+@test
+private the_bed_is_centred_on_the_origin_and_lies_on_the_ground()
+    val c = CORE_ONE.bed_corners()
+
+    assert_eq(c[0], Vec3(-125.0, -110.0, 0.0))
+    assert_eq(c[1], Vec3(125.0, -110.0, 0.0))
+    assert_eq(c[2], Vec3(125.0, 110.0, 0.0))
+    assert_eq(c[3], Vec3(-125.0, 110.0, 0.0))
+end the_bed_is_centred_on_the_origin_and_lies_on_the_ground
+
+@test
+private the_volume_stands_on_the_bed()
+    val v = CORE_ONE.volume()
+
+    assert_eq(v.min, Vec3(-125.0, -110.0, 0.0))
+    assert_eq(v.max, Vec3(125.0, 110.0, 270.0))
+
+// Twelve edges, each joining two of the eight corners along one axis by that axis's full length, every corner
+// meeting three of them, and no edge twice.
+@test
+private the_volume_has_twelve_edges_each_along_one_axis()
+    val e = CORE_ONE.volume_edges()
+    val v = CORE_ONE.volume()
+    var along = [0, 0, 0]
+
+    assert_eq(e.len, 24)
+
+    for i in 0..<12
+        val d = e[2 * i + 1] - e[2 * i]
+        var moved = 0
+
+        for axis in 0..<3
+            if d.axis(axis) != 0.0
+                moved += 1
+                along[axis] += 1
+                assert_eq(d.axis(axis), v.size().axis(axis), "an edge runs the box's whole side, from near to far")
+
+        assert_eq(moved, 1, "an edge runs along one axis")
+
+        for j in 0..<i
+            assert(!(e[2 * i] == e[2 * j] && e[2 * i + 1] == e[2 * j + 1]), "no edge is drawn twice")
+
+    assert_eq(along[0], 4)
+    assert_eq(along[1], 4)
+    assert_eq(along[2], 4)
+
+    for corner in 0..<8
+        val p = corner_of(v, corner)
+        var meets = 0
+
+        for end_at in e
+            if end_at == p then meets += 1
+
+        assert_eq(meets, 3, "every corner meets three edges")
+end the_volume_has_twelve_edges_each_along_one_axis
+
+@test
+private another_printer_has_its_own_geometry()
+    val small = Printer("small", 100.0, 80.0, 50.0)
+
+    assert_eq(small.bed_corners()[2], Vec3(50.0, 40.0, 0.0))
+    assert_eq(small.volume().max, Vec3(50.0, 40.0, 50.0))
+    assert(small.holds(box(Vec3(-50.0, -40.0, 0.0), Vec3(50.0, 40.0, 50.0))), "its own volume fits")
+    assert(!CORE_ONE.holds(box(Vec3(-130.0, 0.0, 0.0), Vec3(0.0, 1.0, 1.0))), "and the CORE One's does not change")
+
+@test
+private a_part_inside_the_volume_fits()
+    assert(CORE_ONE.holds(box(Vec3(-10.0, -10.0, 0.0), Vec3(10.0, 10.0, 20.0))), "a small part in the middle")
+
+// A face exactly on the boundary is inside, on every one of the six faces at once.
+@test
+private a_part_exactly_filling_the_volume_fits()
+    assert(CORE_ONE.holds(CORE_ONE.volume()), "the volume itself")
+    assert(CORE_ONE.holds(box(Vec3(105.0, 90.0, 250.0), Vec3(125.0, 110.0, 270.0))), "a part in the far top corner")
+
+// Past any one face, by a hundredth of a millimetre, is outside.
+@test
+private a_part_past_any_face_does_not_fit()
+    val v = CORE_ONE.volume()
+
+    for axis in 0..<3
+        assert(!CORE_ONE.holds(box(v.min, v.max.with_axis(axis, v.max.axis(axis) + 0.01))), s"past the far side of axis ${axis}")
+        assert(!CORE_ONE.holds(box(v.min.with_axis(axis, v.min.axis(axis) - 0.01), v.max)), s"past the near side of axis ${axis}")
+end a_part_past_any_face_does_not_fit
+
+// The tolerance is for a mesh's rounding, not for a real overhang.
+@test
+private a_rounding_error_on_the_boundary_still_fits()
+    assert(CORE_ONE.holds(box(Vec3(0.0, 0.0, 0.0), Vec3(125.0000001, 1.0, 1.0))), "a ten-millionth over")
+    assert(!CORE_ONE.holds(box(Vec3(0.0, 0.0, 0.0), Vec3(125.1, 1.0, 1.0))), "a tenth over is not")
+
+@test
+private a_part_below_the_ground_does_not_fit()
+    assert(!CORE_ONE.holds(box(Vec3(-10.0, -10.0, -5.0), Vec3(10.0, 10.0, 5.0))), "sunk into the bed")

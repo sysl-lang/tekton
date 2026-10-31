@@ -5,6 +5,7 @@ import sh.sysl.sdl3.control.{Pass, Request, Respond, Routed}
 import sh.sysl.tekton.camera.new_camera
 import sh.sysl.tekton.document.{Primitive, Transform, new_document}
 import sh.sysl.tekton.interface.{Workspace, new_workspace}
+import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
 import sysl.buf.buf
@@ -48,7 +49,7 @@ private put(w: &Workspace, p: Primitive, at: Vec3, scale: Vec3) -> int
 end put
 
 // The camera and file a report is about, given where the tests leave them.
-private report(w: &Workspace) -> string = state_json(w.doc, w.camera, w.file, w.doc.is_dirty())
+private report(w: &Workspace) -> string = state_json(w.doc, w.camera, w.file, w.doc.is_dirty(), w.printer)
 
 @test
 private an_empty_document_reports_nothing_in_it()
@@ -56,7 +57,7 @@ private an_empty_document_reports_nothing_in_it()
     val c = new_camera()
 
     assert_eq(state_json(d, c, "", false),
-              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":null,\"dirty\":false}")
+              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":null,\"dirty\":false,\"outside_volume\":false}")
 end an_empty_document_reports_nothing_in_it
 
 @test
@@ -69,7 +70,7 @@ private a_small_document_reports_exactly_this()
     w.file = "/tmp/part.tekton"
 
     assert_eq(report(w),
-              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0]}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":\"/tmp/part.tekton\",\"dirty\":true}")
+              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0]}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":\"/tmp/part.tekton\",\"dirty\":true,\"outside_volume\":false}")
     assert_eq(a, 1)
 end a_small_document_reports_exactly_this
 
@@ -119,11 +120,11 @@ private a_saved_document_is_clean_and_an_edit_dirties_it()
     put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
     w.doc.mark_saved()
 
-    assert(report(w).ends_with("\"dirty\":false}"), report(w))
+    assert(report(w).contains("\"dirty\":false"), report(w))
 
     w.doc.set_transform(1, Transform(Vec3(5.0, 0.0, 0.0), IDENTITY, Vec3(1.0, 1.0, 1.0)))
 
-    assert(report(w).ends_with("\"dirty\":true}"), report(w))
+    assert(report(w).contains("\"dirty\":true"), report(w))
 end a_saved_document_is_clean_and_an_edit_dirties_it
 
 @test
@@ -239,3 +240,109 @@ private the_windows_own_close_still_asks()
     assert_eq(asks.read(), 1, "asked")
     assert_eq(quits.read(), 0, "answered Cancel, so still here")
 end the_windows_own_close_still_asks
+
+// A 20 mm box whose base centre stands here, and how tall it is made.
+private box_at(w: &Workspace, x: real, y: real, z: real, tall: real = 20.0) -> int =
+    put(w, Primitive.Box, Vec3(x, y, z), Vec3(1.0, 1.0, tall / 20.0))
+
+@test
+private an_empty_document_is_not_outside_the_volume()
+    assert(!outside_volume(new_document(), CORE_ONE), "nothing to stick out")
+
+@test
+private a_part_in_the_middle_of_the_bed_is_inside()
+    val w = new_workspace()
+
+    box_at(w, 0.0, 0.0, 0.0)
+
+    assert(!outside_volume(w.doc, w.printer), "a box on the origin")
+    assert(report(w).contains("\"outside_volume\":false"), report(w))
+
+// A box whose side lies exactly on the bed's edge, or whose top is exactly the printer's height, fits: the
+// boundary is inside. The box's own bounds are checked first, so the boundary is where the test says it is.
+@test
+private a_part_exactly_on_the_boundary_is_inside()
+    for (x, y, edge) in [(115.0, 0.0, 125.0), (-115.0, 0.0, -125.0), (0.0, 100.0, 110.0), (0.0, -100.0, -110.0)]
+        val w = new_workspace()
+        val id = box_at(w, x, y, 0.0)
+        val b = w.doc.bounds_of(w.doc.find(id).unwrap())
+
+        assert(b.max.x == edge || b.min.x == edge || b.max.y == edge || b.min.y == edge, s"the box touches ${edge}")
+        assert(!outside_volume(w.doc, w.printer), s"touching the edge at ${edge} is inside")
+
+    val w = new_workspace()
+    val id = box_at(w, 0.0, 0.0, 0.0, tall = 270.0)
+
+    assert_eq(w.doc.bounds_of(w.doc.find(id).unwrap()).max.z, 270.0)
+    assert(!outside_volume(w.doc, w.printer), "exactly the printer's height is inside")
+end a_part_exactly_on_the_boundary_is_inside
+
+@test
+private a_part_past_the_boundary_is_outside()
+    for (x, y, z, tall) in [(115.5, 0.0, 0.0, 20.0), (-115.5, 0.0, 0.0, 20.0), (0.0, 100.5, 0.0, 20.0),
+                            (0.0, -100.5, 0.0, 20.0), (0.0, 0.0, 0.0, 270.5), (0.0, 0.0, -1.0, 20.0)]
+        val w = new_workspace()
+
+        box_at(w, x, y, z, tall)
+
+        assert(outside_volume(w.doc, w.printer), s"a box at ${x}, ${y}, ${z}, ${tall} tall sticks out")
+        assert(report(w).contains("\"outside_volume\":true"), report(w))
+end a_part_past_the_boundary_is_outside
+
+// One part sticking out is enough, wherever it is in the list.
+@test
+private one_part_outside_puts_the_document_outside()
+    val w = new_workspace()
+
+    box_at(w, 0.0, 0.0, 0.0)
+    box_at(w, 200.0, 0.0, 0.0)
+    box_at(w, 30.0, 0.0, 0.0)
+
+    assert(outside_volume(w.doc, w.printer), "the second of three")
+
+    w.doc.select(Some(2))
+    w.doc.delete_selected().unwrap()
+
+    assert(!outside_volume(w.doc, w.printer), "and deleting it brings the rest inside")
+end one_part_outside_puts_the_document_outside
+
+// A hole on its own prints nothing, so a hole past the edge does not count.
+@test
+private a_hole_past_the_edge_is_not_outside()
+    val w = new_workspace()
+
+    box_at(w, 0.0, 0.0, 0.0)
+
+    val hole = box_at(w, 200.0, 0.0, 0.0)
+
+    w.doc.select(Some(hole))
+    w.doc.set_hole(true).unwrap()
+
+    assert(!outside_volume(w.doc, w.printer), "only the hole sticks out")
+end a_hole_past_the_edge_is_not_outside
+
+@test
+private the_report_judges_against_the_printer_it_is_given()
+    val w = new_workspace()
+
+    box_at(w, 40.0, 0.0, 0.0)
+
+    val small = Printer("small", 80.0, 80.0, 80.0)
+
+    assert(!outside_volume(w.doc, CORE_ONE), "fits the CORE One")
+    assert(outside_volume(w.doc, small), "but not a printer 80 mm across")
+    assert(state_json(w.doc, w.camera, "", false, small).contains("\"outside_volume\":true"), "and the report says so")
+end the_report_judges_against_the_printer_it_is_given
+
+@test
+private the_state_route_reports_outside_volume()
+    val w = new_workspace()
+
+    box_at(w, 0.0, 0.0, 300.0)
+
+    val (status, body) = answer(routes(w, request("GET", "/tekton/state")))
+
+    assert_eq(status, 200)
+    assert(body.contains("\"outside_volume\":true"), body)
+    assert(sysl.encoding.json.parse(body).is_ok(), "still JSON")
+end the_state_route_reports_outside_volume

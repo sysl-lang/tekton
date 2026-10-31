@@ -2,11 +2,12 @@ module sh.sysl.tekton.renderer
 
 // The viewport's shaders, in Metal Shading Language.
 //
-// Four pipelines share one set of uniforms. The ground fades its grid into the background, the shadow
-// flattens each mesh onto the ground along the light, the surface shades facets from the triangles'
-// own slopes, and the outline pushes the selected mesh's back faces out by a fixed number of pixels. A
-// fifth draws the handles' strokes over all of it, tested against no depth, so a handle shows through
-// whatever stands in front of its shape.
+// Four pipelines share one set of uniforms. The ground draws the printer's bed and fades its grid into
+// the background, the shadow flattens each mesh onto the ground along the light, the surface shades
+// facets from the triangles' own slopes, and the outline pushes the selected mesh's back faces out by a
+// fixed number of pixels. The build volume's edges reuse the surface's vertex shader as a list of lines
+// in one flat colour. The last draws the handles' strokes over all of it, tested against no depth, so a
+// handle shows through whatever stands in front of its shape.
 val SHADERS: string = raw"""
     #include <metal_stdlib>
     using namespace metal;
@@ -20,6 +21,7 @@ val SHADERS: string = raw"""
         float4 color;
         float4 ground;      // the view's centre, and how far the ground reaches from it
         float4 size;        // the target in pixels, and the outline's width in pixels
+        float4 bed;         // half the printer's bed along x and y, centred on the origin
     };
 
     struct Vertex {
@@ -108,10 +110,14 @@ val SHADERS: string = raw"""
         return 1.0 - smoothstep(width - 0.5, width + 0.5, line);
     }
 
+    // The printer's bed, gridded every 10 and 50 millimetres with the axes crossing in its middle and a border
+    // around it, on a floor that carries only the coarse grid, faintly.
     fragment float4 ground_fragment(Ground in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
         const float3 plane = float3(0.955, 0.962, 0.972);
         const float3 fine = float3(0.895, 0.91, 0.93);
         const float3 coarse = float3(0.80, 0.825, 0.86);
+        const float3 off_bed = float3(0.925, 0.934, 0.948);
+        const float3 border = float3(0.46, 0.51, 0.59);
 
         // Lines closer than a few pixels would be a grey wash, so the fine grid leaves as they close up.
         float mm_per_pixel = length(fwidth(in.plan));
@@ -126,6 +132,14 @@ val SHADERS: string = raw"""
 
         c = mix(c, float3(0.90, 0.60, 0.58), (1.0 - smoothstep(0.7, 1.7, off.y)));
         c = mix(c, float3(0.60, 0.80, 0.65), (1.0 - smoothstep(0.7, 1.7, off.x)));
+
+        // How many pixels past the bed's nearest edge this is, below zero inside it.
+        float2 beyond = (abs(in.plan) - u.bed.xy) / slope;
+        float past = max(beyond.x, beyond.y);
+        float3 around = mix(off_bed, coarse, grid_line(in.plan, 50.0, 0.6) * 0.45);
+
+        c = mix(c, around, smoothstep(-0.5, 0.5, past));
+        c = mix(c, border, 1.0 - smoothstep(0.6, 1.6, abs(past)));
 
         float away = length(in.plan - u.ground.xy);
         float fade = smoothstep(u.ground.w * 0.12, u.ground.w * 0.6, away);

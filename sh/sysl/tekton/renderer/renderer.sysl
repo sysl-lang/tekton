@@ -3,11 +3,12 @@ module sh.sysl.tekton.renderer
 import sh.sysl.sdl3.{GpuBuffer, GpuCommandBuffer, GpuCopyPass, GpuDevice, GpuPipeline, GpuRenderPass, GpuTexture, color_target_clear,
                      depth_target_clear, vertex_attribute, vertex_buffer, GPU_BUFFERUSAGE_INDEX,
                      GPU_BUFFERUSAGE_VERTEX, GPU_COMPAREOP_LESS, GPU_CULLMODE_BACK, GPU_CULLMODE_FRONT,
-                     GPU_INDEXELEMENTSIZE_32BIT, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT,
+                     GPU_INDEXELEMENTSIZE_32BIT, GPU_PRIMITIVETYPE_LINELIST, GPU_SHADERFORMAT_MSL, GPU_SHADERSTAGE_FRAGMENT,
                      GPU_SHADERSTAGE_VERTEX, GPU_TRANSFERBUFFERUSAGE_UPLOAD, GPU_VERTEXELEMENTFORMAT_FLOAT3}
 import sh.sysl.tekton.camera.Camera
 import sh.sysl.tekton.document.{Document, FLOATS_PER_VERTEX, Mesh, identity_transform}
 import sh.sysl.tekton.handles.Stroke
+import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf}
 import sysl.raw.ptr_cast
@@ -63,6 +64,10 @@ private struct Uniforms
     color: [4]f32
     ground: [4]f32
     size: [4]f32
+    bed: [4]f32
+
+// The build volume's edges: faint, so a part stands out against them, and hidden behind what stands in front.
+val VOLUME_COLOR: [4]f32 =[0.30, 0.38, 0.52, 0.45]
 
 // Laid out as the shaders' `StrokeUniforms`.
 private struct StrokeUniforms
@@ -85,6 +90,7 @@ struct Pipelines
     hole: &GpuPipeline
     hole_buried: &GpuPipeline
     outline: &GpuPipeline
+    volume: &GpuPipeline
     stroke: &GpuPipeline
 
 struct Renderer
@@ -94,11 +100,15 @@ struct Renderer
     // How many times a mesh has gone to the GPU, so a test can see a revision saving the trip.
     uploads: int
 
-    // Everything in the document, as this camera sees it, then these strokes over it, whose points are
-    // `scale` pixels each. Records into `cmd` and leaves it open.
+    // The build volume's edges on the GPU, and the printer they were made for.
+    volume: Option[(Printer, &GpuBuffer)]
+
+    // Everything in the document, as this camera sees it, on this printer's bed and inside the outline of its
+    // build volume where `volume` asks for it, then these strokes over it, whose points are `scale` pixels
+    // each. Records into `cmd` and leaves it open.
     draw(&self, device: &GpuDevice, cmd: GpuCommandBuffer, color: &GpuTexture, depth: &GpuTexture, depth_format: i32,
          color_format: i32, doc: &Document, camera: &Camera, width: real, height: real, scale: real,
-         strokes: []Stroke = [])
+         strokes: []Stroke = [], printer: Printer = CORE_ONE, volume: bool = true)
         val p = self.pipelines match
             Some(have) -> have
             None ->
@@ -108,6 +118,8 @@ struct Renderer
                 made
 
         self.upload(device, cmd, doc)
+
+        val edges = if volume then Some(self.volume_buffer(device, cmd, printer)) else None
 
         val pass = cmd.render_pass_depth([color_target_clear(color, BACKGROUND_R, BACKGROUND_G, BACKGROUND_B, 1.0)],
                                          depth_target_clear(depth, 1.0)).expect("a render pass")
@@ -120,7 +132,8 @@ struct Renderer
                          [f32(LIGHT_X), f32(LIGHT_Y), f32(LIGHT_Z), 0.0],
                          [BACKGROUND_R, BACKGROUND_G, BACKGROUND_B, 1.0],
                          [f32(camera.target.x), f32(camera.target.y), 0.0, f32(reach)],
-                         [f32(width), f32(height), OUTLINE_POINTS * f32(scale), 0.0])
+                         [f32(width), f32(height), OUTLINE_POINTS * f32(scale), 0.0],
+                         [f32(printer.width * 0.5), f32(printer.depth * 0.5), 0.0, 0.0])
 
         push(cmd, &u)
         pass.bind_pipeline(p.ground)
@@ -148,6 +161,18 @@ struct Renderer
                 place(&u, doc, m.id)
                 push(cmd, &u)
                 draw_mesh(pass, m)
+
+        // After the solids, so their depth hides the edges behind them, and before the holes, which would.
+        edges match
+            Some(lines) ->
+                u.color = VOLUME_COLOR
+                u.model = unmoved.matrix().floats()
+                u.normals = unmoved.normal_matrix().floats()
+                push(cmd, &u)
+                pass.bind_pipeline(p.volume)
+                pass.bind_vertex_buffer(0, lines)
+                pass.draw(u32(VOLUME_VERTICES))
+            None -> ()
 
         // **A hole is drawn twice over the solids, which is what shows where it is.** Faintly with no depth
         // test, so the part buried in a solid can be seen through it, then more strongly where nothing stands
@@ -219,9 +244,36 @@ struct Renderer
 
         self.meshes = kept
     end upload
+
+    // The build volume's edges for this printer on the GPU, sent once and again only for another printer.
+    private volume_buffer(&self, device: &GpuDevice, cmd: GpuCommandBuffer, printer: Printer) -> &GpuBuffer
+        self.volume match
+            Some((made_for, lines)) -> if made_for == printer then return lines
+            None -> ()
+
+        val pass = cmd.copy_pass().expect("a copy pass")
+        val lines = upload_slice(device, pass, GPU_BUFFERUSAGE_VERTEX, volume_vertices(printer).view())
+
+        pass.finish()
+        self.volume = Some((printer, lines))
+        lines
+    end volume_buffer
 end Renderer
 
-new_renderer() -> &Renderer = Renderer(None, buf(), 0)
+new_renderer() -> &Renderer = Renderer(None, buf(), 0, None)
+
+// How many vertices the build volume's outline is drawn with: two for each of its twelve edges.
+const VOLUME_VERTICES: usize = 24
+
+// The build volume's edges as vertices laid out as a mesh's, two to a line, with no normal to light them by.
+volume_vertices(printer: Printer) -> Buf[f32]
+    var out: Buf[f32] = buf()
+
+    for p in printer.volume_edges()
+        out.extend([f32(p.x), f32(p.y), f32(p.z), 0.0, 0.0, 0.0])
+
+    out
+end volume_vertices
 
 // Put a node's transform in the uniforms.
 private place(u: *Uniforms, doc: &Document, id: int)
@@ -300,6 +352,9 @@ private make_pipelines(dev: &GpuDevice, color_format: i32, depth_format: i32) ->
                                    blend = true).expect("the buried hole's pipeline"),
         outline = dev.pipeline(outline, flat, buffers, attributes, color_format, depth_format = depth_format,
                                cull = GPU_CULLMODE_FRONT).expect("the outline's pipeline"),
+        volume = dev.pipeline(shape, flat, buffers, attributes, color_format, depth_format = depth_format,
+                              depth_write = false, primitive = GPU_PRIMITIVETYPE_LINELIST,
+                              blend = true).expect("the build volume's pipeline"),
         stroke = dev.pipeline(mark, ink, [], [], color_format, depth_format = depth_format, depth_test = false,
                               depth_write = false, blend = true).expect("the strokes' pipeline"),
     )

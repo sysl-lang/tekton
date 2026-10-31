@@ -5,6 +5,8 @@ module sh.sysl.tekton.space
 // **These are values small enough to pass around a triangle at a time**, because a ray test visits every
 // triangle of a mesh on a click. Z is up, and the ground is the plane z = 0.
 
+import sysl.math.{max, min}
+
 struct Vec3 derives Eq
     x: real
     y: real
@@ -67,6 +69,11 @@ struct Aabb derives Eq
     center(self) -> Vec3 = (self.min + self.max) * 0.5
 
     size(self) -> Vec3 = self.max - self.min
+
+    // The smallest box holding both.
+    joined(self, o: Aabb) -> Aabb =
+        Aabb(Vec3(min(self.min.x, o.min.x), min(self.min.y, o.min.y), min(self.min.z, o.min.z)),
+             Vec3(max(self.max.x, o.max.x), max(self.max.y, o.max.y), max(self.max.z, o.max.z)))
 
     // Whether the two share any area when seen from above, leaving `gap` between them to count as apart.
     overlaps_plan(self, o: Aabb, gap: real = 0.0) -> bool =

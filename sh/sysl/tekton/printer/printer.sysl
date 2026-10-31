@@ -1,0 +1,68 @@
+module sh.sysl.tekton.printer
+
+// The printer a part is made for: how big its bed is and how tall a part it can build.
+//
+// **The bed is centred on the origin**, so the ground's axes cross in its middle, and the build volume stands on
+// it from z = 0 to the printer's height. Millimetres throughout, with z up as everywhere else.
+
+import sh.sysl.tekton.space.{Aabb, Vec3}
+
+// How far past the volume a part may reach and still count as inside it: a micron, well under what any
+// printer resolves, so a face placed exactly on the boundary is not refused for the rounding in its mesh.
+const TOLERANCE: real = 0.001
+
+struct Printer derives Eq
+    name: string
+
+    // The bed along x and y, and the tallest part along z.
+    width: real
+    depth: real
+    height: real
+
+    // The bed's corners on the ground, counterclockwise from the one nearest the viewer on the left.
+    bed_corners(self) -> [4]Vec3
+        val x = self.width * 0.5
+        val y = self.depth * 0.5
+
+        [Vec3(-x, -y, 0.0), Vec3(x, -y, 0.0), Vec3(x, y, 0.0), Vec3(-x, y, 0.0)]
+    end bed_corners
+
+    // The space a part must fit in.
+    volume(self) -> Aabb =
+        Aabb(Vec3(-self.width * 0.5, -self.depth * 0.5, 0.0), Vec3(self.width * 0.5, self.depth * 0.5, self.height))
+
+    // The volume's twelve edges as pairs of ends, for drawing as a list of lines. A corner is numbered by
+    // which of its axes is at the far side, one bit each, and an edge joins two corners a single bit apart.
+    volume_edges(self) -> [24]Vec3
+        val b = self.volume()
+        var ends = [b.min; 24]
+        var n = 0
+
+        for corner in 0..<8
+            for bit in [1, 2, 4]
+                if corner & bit == 0
+                    ends[n] = corner_of(b, corner)
+                    ends[n + 1] = corner_of(b, corner | bit)
+                    n += 2
+
+        ends
+    end volume_edges
+
+    // Whether a part with this box can be printed: nothing outside the bed's edges, below it or above the top.
+    // A face exactly on the boundary is inside.
+    holds(self, part: Aabb) -> bool
+        val v = self.volume()
+
+        part.min.x >= v.min.x - TOLERANCE && part.max.x <= v.max.x + TOLERANCE &&
+        part.min.y >= v.min.y - TOLERANCE && part.max.y <= v.max.y + TOLERANCE &&
+        part.min.z >= v.min.z - TOLERANCE && part.max.z <= v.max.z + TOLERANCE
+    end holds
+end Printer
+
+// The corner of a box this number names: bit 1 is the far side along x, bit 2 along y, bit 4 along z.
+corner_of(b: Aabb, corner: int) -> Vec3 =
+    Vec3(if corner & 1 != 0 then b.max.x else b.min.x, if corner & 2 != 0 then b.max.y else b.min.y,
+         if corner & 4 != 0 then b.max.z else b.min.z)
+
+// The Prusa CORE One.
+val CORE_ONE = Printer("Prusa CORE One", 250.0, 220.0, 270.0)

@@ -6,6 +6,7 @@ import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
 import sh.sysl.tekton.document.{Primitive, Transform}
 import sh.sysl.tekton.handles.{Grip, Layout, layout}
 import sh.sysl.tekton.picking.pick
+import sh.sysl.tekton.printer.CORE_ONE
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
 
@@ -1306,6 +1307,28 @@ frame_all_brings_the_document_into_view()
     assert(w.camera.target.x < 100.0, "the view came back")
     assert(w.doc.selected == Some(b), "and the selection is as it was")
 end frame_all_brings_the_document_into_view
+
+// The build volume shows from the start, on the CORE One, and the View menu's row hides and shows it again
+// whatever is in the document, leaving the document alone.
+@test
+build_volume_toggles_from_the_view_menu()
+    val w = new_workspace()
+    var c = recorder()
+    val changes = w.changes.read()
+
+    assert(w.show_volume, "shown from the start")
+    assert(w.printer == CORE_ONE, "for the CORE One")
+    assert(live(w, &c, "View", "Build Volume"), "live with nothing in the document")
+
+    choose(w, &c, "View", "Build Volume")
+    assert(!w.show_volume, "hidden")
+    assert(w.changes.read() > changes, "and the window is told to draw again")
+    assert_eq(w.open_menu.read(), NO_MENU, "choosing closed the menu")
+
+    choose(w, &c, "View", "Build Volume")
+    assert(w.show_volume, "shown again")
+    assert(!w.doc.is_dirty() && !w.doc.can_undo, "the document is not edited by a view setting")
+end build_volume_toggles_from_the_view_menu
 
 @test
 quit_runs_what_the_workspace_was_given()

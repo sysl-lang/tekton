@@ -668,8 +668,7 @@ struct Document
                 val b = self.bounds_of(item)
 
                 extent = extent match
-                    Some(e) -> Some(Aabb(Vec3(min(e.min.x, b.min.x), min(e.min.y, b.min.y), min(e.min.z, b.min.z)),
-                                         Vec3(max(e.max.x, b.max.x), max(e.max.y, b.max.y), max(e.max.z, b.max.z))))
+                    Some(e) -> Some(e.joined(b))
                     None -> Some(b)
 
         val solids = extent.ok_or("A group needs a solid part:\nthese are all holes")?
@@ -987,6 +986,22 @@ struct Document
         node.bounds = Some(b)
         b
     end bounds_of
+
+    // The box around everything that would be printed: every solid where it stands, a group with its holes
+    // already cut. A hole on its own prints nothing, so it is left out. Nothing at all when there is no solid.
+    solid_bounds(&self) -> Option[Aabb]
+        var extent: Option[Aabb] = None
+
+        for item in self.items()
+            if !item.hole
+                val b = self.bounds_of(item)
+
+                extent = extent match
+                    Some(e) -> Some(e.joined(b))
+                    None -> Some(b)
+
+        extent
+    end solid_bounds
 end Document
 
 new_document(next_revision: int = 1) -> &Document = restored_document(buf(), 1, None, next_revision)
