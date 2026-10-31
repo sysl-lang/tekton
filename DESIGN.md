@@ -39,7 +39,8 @@ holds the tree, `next` (the id the next node gets) and `last` (what the next sha
 derived, and the selection and the history belong to a session. Every number is written as the shortest text
 that reads back as the same value, so a saved document comes back bit for bit. A round shape writes its
 `segments`; format 2 added them, and a format 1 file still opens, its round shapes at the default 64. A shape
-with a hole clearance writes `clearance` in millimetres, and one without says nothing.
+with a hole clearance writes `clearance` in millimetres, and one without says nothing. A box or cylinder with
+finished edges writes `edge_radius` in millimetres and, when chamfered, `edge_style = chamfer`.
 
 A bad file is refused with its line and the problem, and whatever is open stays as it was. That covers more than
 syntax: an id used twice, a transform no edit could make, groups nested past 128, a group the kernel cannot
@@ -122,7 +123,8 @@ Everything runs without a window, so a test or an agent can use the application 
   else passes on to them):
   - `GET /tekton/state` answers one line of JSON: `items` (the document's tree: each node's `id`, `kind`,
     `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, for a round shape
-    its `segments`, for one with a hole clearance its `clearance`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
+    its `segments`, for one with a hole clearance its `clearance`, for a box or cylinder with finished edges its
+    `edge_radius` and (chamfered) `edge_style`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
     `fov`), `file` (the path, or `null`) and `dirty`. A number JSON cannot spell is `null`.
   - `POST /tekton/quit` quits at once, asking nothing about unsaved changes, so a session nobody can answer
     can be ended; the answer is sent, and the program exits on the next frame. A `GET` of it is refused.
@@ -172,6 +174,14 @@ their own tests, so most changes never need the whole application linked or a wi
      frame by twice the clearance per axis, so it is exact on a box, cylinder and sphere however turned, and on a
      cone across its base and height. A torus and a group take none. A solid keeps the value and ignores it; the
      file says `clearance` only when it is not zero; the export, the on-screen hole and `/tekton/state` use it.
+   - **Rounded and chamfered edges are done**: a box (all twelve edges and eight corners) or a cylinder (its two
+     rims) has an "Edge radius, mm" field and a Round / Chamfer choice in the panel, the radius held to half the
+     smallest side, each edit one undo step. The kernel solid is a hull (eight balls, three boxes, or a revolved
+     profile) built at the shape's real size, then brought back into the palette's 20 mm box so the transform's
+     scale lands it exactly there: sizes and handles are unchanged, and a 40 × 20 × 10 box has 3 mm circular
+     rounds, not stretched ellipses. A new scale, or a hole's clearance, builds it again at the new size, keeping
+     the radius. A rounded box takes `segments` for smoothness. The file says `edge_radius` and `edge_style =
+     chamfer` only when set; the export and `/tekton/state` carry them.
    - **Measuring is done**: the selection's axis-aligned box (joined over a multi-selection) is labelled with its
      width, depth and height in mm on light labels beside the edges facing the camera, and with exactly two
      selected each axis they are apart on gets a thin line between the facing faces labelled "X gap 5" (0 where

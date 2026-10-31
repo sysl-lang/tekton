@@ -4,7 +4,7 @@ import sh.sysl.hocon.{Value, parse}
 import sh.sysl.parsing.{Source, Span, source_of}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.DialogResult
-import sh.sysl.tekton.document.{Document, MAX_CLEARANCE, MAX_SEGMENTS, MIN_SEGMENTS, Mirror, NO_MIRROR, Node, Operation, PRIMITIVES, Primitive, ROUND_SEGMENTS, Transform, is_round, primitive_name, restored_document, restored_group, restored_shape}
+import sh.sysl.tekton.document.{Document, Edges, MAX_CLEARANCE, MAX_SEGMENTS, MAX_SIZE, MIN_SEGMENTS, Mirror, NO_MIRROR, Node, Operation, PRIMITIVES, Primitive, ROUND_SEGMENTS, SHARP_EDGES, Transform, is_round, primitive_name, restored_document, restored_group, restored_shape, takes_edges}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf, byte_sink}
 import sysl.container.{Set, set}
@@ -50,6 +50,10 @@ import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
 //
 // A box, cylinder, sphere or cone with a clearance says how much, in millimetres, as `clearance = 0.2`, solid or
 // hole; one without says nothing.
+//
+// A box or cylinder with finished edges says how far, in millimetres, as `edge_radius = 3.0`, and a chamfered one
+// says `edge_style = chamfer`; rounded and sharp say nothing. A box with finished edges says its `segments`, which
+// set how smooth its rounds are, and only such a box may.
 
 // The format this writes, and the newest it reads. A key an older reader would refuse is a new format, so that
 // reader says "too new" rather than "unknown key".
@@ -95,7 +99,7 @@ private write_node(b: &StrBuilder, node: &Node, indent: string)
     val t = node.transform
     val q = t.rotation
     val kind = node.operation match
-        Shape(p, _) -> to_lower(primitive_name(p))
+        Shape(p, _, _) -> to_lower(primitive_name(p))
         Group -> "group"
 
     b.push(s"${indent}{\n${inner}id = ${node.id}\n${inner}kind = ${kind}\n${inner}tint = ${node.tint}\n")
@@ -104,13 +108,24 @@ private write_node(b: &StrBuilder, node: &Node, indent: string)
     b.push(s"${inner}turn = ${numbers_text([q.w, q.x, q.y, q.z])}\n")
     b.push(s"${inner}scale = ${numbers_text([t.scale.x, t.scale.y, t.scale.z])}\n")
 
-    node.segments match
+    // A box with finished edges says its segments while they are chamfered too, so a choice of round comes back.
+    val segments = node.operation match
+        Shape(p, n, e) -> if is_round(p) || e != SHARP_EDGES then Some(n) else None
+        Group -> None
+
+    segments match
         Some(n) -> b.push(s"${inner}segments = ${n}\n")
         None -> ()
 
     if node.mirror.any then b.push(s"${inner}mirror = [${node.mirror.x}, ${node.mirror.y}, ${node.mirror.z}]\n")
 
     if node.clearance != 0.0 then b.push(s"${inner}clearance = ${real_text(node.clearance)}\n")
+
+    node.edges match
+        Some(e) ->
+            if e.radius != 0.0 then b.push(s"${inner}edge_radius = ${real_text(e.radius)}\n")
+            if e.chamfer then b.push(s"${inner}edge_style = chamfer\n")
+        None -> ()
 
     if node.is_group
         b.push(s"${inner}parts = [\n")
@@ -246,9 +261,10 @@ private struct Reading
 
             if !listed.is_arr() then return Err(self.refusal(listed.span, "`parts` must be a list"))
 
-            v.get("clearance") match
-                Some(given) -> return Err(self.refusal(given.span, "a group has no `clearance`"))
-                None -> ()
+            for key in ["clearance", "edge_radius", "edge_style"]
+                v.get(key) match
+                    Some(given) -> return Err(self.refusal(given.span, s"a group has no `${key}`"))
+                    None -> ()
 
             var children: Buf[&Node] = buf()
 
@@ -260,9 +276,12 @@ private struct Reading
 
         if parts.is_some() then return Err(self.refusal(v.span, s"a ${kind} has no `parts`"))
 
+        val edges = self.edges(v, primitive, kind)?
+
         val segments = v.get("segments") match
             Some(given) ->
-                if !is_round(primitive) then return Err(self.refusal(given.span, s"a ${kind} has no `segments`"))
+                if !is_round(primitive) && edges == SHARP_EDGES
+                    return Err(self.refusal(given.span, s"a ${kind} has no `segments`"))
 
                 val n = given.as_long().ok_or(self.refusal(given.span, "`segments` must be a whole number"))?
 
@@ -284,8 +303,39 @@ private struct Reading
                 c
             None -> 0.0
 
-        Ok(restored_shape(id, primitive, t, tint, hole, segments, mirror, clearance))
+        Ok(restored_shape(id, primitive, t, tint, hole, segments, mirror, clearance, edges))
     end node
+
+    // How a shape's edges are finished, sharp where it does not say. A shape with no edges to finish may not say.
+    private edges(&self, v: Value, primitive: Primitive, kind: string) -> Result[Edges, string]
+        var e = SHARP_EDGES
+
+        v.get("edge_radius") match
+            Some(given) ->
+                if !takes_edges(primitive) then return Err(self.refusal(given.span, s"a ${kind} has no `edge_radius`"))
+
+                val r = given.as_real().ok_or(self.refusal(given.span, "`edge_radius` must be a number"))?
+
+                if !(r >= 0.0 && r <= MAX_SIZE / 2.0)
+                    return Err(self.refusal(given.span, s"`edge_radius` must be from 0 to ${(MAX_SIZE / 2.0).round()} mm"))
+
+                e = Edges(r, false)
+            None -> ()
+
+        v.get("edge_style") match
+            Some(given) ->
+                if !takes_edges(primitive) then return Err(self.refusal(given.span, s"a ${kind} has no `edge_style`"))
+
+                val style = given.as_text().ok_or(self.refusal(given.span, "`edge_style` must be round or chamfer"))?
+
+                if style != "round" && style != "chamfer"
+                    return Err(self.refusal(given.span, "`edge_style` must be round or chamfer"))
+
+                e = Edges(e.radius, style == "chamfer")
+            None -> ()
+
+        Ok(e)
+    end edges
 
     line_of_id(&self, id: int) -> usize
         for (known, line) in self.lines.view()
@@ -296,7 +346,8 @@ private struct Reading
 end Reading
 
 private is_node_key(key: string) -> bool
-    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "mirror", "segments", "clearance", "parts"]
+    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "mirror", "segments", "clearance", "edge_radius",
+              "edge_style", "parts"]
         if k == key then return true
 
     false

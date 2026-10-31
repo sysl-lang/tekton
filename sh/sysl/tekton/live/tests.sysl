@@ -86,6 +86,19 @@ private a_clearance_is_reported_only_where_there_is_one()
 end a_clearance_is_reported_only_where_there_is_one
 
 @test
+private finished_edges_are_reported_only_where_there_are_some()
+    val w = new_workspace()
+    val box = put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(2.0, 1.0, 0.5))
+
+    assert(!report(w).contains("edge"), "none")
+    w.doc.set_edge_radius(box, 3.0).expect("a radius")
+    assert(report(w).contains("\"size\":[40,20,10],\"rotation\":[1,0,0,0],\"segments\":64,\"edge_radius\":3}"), report(w))
+    w.doc.set_edge_chamfer(box, true).expect("a chamfer")
+    assert(report(w).contains("\"size\":[40,20,10],\"rotation\":[1,0,0,0],\"edge_radius\":3,\"edge_style\":\"chamfer\"}"),
+           report(w))
+end finished_edges_are_reported_only_where_there_are_some
+
+@test
 private a_group_reports_its_children_and_a_hole_says_so()
     val w = new_workspace()
     val box = put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))

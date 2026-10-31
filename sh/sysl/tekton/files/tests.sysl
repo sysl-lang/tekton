@@ -44,12 +44,14 @@ private assert_same_node(a: &Node, b: &Node)
     assert_same_transform(a.transform, b.transform)
 
     a.operation match
-        Shape(p, n) ->
+        Shape(p, n, e) ->
             b.operation match
-                Shape(q, m) ->
+                Shape(q, m, f) ->
                     assert_eq(p, q, "primitive")
                     assert_eq(a.segments, b.segments, "segments")
                     assert_eq(n, m, "the number the kernel is given")
+                    same_number(e.radius, f.radius, "edge radius")
+                    assert_eq(e.chamfer, f.chamfer, "edge style")
                 Group -> assert(false, "a shape came back a group")
         Group -> ()
 
@@ -775,3 +777,83 @@ a_wrong_clearance_is_refused_on_its_own_line()
     assert_eq(refusal(replace_all(GROUP_FILE, "    parts = [\n      {", "    clearance = 0.2\n    parts = [\n      {")),
               "line 13: a group has no `clearance`", "a group")
 end a_wrong_clearance_is_refused_on_its_own_line
+
+// ## Finished edges
+
+@test
+edges_come_back_and_only_a_shape_with_them_writes_them()
+    val doc = new_document()
+    val rounded = doc.add_shape(Primitive.Box)
+
+    doc.resize_to(rounded, Vec3(40.0, 20.0, 10.0)).unwrap()
+    doc.set_edge_radius(rounded, 1.0 / 3.0).unwrap()
+    doc.set_segments(rounded, 24).unwrap()
+
+    val chamfered = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_edge_radius(chamfered, 2.0).unwrap()
+    doc.set_edge_chamfer(chamfered, true).unwrap()
+
+    val styled = doc.add_shape(Primitive.Box)
+
+    doc.set_edge_chamfer(styled, true).unwrap()
+
+    val plain = doc.add_shape(Primitive.Box)
+    val text = document_text(doc)
+    val back = round_trip(doc)
+
+    assert_same_document(doc, back)
+    assert_eq(back.find(rounded).unwrap().edges.unwrap().radius, 1.0 / 3.0, "a rounded box's, kept to the bit")
+    assert_eq(back.find(rounded).unwrap().segments, Some(24), "with its segments")
+    assert(back.find(chamfered).unwrap().edges.unwrap().chamfer, "a chamfered cylinder's")
+    assert(back.find(styled).unwrap().edges.unwrap().chamfer, "a sharp box keeps the choice of chamfer")
+    assert_eq(back.find(plain).unwrap().edges.unwrap().radius, 0.0, "none")
+    assert(text.contains("    edge_radius = 2.0\n    edge_style = chamfer\n"), text)
+    assert_eq(replace_all(text, "edge_radius", "").len, text.len - 2 * "edge_radius".len, "a radius written by two")
+    assert_eq(replace_all(text, "edge_style", "").len, text.len - 2 * "edge_style".len, "a chamfer written by two")
+    assert(text.starts_with("tekton = 2\n"), "still format 2")
+    assert_eq(document_text(back), text, "and the text is stable")
+    assert(back.solid_of(back.find(chamfered).unwrap()).volume() == doc.solid_of(doc.find(chamfered).unwrap()).volume(),
+           "the same solid comes back")
+end edges_come_back_and_only_a_shape_with_them_writes_them
+
+@test
+a_file_without_edges_opens_sharp()
+    for file in [SHAPE_FILE, ROUND_FILE, GROUP_FILE]
+        val doc = document_from_text(file).unwrap()
+
+        for item in doc.items()
+            assert(item.edges.map(e -> e.radius == 0.0 && !e.chamfer).unwrap_or(true), "sharp")
+
+            for part in item.children.view() do assert(part.edges.map(e -> e.radius == 0.0).unwrap_or(true), "sharp in a group")
+
+        assert(!document_text(doc).contains("edge"), "and none written")
+end a_file_without_edges_opens_sharp
+
+@test
+wrong_edges_are_refused_on_their_own_line()
+    val after = "    scale = [1.0, 1.0, 1.0]\n"
+
+    for (put, why) in [("edge_radius = -1", "`edge_radius` must be from 0 to 2000 mm"),
+                       ("edge_radius = 2001", "`edge_radius` must be from 0 to 2000 mm"),
+                       ("edge_radius = wide", "`edge_radius` must be a number"),
+                       ("edge_style = square", "`edge_style` must be round or chamfer"),
+                       ("edge_style = 3", "`edge_style` must be round or chamfer")]
+        assert_eq(refusal(with(after, s"${after}    ${put}\n")), s"line 13: ${why}", put)
+
+    val styled = document_from_text(with(after, s"${after}    edge_radius = 2.5\n    edge_style = chamfer\n    segments = 9\n")).unwrap()
+
+    assert_eq(styled.items()[0].edges.unwrap().radius, 2.5, "a radius")
+    assert(styled.items()[0].edges.unwrap().chamfer, "a chamfer")
+    assert(document_from_text(with(after, s"${after}    edge_style = round\n")).unwrap().items()[0].edges.unwrap().radius == 0.0,
+           "round said aloud")
+
+    for kind in ["sphere", "cone", "torus"]
+        for (name, value) in [("edge_radius", "1.0"), ("edge_style", "chamfer")]
+            assert_eq(refusal(replace_all(with(after, s"${after}    ${name} = ${value}\n"), "kind = box", s"kind = ${kind}")),
+                      s"line 13: a ${kind} has no `${name}`", s"a ${kind}")
+
+    assert_eq(refusal(replace_all(GROUP_FILE, "    parts = [\n      {", "    edge_radius = 1.0\n    parts = [\n      {")),
+              "line 13: a group has no `edge_radius`", "a group")
+    assert_eq(refusal(with(after, s"${after}    segments = 12\n")), "line 13: a box has no `segments`", "a sharp box")
+end wrong_edges_are_refused_on_their_own_line

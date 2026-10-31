@@ -3,7 +3,7 @@ module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
-import sh.sysl.tekton.document.{Primitive, Transform, primitive_name}
+import sh.sysl.tekton.document.{PRIMITIVES, Primitive, Transform, primitive_name}
 import sh.sysl.tekton.handles.{Grip, Layout, layout}
 import sh.sysl.tekton.measure.Mark
 import sh.sysl.tekton.picking.pick
@@ -1697,3 +1697,85 @@ switching_a_hole_with_a_clearance_to_solid_keeps_it_hidden()
     assert(shows(w, &c, "panel.clearance"), "back with the hole")
     paint_field(clearance_field(w), &c)
     assert_eq(clearance_field(w).text.read(), "0.4", "saying what it was")
+
+// ## Edges
+
+private edge_field(w: &Workspace) -> &NumberField = w.number_fields()[11]
+
+@test
+the_edge_controls_show_only_for_a_box_or_a_cylinder()
+    val w = new_workspace()
+    val box = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    for p in PRIMITIVES
+        w.doc.select(Some(w.doc.add_shape(p)))
+
+        val want = p == Primitive.Box || p == Primitive.Cylinder
+
+        for name in ["panel.edge_radius", "panel.edge.round", "panel.edge.chamfer"]
+            assert_eq(shows(w, &c, name), want, s"${name} for a ${primitive_name(p)}")
+
+    w.doc.toggle_selected(box)
+    assert(!shows(w, &c, "panel.edge_radius"), "not for several")
+    w.doc.select(Some(w.doc.group_selected().unwrap()))
+    assert(!shows(w, &c, "panel.edge_radius"), "nor for a group")
+    w.doc.select(None)
+    assert(!shows(w, &c, "panel.edge_radius"), "nor for nothing")
+end the_edge_controls_show_only_for_a_box_or_a_cylinder
+
+@test
+typing_an_edge_radius_sets_it_held_to_the_shape_as_one_step()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = edge_field(w)
+
+    w.doc.resize_to(a, Vec3(40.0, 20.0, 10.0)).unwrap()
+    paint_field(f, &c)
+    assert_eq(f.text.read(), "0", "sharp to start")
+    assert(!shows(w, &c, "panel.segments"), "and a sharp box has no segments")
+
+    val steps = w.doc.undos.len()
+
+    type_into(f, &c, "3", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().edges.unwrap().radius, 3.0, "set")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+    assert(shows(w, &c, "panel.segments"), "a rounded box has segments")
+    type_into(f, &c, "50", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().edges.unwrap().radius, 5.0, "held to half the 10 mm side")
+    paint_field(f, &c)
+    assert_eq(f.text.read(), "5", "and the field says so")
+    type_into(f, &c, "-1", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().edges.unwrap().radius, 0.0, "held to none")
+    type_into(f, &c, "2", Key.Enter)
+
+    for bad in ["", "abc", "nan", "inf"]
+        type_into(f, &c, bad, Key.Enter)
+        assert_eq(w.doc.find(a).unwrap().edges.unwrap().radius, 2.0, s"kept, for '${bad}'")
+        assert(f.wrong, s"marked, for '${bad}'")
+
+    assert(w.doc.undo(), "undone")
+    assert_eq(w.doc.find(a).unwrap().edges.unwrap().radius, 0.0, "one edit back")
+end typing_an_edge_radius_sets_it_held_to_the_shape_as_one_step
+
+@test
+the_round_and_chamfer_buttons_choose_the_finish_as_one_step()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Cylinder)
+    var c = recorder()
+
+    w.doc.set_edge_radius(a, 2.0).unwrap()
+
+    val steps = w.doc.undos.len()
+
+    tap(w, &c, "panel.edge.chamfer")
+    assert(w.doc.find(a).unwrap().edges.unwrap().chamfer, "chamfered")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+    tap(w, &c, "panel.edge.chamfer")
+    assert_eq(w.doc.undos.len(), steps + 1, "and again is no step")
+    tap(w, &c, "panel.edge.round")
+    assert(!w.doc.find(a).unwrap().edges.unwrap().chamfer, "rounded")
+    assert(w.doc.undo(), "undone")
+    assert(w.doc.find(a).unwrap().edges.unwrap().chamfer, "chamfered again")
+end the_round_and_chamfer_buttons_choose_the_finish_as_one_step

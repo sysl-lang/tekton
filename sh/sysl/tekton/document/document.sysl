@@ -1,6 +1,7 @@
 module sh.sysl.tekton.document
 
-import sh.sysl.manifold.{Manifold, circle, cube, cylinder, sphere, batch, empty, Vec3 as KernelVec3, Op}
+import sh.sysl.manifold.{Manifold, circle, cube, cylinder, sphere, batch, batch_hull, batch_sections, empty,
+                         hull_of_points, hull_points, square, Vec2, Vec3 as KernelVec3, Op}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.space.{Aabb, Mat4, Vec3, vec3}
 import sysl.buf.{Buf, buf}
@@ -85,9 +86,21 @@ is_round(p: Primitive) -> bool =
 private mirror_text(m: Mirror) -> string =
     if !m.any then "" else s" mirror:${if m.x then "x" else ""}${if m.y then "y" else ""}${if m.z then "z" else ""}"
 
+// How a box's twelve edges, or a cylinder's two rims, are finished: rounded to `radius` millimetres, or with
+// `chamfer` cut at 45 degrees that far back from each face. A radius of nothing leaves them sharp.
+struct Edges derives Eq
+    radius: real
+    chamfer: bool
+
+val SHARP_EDGES = Edges(0.0, false)
+
+// How a node's edges are finished, as a model's text says it: nothing where they are sharp and rounded.
+private edges_text(e: Edges) -> string =
+    s"${if e.radius == 0.0 then "" else s" edge:${e.radius}"}${if e.chamfer then " chamfer" else ""}"
+
 // What a node computes. A group's solid is its solid children joined, with its hole children cut out.
 enum Operation
-    Shape(primitive: Primitive, segments: int)
+    Shape(primitive: Primitive, segments: int, edges: Edges)
     Group
 
 // Where a node's solid goes in its parent's space: scaled, then rotated, then moved.
@@ -283,11 +296,32 @@ struct Node
 
     mesh = self.derived.mesh
 
-    // How many sides a round shape has around its axis, or nothing for a shape that is not round or a group.
+    // How many sides a round shape has around its axis, or nothing for a shape that is not round or a group. A
+    // box with rounded edges is round there, so it has them too.
     segments -> Option[int] =
         self.operation match
-            Shape(p, n) -> if is_round(p) then Some(n) else None
+            Shape(p, n, e) -> if is_round(p) || (e.radius > 0.0 && !e.chamfer) then Some(n) else None
             Group -> None
+
+    // How the edges of a box or cylinder are finished, or nothing for a shape that has no straight edges to
+    // finish, or a group.
+    edges -> Option[Edges] =
+        self.operation match
+            Shape(p, _, e) -> if takes_edges(p) then Some(e) else None
+            Group -> None
+
+    // Whether this node's own solid is built at its real size rather than at the palette's 20 mm, because its
+    // rounded or chamfered edges must keep their radius however it is sized. Its scale is then part of what it
+    // derives, so a new scale needs a new solid.
+    sized_by_scale -> bool =
+        self.operation match
+            Shape(_, _, e) -> e.radius > 0.0
+            Group -> false
+
+    // What a copy of this node placed by `t` may share of what it derived: all of it, unless its solid is built
+    // at its real size and `t` sizes it otherwise.
+    private derived_at(&self, t: Transform) -> &Derived =
+        if self.sized_by_scale && t.scale != self.transform.scale then Derived(None, None) else self.derived
 
     is_group -> bool =
         self.operation match
@@ -299,13 +333,13 @@ struct Node
     // moves its parts apart instead of growing each of them.
     takes_clearance -> bool =
         self.operation match
-            Shape(p, _) -> p != Primitive.Torus
+            Shape(p, _, _) -> p != Primitive.Torus
             Group -> false
 
-    // This node somewhere else: the same triangles.
+    // This node somewhere else: the same triangles, unless they were built at a size `t` changes.
     private with_transform(&self, t: Transform) -> &Node =
         Node(self.id, self.operation, t, self.mirror, self.tint, self.hole, self.clearance, self.children,
-             self.derived, None, None)
+             self.derived_at(t), None, None)
 
     // This node reflected otherwise and placed by `t`: its own solid is another, so nothing derived holds.
     private with_mirror(&self, t: Transform, m: Mirror) -> &Node =
@@ -313,23 +347,33 @@ struct Node
              None, None)
 
     // This node as solid or as hole: the same triangles in the same place, but a clearance grows only a hole, so
-    // a node with one cuts from somewhere else.
+    // a node with one cuts from somewhere else, and one built at its real size is built again at the new one.
     private with_hole(&self, hole: bool) -> &Node =
         Node(self.id, self.operation, self.transform, self.mirror, self.tint, hole, self.clearance, self.children,
-             self.derived, if self.clearance == 0.0 then self.solid else None, self.bounds)
+             if self.sized_by_scale && self.clearance != 0.0 then Derived(None, None) else self.derived,
+             if self.clearance == 0.0 then self.solid else None, self.bounds)
 
-    // This node with another clearance: the same triangles in the same place, cut from somewhere else.
+    // This node with another clearance: the same triangles in the same place, cut from somewhere else; for a
+    // hole built at its real size, built again at the size it now cuts.
     private with_clearance(&self, clearance: real) -> &Node =
         Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, clearance, self.children,
-             self.derived, None, self.bounds)
+             if self.sized_by_scale && self.hole then Derived(None, None) else self.derived, None, self.bounds)
 
     // This shape with another number of sides, so nothing derived from the old one holds.
     private with_segments(&self, segments: int) -> &Node =
         self.operation match
-            Shape(p, _) ->
-                Node(self.id, Operation.Shape(p, segments), self.transform, self.mirror, self.tint, self.hole,
-                     self.clearance, self.children, Derived(None, None), None, None)
+            Shape(p, _, e) -> self.with_operation(Operation.Shape(p, segments, e))
             Group -> self
+
+    // This shape with its edges finished otherwise, so nothing derived from the old ones holds.
+    private with_edges(&self, edges: Edges) -> &Node =
+        self.operation match
+            Shape(p, n, _) -> self.with_operation(Operation.Shape(p, n, edges))
+            Group -> self
+
+    private with_operation(&self, operation: Operation) -> &Node =
+        Node(self.id, operation, self.transform, self.mirror, self.tint, self.hole, self.clearance, self.children,
+             Derived(None, None), None, None)
 
     // This node made of other children, so nothing derived from the old ones holds.
     private with_children(&self, children: Buf[&Node]) -> &Node =
@@ -361,7 +405,7 @@ struct Node
         val t = self.transform
         val q = t.rotation
         val name = self.operation match
-            Shape(p, n) -> s"${primitive_name(p)}/${n}"
+            Shape(p, n, e) -> s"${primitive_name(p)}/${n}${edges_text(e)}"
             Group -> "Group"
         var parts = ""
 
@@ -630,7 +674,7 @@ struct Document
 
         for item in self.items() do items.push(item)
 
-        items.push(Node(id, Operation.Shape(p, ROUND_SEGMENTS), moved_to(at), NO_MIRROR, id - 1, false, 0.0, buf(),
+        items.push(Node(id, Operation.Shape(p, ROUND_SEGMENTS, SHARP_EDGES), moved_to(at), NO_MIRROR, id - 1, false, 0.0, buf(),
                         Derived(None, None), None, None))
         self.put_items(items)
         self.next_id += 1
@@ -685,6 +729,38 @@ struct Document
         self.put_node(node.with_clearance(wanted))
         Ok(())
     end set_clearance
+
+    // The command behind the edge radius field: how far a box's edges or a cylinder's rims are rounded or
+    // chamfered back, held to half the shape's smallest side, past which there is no edge left to finish. A shape
+    // with no edges to finish is refused, and so is a number that is no distance; one that changes nothing is not
+    // a step.
+    set_edge_radius(&self, id: int, radius: real) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+        val now = node.edges.ok_or("Only a box or cylinder has an edge radius")?
+
+        if !radius.is_finite() then return Err("Edge radius must be a number of millimetres")
+
+        val wanted = clamped_edge_radius(radius, self.size_of(node))
+
+        if wanted == now.radius then return Ok(())
+
+        self.record()
+        self.put_node(node.with_edges(Edges(wanted, now.chamfer)))
+        Ok(())
+    end set_edge_radius
+
+    // The command behind the Round and Chamfer buttons: how a box's edges or a cylinder's rims are finished. A
+    // sharp shape keeps the choice for when it has a radius.
+    set_edge_chamfer(&self, id: int, chamfer: bool) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+        val now = node.edges.ok_or("Only a box or cylinder has edges to finish")?
+
+        if chamfer == now.chamfer then return Ok(())
+
+        self.record()
+        self.put_node(node.with_edges(Edges(now.radius, chamfer)))
+        Ok(())
+    end set_edge_chamfer
 
     // The command behind the solid and hole buttons, on everything selected.
     set_hole(&self, hole: bool) -> Result[unit, string]
@@ -1043,7 +1119,7 @@ struct Document
 
         val same = t == node.transform
 
-        Node(id, node.operation, t, node.mirror, node.tint, node.hole, node.clearance, parts, node.derived,
+        Node(id, node.operation, t, node.mirror, node.tint, node.hole, node.clearance, parts, node.derived_at(t),
              if same then node.solid else None, if same then node.bounds else None)
     end fresh_copy
 
@@ -1239,7 +1315,8 @@ struct Document
         self.builds += 1
 
         val made = node.operation match
-            Shape(p, n) -> primitive_solid(p, n)
+            Shape(p, n, e) ->
+                if e.radius > 0.0 then edged_solid(p, n, e, self.cut_transform(node).scale) else primitive_solid(p, n)
             Group ->
                 var solids: Buf[&Manifold] = buf()
                 var holes: Buf[&Manifold] = buf()
@@ -1286,11 +1363,14 @@ struct Document
     // across its base and at each end; its slope moves out by a little less. The kernel's only 3D offset is a
     // Minkowski sum with a ball, which would round a box's edges, cut short of the clearance between a ball's
     // facets, and cost a full solid on every move.
+    //
+    // A shape with finished edges grows the same way, about the palette's box, which is its own exactly; its solid
+    // is then built at the grown size, so its edges keep their radius.
     cut_transform(&self, node: &Node) -> Transform
         if !node.hole || node.clearance == 0.0 then return node.transform
 
         val t = node.transform
-        val local = self.local_bounds(node)
+        val local = if node.sized_by_scale then PALETTE_BOX else self.local_bounds(node)
         val size = local.size()
         val middle = local.center()
         val c = node.clearance * 2.0
@@ -1395,8 +1475,8 @@ end restored_document
 
 // A shape as a file says it.
 restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool, segments: int = ROUND_SEGMENTS,
-               mirror: Mirror = NO_MIRROR, clearance: real = 0.0) -> &Node =
-    Node(id, Operation.Shape(p, segments), t, mirror, tint, hole, clearance, buf(), Derived(None, None), None, None)
+               mirror: Mirror = NO_MIRROR, clearance: real = 0.0, edges: Edges = SHARP_EDGES) -> &Node =
+    Node(id, Operation.Shape(p, segments, edges), t, mirror, tint, hole, clearance, buf(), Derived(None, None), None, None)
 
 // A group as a file says it.
 restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node], mirror: Mirror = NO_MIRROR) -> &Node =
@@ -1486,6 +1566,84 @@ primitive_solid(p: Primitive, segments: int = ROUND_SEGMENTS) -> &Manifold =
         Cone -> cylinder(20.0, 10.0, 0.0, segments)
         Torus -> circle(TORUS_TUBE, torus_tube_segments(segments)).translate(TORUS_RING, 0.0).revolve(segments)
                  .translate(0.0, 0.0, TORUS_TUBE)
+
+// The side of the palette's shapes, and the box every box and cylinder fills before its transform.
+const PALETTE_SIDE: real = 20.0
+val PALETTE_BOX = Aabb(Vec3(-10.0, -10.0, 0.0), Vec3(10.0, 10.0, 20.0))
+
+// Whether a primitive has straight edges to round or chamfer: a box's twelve, a cylinder's two rims.
+takes_edges(p: Primitive) -> bool = p == Primitive.Box || p == Primitive.Cylinder
+
+// An edge radius held to what a shape of this size has room for: nothing up to half its smallest side, where
+// the rounds or chamfers of opposite edges meet.
+clamped_edge_radius(radius: real, size: Vec3) -> real = max(0.0, min(radius, min(size.x, min(size.y, size.z)) / 2.0))
+
+// A box or cylinder with finished edges, built at the size `scale` gives the palette's shape and then brought back
+// into the palette's box, so that the node's transform, which applies `scale` again, lands it at that size with
+// every round and chamfer exactly `e.radius` across. A cylinder's plan is built round at its width and stretched
+// to its depth, so its rims are exact while it is round in plan, as the palette makes it.
+//
+// **A hull, because both shapes are convex and a hull is exact and cheap.** A rounded box is the hull of eight
+// balls of the radius at its corners, which is the box shrunk by the radius and grown again by a ball: flat faces,
+// quarter-cylinder edges and eighth-sphere corners, the balls' facets set by `segments`. A chamfered box is the
+// hull of the three boxes it is cut back to along each axis, the same shrunk box grown by an octahedron. A
+// cylinder is its half profile, the hull of a rectangle cut back at its two outer corners by circles or by 45
+// degree cuts, revolved; revolving keeps the plain cylinder's sides. A Minkowski sum would make the same shapes
+// far more slowly, and an offset of a cross-section rounds only in the plane it lies in.
+edged_solid(p: Primitive, segments: int, e: Edges, scale: Vec3) -> &Manifold
+    val size = scale.times(Vec3(PALETTE_SIDE, PALETTE_SIDE, PALETTE_SIDE))
+    val r = clamped_edge_radius(e.radius, size)
+    val built = if p == Primitive.Box then edged_box(size, r, e.chamfer, segments) else
+        edged_cylinder(size.x / 2.0, size.z, r, e.chamfer, segments)
+    val across_y = if p == Primitive.Box then scale.y else scale.x
+
+    built.scale(1.0 / scale.x, 1.0 / across_y, 1.0 / scale.z)
+end edged_solid
+
+// A box of these sides centred on the z axis and standing on the ground, every edge rounded or chamfered by `r`.
+private edged_box(size: Vec3, r: real, chamfer: bool, segments: int) -> &Manifold
+    val h = Vec3(size.x / 2.0 - r, size.y / 2.0 - r, size.z / 2.0 - r)
+    val mid = size.z / 2.0
+
+    if chamfer
+        var points: Buf[KernelVec3] = buf()
+
+        for x in [-1.0, 1.0]
+            for y in [-1.0, 1.0]
+                for z in [-1.0, 1.0]
+                    points.push(KernelVec3(x * (h.x + r), y * h.y, mid + z * h.z))
+                    points.push(KernelVec3(x * h.x, y * (h.y + r), mid + z * h.z))
+                    points.push(KernelVec3(x * h.x, y * h.y, mid + z * (h.z + r)))
+
+        return hull_points(points.view())
+
+    var balls: Buf[&Manifold] = buf()
+
+    for x in [-1.0, 1.0]
+        for y in [-1.0, 1.0]
+            for z in [-1.0, 1.0] do balls.push(sphere(r, segments).translate(x * h.x, y * h.y, mid + z * h.z))
+
+    batch_hull(balls.view())
+end edged_box
+
+// A cylinder of this radius and height standing on the ground about the z axis, its two rims rounded or chamfered
+// by `r`.
+// The round profile is kept to the right of the axis, where a circle at a rim as wide as the radius would reach
+// past it.
+private edged_cylinder(radius: real, height: real, r: real, chamfer: bool, segments: int) -> &Manifold
+    val inner = radius - r
+    val profile = if chamfer
+        hull_of_points([Vec2(0.0, 0.0), Vec2(inner, 0.0), Vec2(radius, r), Vec2(radius, height - r),
+                        Vec2(inner, height), Vec2(0.0, height)])
+    else
+        val round = circle(r, segments)
+
+        batch_sections([square(radius, height - 2.0 * r).translate(0.0, r), square(inner, height),
+                        round.translate(inner, r), round.translate(inner, height - r)], Op.Add).hull()
+            .intersection(square(radius, height))
+
+    profile.revolve(segments)
+end edged_cylinder
 
 // How many sides a round primitive has around its axis unless it says otherwise. At 64 a circle 100 mm across
 // strays at most 0.06 mm from true, well under a 0.2 mm layer, so a print of it reads as round.

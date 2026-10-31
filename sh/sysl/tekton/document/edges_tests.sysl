@@ -1,0 +1,407 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.manifold.Manifold
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.Vec3
+import sysl.math.pi
+
+// Rounded and chamfered edges, measured on the solid the kernel joins and cuts with.
+
+private close(a: real, b: real, tolerance: real = 1.0e-9) -> bool = (a - b).abs() <= tolerance
+
+private close_vec(a: Vec3, b: Vec3, tolerance: real = 1.0e-9) -> bool =
+    close(a.x, b.x, tolerance) && close(a.y, b.y, tolerance) && close(a.z, b.z, tolerance)
+
+// A box with every edge rounded by `r` is the box shrunk by `r` on every side and grown again by a ball of radius
+// `r`: the shrunk box, a slab of `r` on each of its faces, a quarter cylinder along each of its twelve edges (four
+// of each length, so a whole cylinder per length) and an eighth of the ball at each corner.
+private rounded_volume(a: real, b: real, c: real, r: real) -> real
+    val (x, y, z) = (a - 2.0 * r, b - 2.0 * r, c - 2.0 * r)
+
+    x * y * z + 2.0 * r * (x * y + y * z + z * x) + pi * r * r * (x + y + z) + 4.0 / 3.0 * pi * r * r * r
+end rounded_volume
+
+// The same shrunk box grown by an octahedron of radius `r` instead: the same slabs, a 45 degree prism of section
+// `r` squared along each edge (four halves of a square of side `r`), and the octahedron's own volume at the corners.
+private chamfered_volume(a: real, b: real, c: real, r: real) -> real
+    val (x, y, z) = (a - 2.0 * r, b - 2.0 * r, c - 2.0 * r)
+
+    x * y * z + 2.0 * r * (x * y + y * z + z * x) + 2.0 * r * r * (x + y + z) + 4.0 / 3.0 * r * r * r
+end chamfered_volume
+
+// A rectangle with its four corners rounded by circles of radius `r`.
+private rounded_rectangle_area(a: real, b: real, r: real) -> real = a * b - (4.0 - pi) * r * r
+
+// How much of a circle's area a regular polygon of `n` sides inscribed in it misses, as a fraction. A curved part
+// of a solid of `n` segments falls short of its true volume by about this fraction of it: a little more, because a
+// ball's facets are not all the same size, and the tests allow half as much again (measured: 1.15 to 1.2 times).
+// A round that was an ellipse, or a radius off by a tenth, would miss by many times that.
+private polygon_shortfall(n: int) -> real = 1.0 - real(n) * (2.0 * pi / real(n)).sin() / (2.0 * pi)
+
+// A shape of this size with its edges finished.
+private edged(doc: &Document, p: Primitive, size: Vec3, radius: real, chamfer: bool = false) -> int
+    val id = doc.add_shape(p)
+
+    doc.resize_to(id, size).unwrap()
+    doc.set_edge_radius(id, radius).unwrap()
+    doc.set_edge_chamfer(id, chamfer).unwrap()
+    id
+end edged
+
+private solid(doc: &Document, id: int) -> &Manifold = doc.solid_of(doc.find(id).unwrap())
+
+private solid_size(doc: &Document, id: int) -> Vec3
+    val b = solid(doc, id).bounding_box()
+
+    Vec3(b.max().x - b.min().x, b.max().y - b.min().y, b.max().z - b.min().z)
+end solid_size
+
+private solid_middle(doc: &Document, id: int) -> Vec3
+    val b = solid(doc, id).bounding_box()
+
+    Vec3(b.max().x + b.min().x, b.max().y + b.min().y, b.max().z + b.min().z) * 0.5
+end solid_middle
+
+// The area of the solid's section through the middle of its height.
+private middle_section(doc: &Document, id: int) -> real = solid(doc, id).slice(solid_middle(doc, id).z).area()
+
+@test
+a_rounded_box_has_the_volume_of_a_box_grown_by_a_ball()
+    for n in [32, 128]
+        val doc = new_document()
+        val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0)
+
+        doc.set_segments(id, n).unwrap()
+
+        val exact = rounded_volume(40.0, 20.0, 10.0, 3.0)
+        val got = solid(doc, id).volume()
+        val shortfall = exact - got
+
+        // Only the quarter cylinders and eighth balls are faceted: the shrunk box is 34 by 14 by 4.
+        val curved = pi * 9.0 * (34.0 + 14.0 + 4.0) + 4.0 / 3.0 * pi * 27.0
+
+        assert(shortfall >= 0.0, s"${n} segments: facets lie inside the rounds, ${got} against ${exact}")
+        assert(shortfall <= 1.5 * polygon_shortfall(n) * curved, s"${n} segments: ${got} against ${exact}, short by ${shortfall}")
+end a_rounded_box_has_the_volume_of_a_box_grown_by_a_ball
+
+@test
+a_chamfered_box_has_the_volume_of_a_box_grown_by_an_octahedron()
+    for (size, r) in [(Vec3(40.0, 20.0, 10.0), 3.0), (Vec3(20.0, 20.0, 20.0), 1.0), (Vec3(30.0, 12.0, 8.0), 4.0)]
+        val doc = new_document()
+        val id = edged(doc, Primitive.Box, size, r, chamfer = true)
+        val want = chamfered_volume(size.x, size.y, size.z, r)
+
+        assert(close(solid(doc, id).volume(), want, want * 1.0e-12), s"${size} by ${r}: ${solid(doc, id).volume()} against ${want}")
+end a_chamfered_box_has_the_volume_of_a_box_grown_by_an_octahedron
+
+@test
+an_edged_box_fills_exactly_its_size()
+    for chamfer in [false, true]
+        val doc = new_document()
+        val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0, chamfer)
+        val node = doc.find(id).unwrap()
+
+        assert(close_vec(solid_size(doc, id), Vec3(40.0, 20.0, 10.0), 1.0e-9), s"chamfer ${chamfer}: ${solid_size(doc, id)}")
+        assert(close_vec(doc.size_of(node), Vec3(40.0, 20.0, 10.0), 1.0e-9), s"the size fields say so: ${doc.size_of(node)}")
+        assert(close_vec(doc.bounds_of(node).size(), Vec3(40.0, 20.0, 10.0), 1.0e-9), "and the box the handles sit on")
+        assert(close_vec(node.transform.scale, Vec3(2.0, 1.0, 0.5)), "its transform keeps the scale of the palette's box")
+end an_edged_box_fills_exactly_its_size
+
+// Built at its real size, a box twice as long as it is deep has the same round along every edge. Stretched from a
+// rounded cube instead, its section would have quarter ellipses at the corners, twice as long as they are deep, and
+// a quarter more missing from each corner.
+@test
+the_rounds_of_a_long_box_are_circles_not_stretched_ellipses()
+    val doc = new_document()
+    val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0)
+
+    doc.set_segments(id, 256).unwrap()
+
+    val want = rounded_rectangle_area(40.0, 20.0, 3.0)
+    val missing = 40.0 * 20.0 - want
+    val got = middle_section(doc, id)
+
+    assert(got <= want && want - got <= missing * 0.01, s"a section with round corners: ${got} against ${want}")
+
+    // Flat on every face, right up to where the round starts.
+    val top = solid(doc, id).slice(10.0 - 1.0e-6).bounds()
+
+    assert(close(top.max().x - top.min().x, 34.0, 1.0e-3) && close(top.max().y - top.min().y, 14.0, 1.0e-3),
+           "the top face ends 3 mm in from each side")
+end the_rounds_of_a_long_box_are_circles_not_stretched_ellipses
+
+@test
+an_edge_radius_is_held_to_half_the_smallest_side()
+    val doc = new_document()
+    val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 50.0, chamfer = true)
+
+    assert_eq(doc.find(id).unwrap().edges, Some(Edges(5.0, true)), "held to half of 10 mm")
+    assert(close(solid(doc, id).volume(), chamfered_volume(40.0, 20.0, 10.0, 5.0), 1.0e-9), "and built so")
+
+    doc.set_edge_radius(id, -2.0).unwrap()
+    assert_eq(doc.find(id).unwrap().edges.unwrap().radius, 0.0, "held to none")
+    assert(close(solid(doc, id).volume(), 8000.0, 1.0e-9), "a sharp box again")
+
+    for bad in [0.0 / 0.0, 1.0 / 0.0]
+        assert(doc.set_edge_radius(id, bad).is_err(), s"refused: ${bad}")
+
+    doc.set_edge_radius(id, 4.0).unwrap()
+    doc.resize_to(id, Vec3(40.0, 20.0, 6.0)).unwrap()
+    assert_eq(doc.find(id).unwrap().edges.unwrap().radius, 4.0, "a smaller size keeps the radius asked for")
+    assert(close(solid(doc, id).volume(), chamfered_volume(40.0, 20.0, 6.0, 3.0), 1.0e-9), "and builds what fits")
+    assert(close_vec(solid_size(doc, id), Vec3(40.0, 20.0, 6.0), 1.0e-9), "at the new size")
+    assert(doc.set_edge_radius(9999, 1.0).is_err(), "nothing there")
+end an_edge_radius_is_held_to_half_the_smallest_side
+
+// Revolved with `n` sides, a polygon profile makes a solid whose volume is Pappus's times the ratio of the polygon's
+// area to its circle's, exactly; a 45 degree chamfer of `r` takes a triangle of area r²/2 whose middle is r/3 in
+// from the side, from each rim.
+@test
+a_chamfered_cylinder_loses_a_ring_at_each_rim()
+    for n in [6, 64]
+        val doc = new_document()
+        val id = edged(doc, Primitive.Cylinder, Vec3(20.0, 20.0, 20.0), 2.0, chamfer = true)
+
+        doc.set_segments(id, n).unwrap()
+
+        val pappus = pi * 100.0 * 20.0 - 2.0 * 2.0 * pi * (10.0 - 2.0 / 3.0) * 2.0
+        val want = pappus * (1.0 - polygon_shortfall(n))
+
+        assert(close(solid(doc, id).volume(), want, want * 1.0e-9), s"${n} sides: ${solid(doc, id).volume()} against ${want}")
+        assert(close(solid_size(doc, id).z, 20.0, 1.0e-9), "as tall as it was")
+
+    val doc = new_document()
+    val id = edged(doc, Primitive.Cylinder, Vec3(20.0, 20.0, 20.0), 2.0, chamfer = true)
+    val bottom = solid(doc, id).slice(1.0e-6).bounds()
+
+    assert(close(bottom.max().x, 8.0, 1.0e-4), s"the foot is 2 mm in from the side: ${bottom.max().x}")
+    assert(close(solid(doc, id).slice(10.0).bounds().max().x, 10.0, 1.0e-9), "and the side is where it was")
+end a_chamfered_cylinder_loses_a_ring_at_each_rim
+
+// The ring a quarter circle rounds off a rim is a square's corner less the quarter disc, of area (1 - π/4) r²,
+// its middle 2r / (3 (4 - π)) out from the circle's centre.
+@test
+a_rounded_cylinder_loses_a_rounded_ring_at_each_rim()
+    val doc = new_document()
+    val id = edged(doc, Primitive.Cylinder, Vec3(30.0, 30.0, 12.0), 3.0)
+
+    doc.set_segments(id, 256).unwrap()
+
+    val ring = 2.0 * pi * (15.0 - 3.0 + 2.0 * 3.0 / (3.0 * (4.0 - pi))) * (1.0 - pi / 4.0) * 9.0
+    val exact = pi * 225.0 * 12.0 - 2.0 * ring
+    val got = solid(doc, id).volume()
+
+    assert(got <= exact && exact - got <= 1.5 * polygon_shortfall(256) * exact, s"${got} against ${exact}")
+    assert(close_vec(solid_size(doc, id), Vec3(30.0, 30.0, 12.0), 1.0e-9), s"its size: ${solid_size(doc, id)}")
+end a_rounded_cylinder_loses_a_rounded_ring_at_each_rim
+
+@test
+a_hole_with_a_clearance_grows_its_size_and_keeps_its_radius()
+    val doc = new_document()
+    val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0, chamfer = true)
+    val middle = solid_middle(doc, id)
+
+    doc.set_hole(true).unwrap()
+    doc.set_clearance(id, 0.5).unwrap()
+    assert(close_vec(solid_size(doc, id), Vec3(41.0, 21.0, 11.0), 1.0e-9), s"0.5 mm more on every side: ${solid_size(doc, id)}")
+    assert(close_vec(solid_middle(doc, id), middle, 1.0e-9), "about the same middle")
+    assert(close(solid(doc, id).volume(), chamfered_volume(41.0, 21.0, 11.0, 3.0), 1.0e-9), "the chamfer still 3 mm")
+    assert(close_vec(doc.size_of(doc.find(id).unwrap()), Vec3(40.0, 20.0, 10.0), 1.0e-9), "the size it is drawn at stays")
+
+    doc.set_edge_chamfer(id, false).unwrap()
+    doc.set_segments(id, 256).unwrap()
+
+    val want = rounded_rectangle_area(41.0, 21.0, 3.0)
+    val got = middle_section(doc, id)
+
+    assert(got <= want && want - got <= (4.0 - pi) * 9.0 * 0.01, s"rounds of 3 mm on the grown hole: ${got} against ${want}")
+
+    doc.set_hole(false).unwrap()
+    assert(close_vec(solid_size(doc, id), Vec3(40.0, 20.0, 10.0), 1.0e-9), "a solid again, at its own size")
+
+    val own = rounded_rectangle_area(40.0, 20.0, 3.0)
+
+    assert(middle_section(doc, id) <= own && own - middle_section(doc, id) <= (4.0 - pi) * 9.0 * 0.01,
+           s"with rounds of 3 mm, not the hole's squeezed: ${middle_section(doc, id)} against ${own}")
+    doc.set_hole(true).unwrap()
+    assert(close_vec(solid_size(doc, id), Vec3(41.0, 21.0, 11.0), 1.0e-9), "and a hole again, grown")
+    assert(want - middle_section(doc, id) <= (4.0 - pi) * 9.0 * 0.01, "with its rounds of 3 mm")
+end a_hole_with_a_clearance_grows_its_size_and_keeps_its_radius
+
+@test
+a_hole_with_finished_edges_cuts_its_shape()
+    val doc = new_document()
+    val block = doc.add_shape(Primitive.Box)
+
+    doc.resize_to(block, Vec3(60.0, 40.0, 20.0)).unwrap()
+
+    val cut = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0, chamfer = true)
+
+    doc.set_hole(true).unwrap()
+    doc.set_clearance(cut, 0.5).unwrap()
+
+    val b = doc.bounds_of(doc.find(block).unwrap())
+    val c = doc.bounds_of(doc.find(cut).unwrap())
+
+    doc.move_to(cut, doc.find(cut).unwrap().transform.translation + (b.center() - c.center())).unwrap()
+    doc.select(Some(block))
+    doc.toggle_selected(cut)
+
+    val group = doc.group_selected().unwrap()
+    val want = 60.0 * 40.0 * 20.0 - chamfered_volume(41.0, 21.0, 11.0, 3.0)
+
+    assert(close(doc.final_solid().unwrap().volume(), want, 1.0e-6), "the block less the grown hole")
+
+    doc.select(Some(group))
+    doc.ungroup_selected().unwrap()
+
+    var cuts = 0
+
+    for item in doc.items()
+        if item.hole
+            cuts += 1
+            assert_eq(item.edges, Some(Edges(3.0, true)), "the hole keeps its chamfer")
+            assert(close_vec(solid_size(doc, item.id), Vec3(41.0, 21.0, 11.0), 1.0e-9), "and the size it cut")
+            assert(close(doc.solid_of(item).volume(), chamfered_volume(41.0, 21.0, 11.0, 3.0), 1.0e-9),
+                   "with its chamfer still 3 mm")
+
+    assert_eq(cuts, 1, "one hole")
+end a_hole_with_finished_edges_cuts_its_shape
+
+@test
+a_mirrored_edged_box_is_the_same_box()
+    val doc = new_document()
+    val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0, chamfer = true)
+    val middle = solid_middle(doc, id)
+
+    for axis in 0..<3
+        doc.mirror_selected(axis).unwrap()
+        assert(close(solid(doc, id).volume(), chamfered_volume(40.0, 20.0, 10.0, 3.0), 1.0e-9), s"mirrored ${axis}")
+        assert(close_vec(solid_size(doc, id), Vec3(40.0, 20.0, 10.0), 1.0e-9), "the same size")
+        assert(close_vec(solid_middle(doc, id), middle, 1.0e-9), "in the same place")
+        assert_eq(doc.find(id).unwrap().edges, Some(Edges(3.0, true)), "with the same edges")
+end a_mirrored_edged_box_is_the_same_box
+
+@test
+a_turned_edged_box_keeps_its_rounds_circular()
+    val doc = new_document()
+    val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0)
+
+    doc.set_segments(id, 256).unwrap()
+    doc.rotate_to(id, Quaternion.from_euler(0.0, pi / 2.0, 0.0)).unwrap()
+    assert(close_vec(solid_size(doc, id), Vec3(10.0, 20.0, 40.0), 1.0e-9), s"stood on its end: ${solid_size(doc, id)}")
+
+    // Stretched from a rounded cube, these corners would be quarter ellipses 1.5 by 3 mm.
+    val want = rounded_rectangle_area(10.0, 20.0, 3.0)
+    val got = middle_section(doc, id)
+
+    assert(got <= want && want - got <= (4.0 - pi) * 9.0 * 0.01, s"the other faces' rounds are circles: ${got} against ${want}")
+end a_turned_edged_box_keeps_its_rounds_circular
+
+@test
+edges_are_one_step_each_and_undo()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val before = doc.describe()
+
+    doc.set_edge_radius(id, 2.0).unwrap()
+
+    val rounded = doc.describe()
+
+    doc.set_edge_radius(id, 2.0).unwrap()
+    doc.set_edge_chamfer(id, true).unwrap()
+    doc.set_edge_chamfer(id, true).unwrap()
+    assert_eq(doc.find(id).unwrap().edges, Some(Edges(2.0, true)), "chamfered")
+    assert(close(solid(doc, id).volume(), chamfered_volume(20.0, 20.0, 20.0, 2.0), 1.0e-9), "built chamfered")
+    assert(doc.undo(), "the chamfer undoes")
+    assert_eq(doc.describe(), rounded, "rounded again, in one step")
+    assert(close(solid(doc, id).volume(), rounded_volume(20.0, 20.0, 20.0, 2.0),
+                 1.5 * polygon_shortfall(ROUND_SEGMENTS) * (pi * 4.0 * 48.0 + 4.0 / 3.0 * pi * 8.0)), "built rounded again")
+    assert(doc.undo(), "the radius undoes")
+    assert_eq(doc.describe(), before, "sharp again, in one step")
+    assert(close(solid(doc, id).volume(), 8000.0, 1.0e-9), "built sharp again")
+    assert(doc.redo(), "and redoes")
+    assert(doc.redo(), "both")
+    assert_eq(doc.find(id).unwrap().edges, Some(Edges(2.0, true)), "chamfered once more")
+    assert(close(solid(doc, id).volume(), chamfered_volume(20.0, 20.0, 20.0, 2.0), 1.0e-9), "and built so")
+end edges_are_one_step_each_and_undo
+
+@test
+a_resize_of_an_edged_box_builds_it_again_and_its_undo_finds_the_old_one()
+    val doc = new_document()
+    val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0, chamfer = true)
+
+    assert(close(solid(doc, id).volume(), chamfered_volume(40.0, 20.0, 10.0, 3.0), 1.0e-9), "40 by 20 by 10")
+    doc.resize_to(id, Vec3(10.0, 30.0, 20.0)).unwrap()
+    assert(close(solid(doc, id).volume(), chamfered_volume(10.0, 30.0, 20.0, 3.0), 1.0e-9), "10 by 30 by 20")
+
+    val builds = doc.builds
+
+    doc.undo()
+    assert(close(solid(doc, id).volume(), chamfered_volume(40.0, 20.0, 10.0, 3.0), 1.0e-9), "40 by 20 by 10 again")
+    doc.move_to(id, Vec3(30.0, 30.0, 0.0)).unwrap()
+    doc.mesh_of(doc.find(id).unwrap())
+    assert(doc.builds - builds <= 2, s"a move asks only for the moved solid, not a new shape: ${doc.builds - builds}")
+end a_resize_of_an_edged_box_builds_it_again_and_its_undo_finds_the_old_one
+
+@test
+a_rounded_box_has_segments_and_a_chamfered_one_has_none()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+
+    assert(doc.find(id).unwrap().segments.is_none(), "a sharp box has none")
+    assert(doc.set_segments(id, 12).is_err(), "and takes none")
+    doc.set_edge_radius(id, 3.0).unwrap()
+    assert_eq(doc.find(id).unwrap().segments, Some(ROUND_SEGMENTS), "a rounded box has them")
+    doc.set_segments(id, 12).unwrap()
+    assert_eq(doc.find(id).unwrap().segments, Some(12), "and takes them")
+
+    val coarse = solid(doc, id).num_vert()
+
+    doc.set_segments(id, 48).unwrap()
+    assert(solid(doc, id).num_vert() > coarse, "smoother rounds for more")
+    doc.set_edge_chamfer(id, true).unwrap()
+    assert(doc.find(id).unwrap().segments.is_none(), "a chamfered box has none")
+    doc.set_edge_chamfer(id, false).unwrap()
+    assert_eq(doc.find(id).unwrap().segments, Some(48), "and keeps them for rounding again")
+end a_rounded_box_has_segments_and_a_chamfered_one_has_none
+
+@test
+only_a_box_and_a_cylinder_have_edges()
+    val doc = new_document()
+
+    for p in PRIMITIVES
+        val id = doc.add_shape(p)
+
+        assert_eq(doc.find(id).unwrap().edges.is_some(), p == Primitive.Box || p == Primitive.Cylinder, primitive_name(p))
+
+        if !takes_edges(p)
+            assert(doc.set_edge_radius(id, 1.0).is_err(), s"a ${primitive_name(p)} refuses a radius")
+            assert(doc.set_edge_chamfer(id, true).is_err(), s"a ${primitive_name(p)} refuses a chamfer")
+
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val group = doc.group_selected().unwrap()
+
+    assert(doc.find(group).unwrap().edges.is_none(), "a group has none")
+    assert(doc.set_edge_radius(group, 1.0).is_err(), "and refuses one")
+end only_a_box_and_a_cylinder_have_edges
+
+@test
+a_copy_of_an_edged_box_is_the_same_box_somewhere_else()
+    val doc = new_document()
+    val id = edged(doc, Primitive.Box, Vec3(40.0, 20.0, 10.0), 3.0, chamfer = true)
+
+    doc.duplicate_selected(10.0).unwrap()
+
+    val copy = doc.selection[0]
+
+    assert(copy != id, "a copy")
+    assert_eq(doc.find(copy).unwrap().edges, Some(Edges(3.0, true)), "with its edges")
+    assert(close(solid(doc, copy).volume(), chamfered_volume(40.0, 20.0, 10.0, 3.0), 1.0e-9), "and its solid")
+end a_copy_of_an_edged_box_is_the_same_box_somewhere_else
