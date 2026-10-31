@@ -7,8 +7,11 @@ import sh.sysl.tekton.document.{Document, Mesh, Node, Primitive, Transform, iden
 import sh.sysl.tekton.space.{Aabb, Vec3}
 import sysl.buf.{Buf, buf}
 import sysl.encoding.{get_u16_le, get_u32_le}
+import sh.sysl.zip.{Archive, Method, open}
 import sysl.fs.{make_temp_dir, read_bytes, read_text, remove_dir_all, set_permissions, walk, write_text}
 import sysl.math.pi
+import sysl.process.capture
+import sysl.text.from_utf8
 
 // -- STL --------------------------------------------------------------------------------------------------------
 
@@ -261,15 +264,19 @@ an_export_leaves_the_document_as_saved_or_unsaved_as_it_was()
     remove_dir_all(dir).unwrap()
 end an_export_leaves_the_document_as_saved_or_unsaved_as_it_was
 
-// Why an export would write nothing, and that it then leaves the old file alone.
+// Why an export would write nothing, the same for STL and 3MF, and that it then leaves the old file alone.
 private assert_refused(doc: &Document, why: string)
     val dir = make_temp_dir("tekton-export").unwrap()
-    val file = s"${dir}/a.stl"
+    val stl = s"${dir}/a.stl"
+    val three = s"${dir}/a.3mf"
 
-    write_text(file, "old\n").unwrap()
-    assert_eq(export_stl(doc, file), Err(why), "the reason")
-    assert_eq(read_text(file).unwrap(), "old\n", "the old file")
-    assert_eq(entries_in(dir), 1, "nothing beside it")
+    write_text(stl, "old\n").unwrap()
+    write_text(three, "old\n").unwrap()
+    assert_eq(export_stl(doc, stl), Err(why), "the reason")
+    assert_eq(export_3mf(doc, three), Err(why), "the same reason for 3MF")
+    assert_eq(read_text(stl).unwrap(), "old\n", "the old file")
+    assert_eq(read_text(three).unwrap(), "old\n", "the old 3MF file")
+    assert_eq(entries_in(dir), 2, "nothing beside them")
     remove_dir_all(dir).unwrap()
 end assert_refused
 
@@ -483,3 +490,110 @@ a_hole_exports_with_the_sides_set_on_it()
 
     assert(after.len() < before, "a hexagonal hole has fewer facets")
     assert((volume_of(after) - doc.final_solid().unwrap().volume()).abs() < 1.0e-3, "the kernel's volume")
+
+// -- The 3MF package ----------------------------------------------------------------------------------------------
+
+private occurrences(text: string, needle: string) -> usize
+    var n = 0usize
+    var at = 0usize
+
+    loop
+        text[at..].index_of(needle) match
+            Some(i) ->
+                n += 1
+                at += i + needle.len
+            None -> return n
+end occurrences
+
+// The part a package holds under this name, which must be there, deflated, and read back clean.
+private part_of(archive: Archive, name: string) -> Buf[u8]
+    val entry = archive.find(name)
+
+    assert(entry.is_some(), s"${name} is in the package")
+    assert_eq(entry.unwrap().method, Method.Deflate, s"${name} is deflated")
+    archive.read(entry.unwrap()).unwrap()
+end part_of
+
+@test
+a_package_holds_exactly_the_three_parts_deflated()
+    val mesh = box_document().final_mesh().unwrap()
+    val archive = open(three_mf_bytes(mesh, "box").unwrap().view()).unwrap()
+
+    assert_eq(archive.entries.len(), 3, "three parts and nothing else")
+    assert_eq(part_of(archive, "[Content_Types].xml").view(), content_types_part().bytes, "content types")
+    assert_eq(part_of(archive, "_rels/.rels").view(), relationships_part().bytes, "relationships")
+    assert_eq(part_of(archive, "3D/3dmodel.model").view(), model_part(shared_mesh(mesh), "box").bytes, "the model")
+end a_package_holds_exactly_the_three_parts_deflated
+
+@test
+an_exported_3mf_holds_the_documents_solid_in_millimetres()
+    val dir = make_temp_dir("tekton-3mf").unwrap()
+    val file = s"${dir}/box.3mf"
+    val doc = box_document()
+
+    write_text(file, "old\n").unwrap()
+    export_3mf(doc, file).unwrap()
+
+    val bytes = read_bytes(file).unwrap()
+    val archive = open(bytes).unwrap()
+    val model = from_utf8(part_of(archive, "3D/3dmodel.model").view()).unwrap()
+    val shared = shared_mesh(doc.final_mesh().unwrap())
+
+    assert(model.contains("<model unit=\"millimeter\""), "millimetres")
+    assert(model.contains("<object id=\"1\" type=\"model\" name=\"box\">"), "named after the file")
+    assert_eq(occurrences(model, "<vertex "), shared.vertex_count(), "every shared vertex")
+    assert_eq(occurrences(model, "<triangle "), shared.triangle_count(), "every triangle")
+    assert_eq(shared.vertex_count(), 8, "a box's corners")
+    assert_eq(shared.triangle_count(), 12, "a box's triangles")
+    assert_eq(entries_in(dir), 1, "nothing beside it")
+    remove_dir_all(dir).unwrap()
+end an_exported_3mf_holds_the_documents_solid_in_millimetres
+
+@test
+two_exports_of_one_document_are_byte_identical()
+    // The object is named after the file, so both have the same name, in two directories.
+    val one = make_temp_dir("tekton-3mf").unwrap()
+    val two = make_temp_dir("tekton-3mf").unwrap()
+    val doc = drilled_box()
+
+    export_3mf(doc, s"${one}/part.3mf").unwrap()
+    export_3mf(doc, s"${two}/part.3mf").unwrap()
+    assert_eq(read_bytes(s"${one}/part.3mf").unwrap().view(), read_bytes(s"${two}/part.3mf").unwrap().view(), "the same bytes")
+    remove_dir_all(one).unwrap()
+    remove_dir_all(two).unwrap()
+end two_exports_of_one_document_are_byte_identical
+
+@test
+unzip_finds_no_errors_in_an_exported_3mf()
+    val dir = make_temp_dir("tekton-3mf-unzip").unwrap()
+    val file = s"${dir}/drilled.3mf"
+
+    export_3mf(drilled_box(), file).unwrap()
+
+    val out = capture("unzip", ["-t", file]).unwrap()
+
+    assert(out.status.ok(), out.text)
+    assert(out.text.contains("No errors detected in compressed data"), out.text)
+    assert(out.text.contains("testing: [Content_Types].xml"), out.text)
+    assert(out.text.contains("testing: _rels/.rels"), out.text)
+    assert(out.text.contains("testing: 3D/3dmodel.model"), out.text)
+    remove_dir_all(dir).unwrap()
+end unzip_finds_no_errors_in_an_exported_3mf
+
+@test
+a_failed_3mf_export_leaves_the_old_file_and_no_debris()
+    val dir = make_temp_dir("tekton-3mf").unwrap()
+    val file = s"${dir}/a.3mf"
+
+    write_text(file, "old\n").unwrap()
+    set_permissions(dir, 0o555u32).unwrap()
+
+    val answer = export_3mf(box_document(), file)
+
+    set_permissions(dir, 0o755u32).unwrap()
+    assert(answer.is_err(), "refused")
+    assert_eq(read_text(file).unwrap(), "old\n", "the old file")
+    assert_eq(entries_in(dir), 1, "nothing beside it")
+    assert(export_3mf(box_document(), "/no/such/directory/a.3mf").is_err(), "no directory")
+    remove_dir_all(dir).unwrap()
+end a_failed_3mf_export_leaves_the_old_file_and_no_debris
