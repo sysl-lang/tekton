@@ -1,7 +1,8 @@
 module sh.sysl.tekton.interface
 @tests
 
-import sh.sysl.sdl3.{DialogResult, KMOD_GUI, KMOD_SHIFT}
+import sh.sysl.sdl3.{DialogResult, HINT_VIDEO_DRIVER, INIT_VIDEO, KMOD_GUI, KMOD_SHIFT, WINDOW_HIDDEN, Window, create_window, init,
+                     set_hint}
 import sh.sysl.tekton.camera.new_camera
 import sh.sysl.tekton.document.{Node, Primitive, identity_transform, restored_document, restored_group, restored_shape}
 import sh.sysl.tekton.files.document_text
@@ -46,12 +47,16 @@ end shows
 private key(w: &Workspace, letter: char, mods: u16 = KMOD_GUI, repeat: bool = false) -> bool =
     w.shortcut(u32(u8(letter)), mods, repeat)
 
-// What a dialog says each time it is asked, and how many times it was.
+// What a dialog says each time it is asked, and how many times it was; what the question about unsaved changes
+// answers, how many times it was asked and with what title.
 private struct Dialogs
     answer: DialogResult
     opens: int
     saves: int
     exports: int
+    reply: Result[Option[i32], string]
+    questions: int
+    asked: string
 
 private chosen(file: string) -> DialogResult
     var paths: Buf[string] = buf()
@@ -60,24 +65,32 @@ private chosen(file: string) -> DialogResult
     DialogResult.Chosen(paths)
 end chosen
 
-// A workspace whose dialogs answer from what is returned with it, and whose Quit is counted by the third.
+// A workspace whose dialogs and question answer from what is returned with it, and whose Quit is counted by the
+// third. The question says Cancel until told otherwise.
 private workspace() -> (&Workspace, &Dialogs, &Signal[int])
     val w = new_workspace()
-    val d: &Dialogs = Dialogs(DialogResult.Cancelled, 0, 0, 0)
+    val d: &Dialogs = Dialogs(DialogResult.Cancelled, 0, 0, 0, Ok(Some(CANCEL_ANSWER)), 0, "")
     val quits = signal(0)
 
-    w.ask_open = answer ->
+    w.ask_open = (answer, parent) ->
         d.opens += 1
         answer(d.answer)
-    w.ask_save = answer ->
+    w.ask_save = (answer, parent) ->
         d.saves += 1
         answer(d.answer)
-    w.ask_export_stl = answer ->
+    w.ask_export_stl = (answer, parent) ->
         d.exports += 1
         answer(d.answer)
+    w.ask_changes = (title, parent) ->
+        d.questions += 1
+        d.asked = title
+        d.reply
     w.quit = () -> quits.set(quits.read() + 1)
     (w, d, quits)
 end workspace
+
+private val SAVE: Result[Option[i32], string] = Ok(Some(SAVE_ANSWER))
+private val DISCARD: Result[Option[i32], string] = Ok(Some(DISCARD_ANSWER))
 
 private dir() -> string = make_temp_dir("tekton-menu").unwrap()
 
@@ -178,19 +191,19 @@ end export_stl_to_where_no_file_can_be_says_so_and_cancel_says_nothing
 
 @test
 new_on_a_clean_document_asks_nothing()
-    val (w, _, _) = workspace()
+    val (w, d, _) = workspace()
     var c = recorder()
     val was = w.doc
 
     choose(w, &c, "New")
-    assert(!w.asking.read(), "no question")
+    assert_eq(d.questions, 0, "no question")
     assert(w.doc !== was, "a new document")
     assert_eq(w.file, "", "with no file")
 end new_on_a_clean_document_asks_nothing
 
 @test
 new_on_unsaved_changes_asks_and_cancel_keeps_everything()
-    val (w, _, _) = workspace()
+    val (w, d, _) = workspace()
     var c = recorder()
 
     w.add(Primitive.Box)
@@ -198,25 +211,75 @@ new_on_unsaved_changes_asks_and_cancel_keeps_everything()
     val was = w.doc
 
     choose(w, &c, "New")
-    assert(w.asking.read(), "a question")
-    assert(shows(w, &c, "question.save"), "with its buttons")
-    assert(w.doc === was, "nothing yet")
-    tap(w, &c, "question.cancel")
-    assert(!w.asking.read(), "gone")
-    assert(!shows(w, &c, "question.save"), "from the window")
+    assert_eq(d.questions, 1, "a question")
+    assert_eq(d.asked, "Save the changes to this document?", "about this document")
     assert(w.doc === was, "the same document")
     assert_eq(w.doc.items().len, 1, "whole")
+    assert_eq(w.problem.read(), "", "and cancelling is no problem")
+    assert(shows(w, &c, "palette.box"), "and the window is still there to use")
 end new_on_unsaved_changes_asks_and_cancel_keeps_everything
 
 @test
-dont_save_goes_on_and_loses_them_because_it_was_told_to()
-    val (w, _, _) = workspace()
+the_question_names_the_file_it_would_save_to()
+    val (w, d, _) = workspace()
+    val where = dir()
+
+    w.add(Primitive.Box)
+    d.answer = chosen(s"${where}/part.tekton")
+    w.save()
+    w.add(Primitive.Box)
+    w.new_file()
+    assert_eq(d.asked, "Save the changes to part.tekton?", "by its name")
+    remove_dir_all(where).unwrap()
+end the_question_names_the_file_it_would_save_to
+
+@test
+a_question_closed_without_an_answer_is_cancel()
+    val (w, d, quits) = workspace()
+
+    w.add(Primitive.Box)
+    d.reply = Ok(None)
+    w.request_quit()
+    assert_eq(quits.read(), 0, "still here")
+    assert_eq(w.doc.items().len, 1, "with the document")
+    assert_eq(w.problem.read(), "", "and closing it is no problem")
+end a_question_closed_without_an_answer_is_cancel
+
+@test
+a_question_that_cannot_be_asked_stays_and_says_why()
+    val (w, d, quits) = workspace()
     var c = recorder()
 
     w.add(Primitive.Box)
+    d.reply = Err("no window server")
     choose(w, &c, "New")
-    tap(w, &c, "question.discard")
-    assert(!w.asking.read(), "answered")
+    w.request_quit()
+    assert_eq(quits.read(), 0, "still here")
+    assert_eq(w.doc.items().len, 1, "with the document")
+    assert_eq(w.problem.read(), "Could not ask about the unsaved changes: no window server", "said")
+    assert_eq(d.saves, 0, "and nothing was saved")
+end a_question_that_cannot_be_asked_stays_and_says_why
+
+@test
+an_answer_no_button_gives_is_cancel()
+    val (w, d, quits) = workspace()
+
+    w.add(Primitive.Box)
+    d.reply = Ok(Some(99))
+    w.request_quit()
+    assert_eq(quits.read(), 0, "still here")
+    assert_eq(d.saves, 0, "nothing saved")
+end an_answer_no_button_gives_is_cancel
+
+@test
+dont_save_goes_on_and_loses_them_because_it_was_told_to()
+    val (w, d, _) = workspace()
+    var c = recorder()
+
+    w.add(Primitive.Box)
+    d.reply = DISCARD
+    choose(w, &c, "New")
+    assert_eq(d.questions, 1, "asked")
     assert_eq(w.doc.items().len, 0, "a new document")
     assert(!w.doc.can_undo, "with no history")
 end dont_save_goes_on_and_loses_them_because_it_was_told_to
@@ -236,8 +299,8 @@ save_with_a_file_writes_it_and_then_goes_on()
 
     val text = document_text(w.doc)
 
+    d.reply = SAVE
     choose(w, &c, "New")
-    tap(w, &c, "question.save")
     assert_eq(d.saves, 1, "the file it had needed no dialog")
     assert_eq(read_text(file).unwrap(), text, "both shapes are in the file")
     assert_eq(w.doc.items().len, 0, "and the new document is here")
@@ -248,15 +311,14 @@ end save_with_a_file_writes_it_and_then_goes_on
 @test
 save_with_no_file_asks_where_and_then_goes_on()
     val (w, d, quits) = workspace()
-    var c = recorder()
     val where = dir()
     val file = s"${where}/b"
 
     w.add(Primitive.Box)
     d.answer = chosen(file)
+    d.reply = SAVE
     w.request_quit()
-    assert_eq(quits.read(), 0, "asked first")
-    tap(w, &c, "question.save")
+    assert_eq(d.questions, 1, "asked first")
     assert_eq(d.saves, 1, "the dialog")
     assert_eq(read_text(s"${file}.tekton").unwrap(), document_text(w.doc), "written, with the extension")
     assert_eq(quits.read(), 1, "and then it quit")
@@ -266,12 +328,12 @@ end save_with_no_file_asks_where_and_then_goes_on
 @test
 cancelling_the_dialog_after_save_stops_what_was_going_to_happen()
     val (w, d, quits) = workspace()
-    var c = recorder()
 
     w.add(Primitive.Box)
-    w.request_quit()
     d.answer = DialogResult.Cancelled
-    tap(w, &c, "question.save")
+    d.reply = SAVE
+    w.request_quit()
+    assert_eq(d.saves, 1, "the dialog was up")
     assert_eq(quits.read(), 0, "still here")
     assert_eq(w.doc.items().len, 1, "with the document")
     assert(w.doc.is_dirty(), "unsaved")
@@ -281,12 +343,11 @@ end cancelling_the_dialog_after_save_stops_what_was_going_to_happen
 @test
 a_failed_dialog_after_save_stops_too_and_says_so()
     val (w, d, quits) = workspace()
-    var c = recorder()
 
     w.add(Primitive.Box)
-    w.request_quit()
     d.answer = DialogResult.Failed("no portal")
-    tap(w, &c, "question.save")
+    d.reply = SAVE
+    w.request_quit()
     assert_eq(quits.read(), 0, "still here")
     assert_eq(w.problem.read(), "The file dialog failed: no portal", "said")
 end a_failed_dialog_after_save_stops_too_and_says_so
@@ -294,7 +355,6 @@ end a_failed_dialog_after_save_stops_too_and_says_so
 @test
 a_failed_save_after_the_question_stops_and_says_so_and_the_old_file_stays()
     val (w, d, quits) = workspace()
-    var c = recorder()
     val where = dir()
     val file = s"${where}/a.tekton"
 
@@ -305,9 +365,9 @@ a_failed_save_after_the_question_stops_and_says_so_and_the_old_file_stays()
     val old = read_text(file).unwrap()
 
     w.add(Primitive.Sphere)
-    w.request_quit()
     set_permissions(where, 0o555u32).unwrap()
-    tap(w, &c, "question.save")
+    d.reply = SAVE
+    w.request_quit()
     set_permissions(where, 0o755u32).unwrap()
     assert_eq(quits.read(), 0, "still here")
     assert_eq(read_text(file).unwrap(), old, "the old file")
@@ -319,32 +379,36 @@ end a_failed_save_after_the_question_stops_and_says_so_and_the_old_file_stays
 
 @test
 quit_with_nothing_unsaved_quits_and_the_question_can_refuse_it()
-    val (w, _, quits) = workspace()
-    var c = recorder()
+    val (w, d, quits) = workspace()
 
     w.request_quit()
     assert_eq(quits.read(), 1, "clean: straight away")
+    assert_eq(d.questions, 0, "with no question")
 
+    w.next_frame()
     w.add(Primitive.Box)
     w.request_quit()
     w.request_quit()
-    assert_eq(quits.read(), 1, "a window's two close events ask once")
-    tap(w, &c, "question.cancel")
+    assert_eq(d.questions, 1, "a window's two close events ask once")
     assert_eq(quits.read(), 1, "cancelled")
     w.request_quit()
-    tap(w, &c, "question.discard")
+    assert_eq(d.questions, 1, "still the same close")
+    w.next_frame()
+    d.reply = DISCARD
+    w.request_quit()
+    assert_eq(d.questions, 2, "a later close asks again")
     assert_eq(quits.read(), 2, "told to")
 end quit_with_nothing_unsaved_quits_and_the_question_can_refuse_it
 
 @test
 quit_on_the_menu_asks_too()
-    val (w, _, quits) = workspace()
+    val (w, d, quits) = workspace()
     var c = recorder()
 
     w.add(Primitive.Box)
     choose(w, &c, "Quit")
     assert_eq(quits.read(), 0, "not yet")
-    assert(w.asking.read(), "asked")
+    assert_eq(d.questions, 1, "asked")
 end quit_on_the_menu_asks_too
 
 @test
@@ -366,7 +430,7 @@ open_replaces_the_document_clears_undo_and_frames_it()
 
     framed.frame(w.doc)
     assert_eq(w.camera.distance, framed.distance, "framed distance")
-    assert_eq(w.heading(), "Tekton", "no mark")
+    assert_eq(w.title(), "box.tekton — Tekton", "no mark")
     assert(shows(w, &c, "palette.box"), "and the window draws it")
     remove_dir_all(where).unwrap()
 end open_replaces_the_document_clears_undo_and_frames_it
@@ -381,8 +445,10 @@ open_with_unsaved_changes_asks_before_the_dialog()
     w.add(Primitive.Sphere)
     w.add(Primitive.Sphere)
     choose(w, &c, "Open")
-    assert_eq(d.opens, 0, "not yet")
-    tap(w, &c, "question.discard")
+    assert_eq(d.questions, 1, "asked")
+    assert_eq(d.opens, 0, "and cancelled, so no dialog")
+    d.reply = DISCARD
+    choose(w, &c, "Open")
     assert_eq(d.opens, 1, "then")
     assert_eq(w.doc.items().len, 1, "the file's")
     remove_dir_all(where).unwrap()
@@ -566,93 +632,18 @@ a_file_command_does_nothing_in_the_middle_of_a_drag()
     w.save_as()
     w.request_quit()
     assert(w.doc === was, "the same document")
-    assert(!w.asking.read(), "no question")
+    assert_eq(d.questions, 0, "no question")
     assert_eq(d.opens + d.saves + quits.read(), 0, "no dialog and no quit")
 end a_file_command_does_nothing_in_the_middle_of_a_drag
 
 @test
-while_the_question_is_up_the_keyboard_only_cancels()
-    val (w, d, _) = workspace()
-
-    w.add(Primitive.Box)
-    w.add(Primitive.Sphere)
-    w.new_file()
-
-    val count = w.doc.items().len
-
-    assert(key(w, 'z'), "Cmd+Z is taken")
-    assert_eq(w.doc.items().len, count, "and does not undo")
-    assert(key(w, 's'), "Cmd+S is taken")
-    assert_eq(d.saves, 0, "and does not save")
-    assert(w.shortcut(ESCAPE_CODE, NO_MODS, false), "Escape")
-    assert(!w.asking.read(), "cancels")
-    assert_eq(w.doc.items().len, count, "and the document stays")
-end while_the_question_is_up_the_keyboard_only_cancels
-
-@test
-while_the_question_is_up_the_window_behind_takes_nothing()
-    val (w, _, _) = workspace()
-    var c = recorder()
-
-    w.add(Primitive.Box)
-    w.frame_all()
-    w.new_file()
-    render(w.tree(), &c, WINDOW)
-
-    val turn = w.camera.turn
-    val distance = w.camera.distance
-    val count = w.doc.items().len
-
-    // A tap on the palette, which is under the catcher.
-    c.point(100, 150, true)
-    render(w.tree(), &c, WINDOW)
-    c.release(100, 150)
-    render(w.tree(), &c, WINDOW)
-    assert_eq(w.doc.items().len, count, "the palette")
-
-    // A drag and the wheel over the viewport, which are read by position.
-    c.point(1240, 60, true)
-    render(w.tree(), &c, WINDOW)
-    c.point(1180, 120, true)
-    render(w.tree(), &c, WINDOW)
-    c.release(1180, 120)
-    render(w.tree(), &c, WINDOW)
-    c.point(1240, 60, false)
-    c.spin(0.0, 50.0)
-    render(w.tree(), &c, WINDOW)
-    assert_eq(w.camera.turn, turn, "the view stayed")
-    assert_eq(w.camera.distance, distance, "at its distance")
-    assert(w.asking.read(), "and it is still asking")
-
-    // The same drag with the question gone does turn the view, so the above could have failed.
-    w.answer_cancel()
-    render(w.tree(), &c, WINDOW)
-    c.point(1240, 60, true)
-    render(w.tree(), &c, WINDOW)
-    c.point(1180, 120, true)
-    render(w.tree(), &c, WINDOW)
-    assert(w.camera.turn != turn, "the view turns")
-
-    // A turn of the view already going on when the question comes up stops there, button still down.
-    w.new_file()
-    render(w.tree(), &c, WINDOW)
-
-    val stopped = w.camera.turn
-
-    c.point(1100, 200, true)
-    render(w.tree(), &c, WINDOW)
-    assert_eq(w.camera.turn, stopped, "the view stops under the question")
-end while_the_question_is_up_the_window_behind_takes_nothing
-
-@test
 a_failed_save_as_after_the_question_stops_what_was_going_to_happen()
     val (w, d, quits) = workspace()
-    var c = recorder()
 
     w.add(Primitive.Box)
-    w.request_quit()
     d.answer = chosen("/no/such/directory/a.tekton")
-    tap(w, &c, "question.save")
+    d.reply = SAVE
+    w.request_quit()
     assert_eq(quits.read(), 0, "still here")
     assert_eq(w.file, "", "with no file")
     assert(w.problem.read().starts_with("Could not save a.tekton: "), w.problem.read())
@@ -670,7 +661,7 @@ while_a_file_dialog_is_up_nothing_can_change_what_it_was_asked_about()
     val file = box_file(where)
     val held: &Held = Held(None)
 
-    w.ask_open = answer -> held.answer = Some(answer)
+    w.ask_open = (answer, parent) -> held.answer = Some(answer)
     w.open_file()
     assert(held.answer.is_some(), "the dialog is up")
     assert(w.in_dialog.read(), "and known to be")
@@ -698,28 +689,174 @@ the_mark_follows_undo_back_to_what_was_saved()
     var c = recorder()
     val where = dir()
 
-    assert_eq(w.heading(), "Tekton", "new")
+    assert_eq(w.title(), "Untitled — Tekton", "new")
     w.add(Primitive.Box)
-    assert_eq(w.heading(), "Tekton *", "edited")
+    assert_eq(w.title(), "• Untitled — Tekton", "edited")
     d.answer = chosen(s"${where}/a.tekton")
     w.save()
-    assert_eq(w.heading(), "Tekton", "saved")
+    assert_eq(w.title(), "a.tekton — Tekton", "saved")
     w.add(Primitive.Sphere)
-    assert_eq(w.heading(), "Tekton *", "edited again")
+    assert_eq(w.title(), "• a.tekton — Tekton", "edited again")
     w.undo()
-    assert_eq(w.heading(), "Tekton", "undone back to it")
+    assert_eq(w.title(), "a.tekton — Tekton", "undone back to it")
     w.redo()
-    assert_eq(w.heading(), "Tekton *", "redone")
+    assert_eq(w.title(), "• a.tekton — Tekton", "redone")
     render(w.tree(), &c, WINDOW)
 
-    var drawn = false
+    var marked = false
 
     for op in c.ops.view()
-        if op.index_of("Tekton *").is_some() then drawn = true
+        if op.index_of("Tekton *").is_some() then marked = true
 
-    assert(drawn, "and the panel draws it")
+    assert(!marked, "the window's title carries the mark, not the panel")
     remove_dir_all(where).unwrap()
 end the_mark_follows_undo_back_to_what_was_saved
+
+// What the window was retitled to, in order.
+private struct Titles
+    given: Buf[string]
+    works: bool
+
+@test
+the_window_is_retitled_once_for_each_change_of_file_or_mark()
+    val (w, d, _) = workspace()
+    val where = dir()
+    val t: &Titles = Titles(buf(), true)
+
+    w.retitle = title ->
+        t.given.push(title)
+        t.works
+
+    w.next_frame()
+    w.next_frame()
+    assert_eq(t.given.len(), 1, "once for the first frame, not again for an unchanged one")
+    assert_eq(t.given[0], "Untitled — Tekton", "with no file")
+    w.add(Primitive.Box)
+    w.next_frame()
+    assert_eq(t.given[1], "• Untitled — Tekton", "unsaved")
+    d.answer = chosen(s"${where}/part.tekton")
+    w.save()
+    w.next_frame()
+    w.next_frame()
+    assert_eq(t.given.len(), 3, "saved: once")
+    assert_eq(t.given[2], "part.tekton — Tekton", "named, clean")
+    remove_dir_all(where).unwrap()
+end the_window_is_retitled_once_for_each_change_of_file_or_mark
+
+@test
+a_title_the_window_did_not_take_is_tried_again()
+    val (w, _, _) = workspace()
+    val t: &Titles = Titles(buf(), false)
+
+    w.retitle = title ->
+        t.given.push(title)
+        t.works
+
+    w.next_frame()
+    w.next_frame()
+    assert_eq(t.given.len(), 2, "no window yet: asked again next frame")
+    t.works = true
+    w.next_frame()
+    w.next_frame()
+    assert_eq(t.given.len(), 3, "and once taken, left alone")
+end a_title_the_window_did_not_take_is_tried_again
+
+@test
+the_title_names_the_file_and_marks_what_is_unsaved()
+    assert_eq(window_title("", false), "Untitled — Tekton", "no file")
+    assert_eq(window_title("", true), "• Untitled — Tekton", "no file, unsaved")
+    assert_eq(window_title("/a/b/part.tekton", false), "part.tekton — Tekton", "only the name")
+    assert_eq(window_title("/a/b/part.tekton", true), "• part.tekton — Tekton", "named, unsaved")
+end the_title_names_the_file_and_marks_what_is_unsaved
+
+@test
+the_question_saves_on_return_and_cancels_on_escape()
+    val all = question_buttons()
+
+    assert_eq(all.len(), 3, "three buttons")
+    assert_eq(all[0].text, "Save", "first")
+    assert_eq(all[1].text, "Don't Save", "second")
+    assert_eq(all[2].text, "Cancel", "third")
+    assert(all[0].on_return && !all[0].on_escape, "Return is Save")
+    assert(!all[1].on_return && !all[1].on_escape, "Don't Save has no key")
+    assert(all[2].on_escape && !all[2].on_return, "Escape is Cancel")
+
+    for b in all.view()
+        unsaved_answer(Ok(Some(b.id))) match
+            SaveFirst -> assert_eq(b.text, "Save", "Save saves")
+            Discard -> assert_eq(b.text, "Don't Save", "Don't Save discards")
+            Stay(why) ->
+                assert_eq(b.text, "Cancel", "Cancel stays")
+                assert_eq(why, "", "with nothing to say")
+end the_question_saves_on_return_and_cancels_on_escape
+
+@test
+what_each_answer_to_the_question_means()
+    assert(matches_save(unsaved_answer(SAVE)), "Save")
+    assert(matches_discard(unsaved_answer(DISCARD)), "Don't Save")
+    assert_eq(stay_of(unsaved_answer(Ok(Some(CANCEL_ANSWER)))), Some(""), "Cancel")
+    assert_eq(stay_of(unsaved_answer(Ok(None))), Some(""), "closed")
+    assert_eq(stay_of(unsaved_answer(Ok(Some(7)))), Some(""), "no button of ours")
+    assert_eq(stay_of(unsaved_answer(Err("gone"))), Some("Could not ask about the unsaved changes: gone"), "failed")
+end what_each_answer_to_the_question_means
+
+private matches_save(u: Unsaved) -> bool =
+    u match
+        SaveFirst -> true
+        _ -> false
+
+private matches_discard(u: Unsaved) -> bool =
+    u match
+        Discard -> true
+        _ -> false
+
+private stay_of(u: Unsaved) -> Option[string] =
+    u match
+        Stay(why) -> Some(why)
+        _ -> None
+
+// What each dialog and the question were given as their window.
+private struct Parents
+    window: &Window
+    seen: Buf[bool]
+
+@test
+every_dialog_and_the_question_belong_to_the_window()
+    set_hint(HINT_VIDEO_DRIVER, "dummy")
+    assert(init(INIT_VIDEO), "SDL came up headless")
+
+    val (w, d, _) = workspace()
+    val p: &Parents = Parents(create_window("parent", 64, 64, WINDOW_HIDDEN).unwrap(), buf())
+
+    w.parent = () -> Some(p.window)
+    w.ask_open = (answer, parent) ->
+        p.seen.push(parent.is_some() && parent.unwrap() === p.window)
+        answer(DialogResult.Cancelled)
+    w.ask_save = (answer, parent) ->
+        p.seen.push(parent.is_some() && parent.unwrap() === p.window)
+        answer(DialogResult.Cancelled)
+    w.ask_export_stl = (answer, parent) ->
+        p.seen.push(parent.is_some() && parent.unwrap() === p.window)
+        answer(DialogResult.Cancelled)
+    w.ask_changes = (title, parent) ->
+        p.seen.push(parent.is_some() && parent.unwrap() === p.window)
+        Ok(Some(CANCEL_ANSWER))
+
+    w.open_file()
+    w.save_as()
+    w.add(Primitive.Box)
+    w.export_stl_file()
+    w.new_file()
+    assert_eq(p.seen.len(), 4, "open, save as, export and the question")
+
+    for one in p.seen.view() do assert(one, "each given the window")
+
+    w.parent = () -> None
+    w.open_file()
+    assert_eq(p.seen.len(), 5, "asked again")
+    assert(!p.seen[4], "and with no window, none")
+    assert_eq(d.opens, 0, "the test's own dialogs answered, not the helper's")
+end every_dialog_and_the_question_belong_to_the_window
 
 @test
 a_new_document_goes_on_from_the_old_ones_revisions()

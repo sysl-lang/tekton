@@ -7,6 +7,7 @@
 //     tekton --demo --select 3 --view 0.3,0.5         which demo shape is selected; the camera's turn and tilt
 //     tekton --demo --menu Edit                       with that menu of the bar open
 //     tekton --holes                                a part with a hole cut in it, and a hole not yet grouped
+//     tekton --demo --control /tmp/tekton.sock        driven over HTTP on that socket, in the window as usual
 //
 // The shaders are Metal Shading Language, so this runs on a Mac, in a shell inside the desktop session.
 
@@ -72,6 +73,7 @@ main(args: []string) -> Result[unit, string]
     var view: Option[(real, real)] = None
     var opened = ""
     var file = ""
+    var control = ""
     var i = 1
 
     while i < args.len
@@ -93,6 +95,9 @@ main(args: []string) -> Result[unit, string]
             "--menu" ->
                 i += 1
                 opened = args[i]
+            "--control" ->
+                i += 1
+                control = args[i]
             other ->
                 if other.starts_with("--") then return Err(s"unknown option: ${other}")
 
@@ -130,7 +135,8 @@ main(args: []string) -> Result[unit, string]
 
     val frames = signal(0)
 
-    run(app("Tekton", () -> w.tree(), () -> 0xDDE2E9u32, width, height, gpu = GPU_SHADERFORMAT_MSL, on_event = e ->
+    run(app(w.title(), () -> w.tree(), () -> 0xDDE2E9u32, width, height, gpu = GPU_SHADERFORMAT_MSL, control = control,
+            on_event = e ->
         e.kind() match
             Quit | WindowCloseRequested ->
                 w.request_quit()
@@ -139,6 +145,7 @@ main(args: []string) -> Result[unit, string]
             _ -> false
     , on_frame = dt ->
         deliver_dialogs()
+        w.next_frame()
 
         if shot != ""
             frames.set(frames.read() + 1)

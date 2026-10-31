@@ -2,7 +2,8 @@ module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
-import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, ask_open_file, ask_save_file}
+import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
+                     ask_save_file, message_button}
 import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform, new_document, primitive_name}
 import sh.sysl.tekton.export.export_stl
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
@@ -10,7 +11,7 @@ import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_gri
 import sh.sysl.tekton.picking.{pick, pick_hit}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
 import sh.sysl.ui.*
-import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, stop, viewport, viewport_depth_format}
+import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, set_title, stop, viewport, viewport_depth_format, window}
 import sysl.buf.{Buf, buf}
 import sysl.path.file_name
 import sysl.text.{parse_real, split, to_lower}
@@ -37,18 +38,28 @@ const FIRST_FIELD_ID: int = 100
 
 const WRONG_INK: u32 = 0xD92D20u32
 
-// The key that answers Cancel to a question, as the window reports it.
-const ESCAPE_CODE: u32 = 27
+// What the question about unsaved changes answers for each of its buttons, and the line under its title.
+const SAVE_ANSWER: i32 = 1
+const DISCARD_ANSWER: i32 = 2
+const CANCEL_ANSWER: i32 = 3
+const QUESTION_DETAIL: string = "They are lost if you don't."
 
 // How many characters of a file's name the panel has room for, and how many of a problem on one line.
 const NAME_ROOM: usize = 28
 const PROBLEM_ROOM: usize = 34
 
-// What was asked for that would lose unsaved changes, while the question is up.
+// What was asked for that would lose unsaved changes, and goes on once they are answered for.
 enum Intent
     NewDocument
     OpenDocument
     Quit
+
+// What an answer to the question about unsaved changes means: save and go on, go on without saving, or stay
+// where things are, with the problem to report when the question could not be asked at all.
+enum Unsaved
+    SaveFirst
+    Discard
+    Stay(problem: string)
 
 // What a file dialog is up for.
 enum Asked
@@ -111,17 +122,18 @@ struct Workspace
     // The file this document came from or went to, or nothing.
     file: string
 
-    // Whether unsaved changes are being asked about, and what goes on once they are answered for.
-    asking: &Signal[bool]
-    waiting: Option[Intent]
+    // How the question about unsaved changes is asked, given its title and the window it belongs to, which a
+    // test answers for itself. It answers once the question has been answered: the box is the system's own and
+    // holds everything until then.
+    ask_changes: &Fn(string, Option[&Window]) -> Result[Option[i32], string]
 
     // Whether a file dialog is up. Nothing may change under it: what it answers was asked about this document.
     in_dialog: &Signal[bool]
 
-    // How a file dialog is shown, which a test answers for itself.
-    ask_open: &Fn(&Fn(DialogResult) -> unit) -> unit
-    ask_save: &Fn(&Fn(DialogResult) -> unit) -> unit
-    ask_export_stl: &Fn(&Fn(DialogResult) -> unit) -> unit
+    // How a file dialog is shown, given what answers it and the window it belongs to, which a test answers for itself.
+    ask_open: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
+    ask_save: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
+    ask_export_stl: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
 
     // What the last dialog answers to, which has to outlive the frame that showed it.
     answering: Option[&Fn(DialogResult) -> unit]
@@ -129,25 +141,51 @@ struct Workspace
     // Whether the next frame takes the keyboard from whichever field has it.
     release_keyboard: bool
 
+    // The window the question and the dialogs belong to, and how it is retitled, which a test answers for itself.
+    parent: &Fn() -> Option[&Window]
+    retitle: &Fn(string) -> bool
+
+    // The title the window was last given.
+    titled: string
+
+    // Whether this frame has already asked about quitting. Closing the window sends two events, and the second
+    // must not ask again after the first was answered.
+    quit_asked: bool
+
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
     // Whether something is over the viewport that the pointer belongs to instead.
-    private covered(&self) -> bool = self.open_menu.read() != NO_MENU || self.asking.read() || self.in_dialog.read()
+    private covered(&self) -> bool = self.open_menu.read() != NO_MENU || self.in_dialog.read()
 
-    // Ask first if this would lose anything, and otherwise do it. A drag or an open question finishes first.
+    // Ask first if this would lose anything, and otherwise do it. A drag or an open dialog finishes first.
     private guarded(&self, intent: Intent)
-        if self.is_editing() || self.asking.read() || self.in_dialog.read() then return
+        if self.is_editing() || self.in_dialog.read() then return
 
         self.open_menu.set(NO_MENU)
 
-        if self.doc.is_dirty()
-            self.waiting = Some(intent)
-            self.release_keyboard = true
-            self.asking.set(true)
-            self.changed()
-        else
-            self.carry_out(intent)
+        if !self.doc.is_dirty() then return self.carry_out(intent)
+
+        self.release_keyboard = true
+
+        unsaved_answer((self.ask_changes)(question_title(self.file), (self.parent)())) match
+            SaveFirst -> self.save(Some(intent))
+            Discard -> self.carry_out(intent)
+            Stay(why) -> if why != "" then self.problem.set(why)
+
+        self.changed()
     end guarded
+
+    // Once a frame: the window's title follows the file and its unsaved mark, and a close may be asked about again.
+    next_frame(&self)
+        self.quit_asked = false
+
+        val t = self.title()
+
+        if t != self.titled && (self.retitle)(t) then self.titled = t
+    end next_frame
+
+    // What the window is called now.
+    title(&self) -> string = window_title(self.file, self.doc.is_dirty())
 
     private carry_out(&self, intent: Intent)
         intent match
@@ -162,12 +200,12 @@ struct Workspace
             None -> ()
     end go_on
 
-    private show_dialog(&self, ask: &Fn(&Fn(DialogResult) -> unit) -> unit, asked: Asked)
+    private show_dialog(&self, show: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit, asked: Asked)
         val answer: &Fn(DialogResult) -> unit = r -> self.dialog_answered(asked, r)
 
         self.in_dialog.set(true)
         self.answering = Some(answer)
-        ask(answer)
+        show(answer, (self.parent)())
     end show_dialog
 
     private dialog_answered(&self, asked: Asked, r: DialogResult)
@@ -213,7 +251,13 @@ struct Workspace
 
     open_file(&self) = self.guarded(Intent.OpenDocument)
 
-    request_quit(&self) = self.guarded(Intent.Quit)
+    // Quit, asking first; a second request in the same frame is the same close, and asks nothing.
+    request_quit(&self)
+        if self.quit_asked then return
+
+        self.quit_asked = true
+        self.guarded(Intent.Quit)
+    end request_quit
 
     // Save to the file this document has, and without one ask where.
     save(&self, after: Option[Intent] = None)
@@ -248,7 +292,7 @@ struct Workspace
     // Ask where to write the document's solid as STL. A document with no solid to send says why at once, rather
     // than after a dialog. An export is not a save: the document keeps its file and its mark.
     export_stl_file(&self)
-        if self.is_editing() || self.in_dialog.read() || self.asking.read() then return
+        if self.is_editing() || self.in_dialog.read() then return
 
         self.open_menu.set(NO_MENU)
 
@@ -276,44 +320,6 @@ struct Workspace
                 self.changed()
                 false
     end open_path
-
-    // The question's three answers.
-    answer_save(&self)
-        val after = self.waiting
-
-        self.close_question()
-        self.save(after)
-    end answer_save
-
-    answer_discard(&self)
-        val after = self.waiting
-
-        self.close_question()
-        self.go_on(after)
-    end answer_discard
-
-    answer_cancel(&self) = self.close_question()
-
-    private close_question(&self)
-        self.waiting = None
-        self.asking.set(false)
-        self.changed()
-    end close_question
-
-    // The heading of the panel, marked while there is anything unsaved.
-    heading(&self) -> string = if self.doc.is_dirty() then "Tekton *" else "Tekton"
-
-    // The question, which has to be answered.
-    private question(&self) -> &View
-        val name = if self.file == "" then "this document" else name_of(self.file)
-
-        column([text(s"Save the changes to ${shortened(name)}?").font_size(15.0),
-                text("They are lost if you don't.").font_size(12.0),
-                row([button("Save", () -> self.answer_save(), Role.Primary, Variant.Filled).named("question.save"),
-                     button("Don't Save", () -> self.answer_discard(), Role.Primary, Variant.Outline).named("question.discard"),
-                     button("Cancel", () -> self.answer_cancel(), Role.Primary, Variant.Outline).named("question.cancel")], 8)], 12)
-            .padding(20).background(0xFFFFFFu32).padding(1).background(0xCBD2DCu32).restyle(t -> light())
-    end question
 
     // The palette's command, and what the view does about it.
     add(&self, p: Primitive)
@@ -363,11 +369,6 @@ struct Workspace
     // where the keyboard has them. Says whether it was a shortcut, and so whether anyone else should see it.
     shortcut(&self, code: u32, mods: u16, repeat: bool) -> bool
         if self.in_dialog.read() then return true
-
-        if self.asking.read()
-            if code == ESCAPE_CODE then self.answer_cancel()
-
-            return true
 
         if (mods & KMOD_GUI) == 0u16 || self.typing then return false
 
@@ -498,7 +499,7 @@ struct Workspace
     //
     // **While a menu is open the viewport hears none of it.** What is raised over the viewport takes taps from
     // it, but a drag and the wheel are read here by position, so a wobble on a row of a menu would turn the view
-    // and the wheel over a menu would zoom it. A question and a file dialog are the same.
+    // and the wheel over a menu would zoom it. A file dialog is the same.
     private input(&self, c: *Canvas, r: Rect)
         self.width = r.w
         self.height = r.h
@@ -608,7 +609,6 @@ struct Workspace
         column([menu_bar(self.menus().view(), self.open_menu).restyle(t -> light()),
                 row([self.panel(), self.viewport().flex()]).flex()], 0)
             .modal(self.in_dialog, spacer().frame(0, 0))
-            .modal(self.asking, self.question())
     end tree
 
     // The menus, each row live only where its command would do something now.
@@ -654,7 +654,7 @@ struct Workspace
     private panel(&self) -> &View
         var parts: Buf[&View] = buf()
 
-        parts.push(text(self.heading()).font_size(22.0))
+        parts.push(text("Tekton").font_size(22.0))
 
         if self.file != "" then parts.push(text(shortened(name_of(self.file))).font_size(11.0))
 
@@ -941,10 +941,41 @@ private stl_filters() -> Buf[FileFilter]
     all
 end stl_filters
 
+// What the window is called: the file's name, or Untitled before it has one, marked while anything is unsaved.
+window_title(file: string, dirty: bool) -> string
+    val name = if file == "" then "Untitled" else name_of(file)
+
+    if dirty then s"• ${name} — Tekton" else s"${name} — Tekton"
+end window_title
+
+// The question about unsaved changes: its title, and its buttons, Return choosing Save and Escape Cancel.
+question_title(file: string) -> string =
+    if file == "" then "Save the changes to this document?" else s"Save the changes to ${name_of(file)}?"
+
+question_buttons() -> Buf[MessageButton]
+    var all: Buf[MessageButton] = buf()
+
+    all.push(message_button(SAVE_ANSWER, "Save", on_return = true))
+    all.push(message_button(DISCARD_ANSWER, "Don't Save"))
+    all.push(message_button(CANCEL_ANSWER, "Cancel", on_escape = true))
+    all
+end question_buttons
+
+// What the question's answer means. A box closed without a choice is Cancel, and so is one that could not be
+// shown, which says why: nothing is lost that was not given up.
+unsaved_answer(r: Result[Option[i32], string]) -> Unsaved =
+    r match
+        Ok(Some(id)) -> if id == SAVE_ANSWER then Unsaved.SaveFirst elif id == DISCARD_ANSWER then Unsaved.Discard else Unsaved.Stay("")
+        Ok(None) -> Unsaved.Stay("")
+        Err(why) -> Unsaved.Stay(s"Could not ask about the unsaved changes: ${why}")
+
 new_workspace() -> &Workspace =
     Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
               layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), false, signal(NO_MENU), false,
-              () -> stop(), "", signal(false), None, signal(false),
-              answer -> ask_open_file(answer, None, document_filters().view(), title = "Open"),
-              answer -> ask_save_file(answer, None, document_filters().view(), title = "Save As"),
-              answer -> ask_save_file(answer, None, stl_filters().view(), title = "Export STL"), None, false)
+              () -> stop(), "",
+              (title, parent) -> ask(title, QUESTION_DETAIL, question_buttons().view(), MessageKind.Warning, parent),
+              signal(false),
+              (answer, parent) -> ask_open_file(answer, parent, document_filters().view(), title = "Open"),
+              (answer, parent) -> ask_save_file(answer, parent, document_filters().view(), title = "Save As"),
+              (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"), None, false,
+              () -> window(), title -> set_title(title), "", false)
