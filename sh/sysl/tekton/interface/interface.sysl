@@ -8,6 +8,7 @@ import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Pattern, Primitive, 
 import sh.sysl.tekton.export.{export_3mf, export_stl}
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
+import sh.sysl.tekton.measure.{Mark, Measures, measures}
 import sh.sysl.tekton.picking.{pick, pick_hit}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
@@ -176,6 +177,10 @@ struct Workspace
     array_count: &Signal[string]
     array_spacing: &Signal[string]
     array_angle: &Signal[string]
+
+    // Whether the selection's sizes and gaps show over the viewport, and what they were as last painted.
+    show_dimensions: bool
+    measured: &Measures
 
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
@@ -483,6 +488,21 @@ struct Workspace
         self.show_volume = !self.show_volume
         self.changed()
 
+    // Show the selection's sizes and gaps if they are hidden, and hide them if they show.
+    toggle_dimensions(&self)
+        self.show_dimensions = !self.show_dimensions
+        self.changed()
+
+    // What goes over the viewport for the selection, through the camera as it is, in a viewport this many points
+    // across: the handles, with the gaps' lines added to their strokes where dimensions show. `hot` is the
+    // handle under the pointer.
+    private lay_out(&self, w: real, h: real, hot: Option[Grip] = None)
+        self.overlay = layout(self.doc, self.camera, w, h, hot)
+        self.measured = if self.show_dimensions then measures(self.doc, self.camera, w, h) else Measures(buf(), buf())
+
+        for s in self.measured.strokes.view() do self.overlay.strokes.push(s)
+    end lay_out
+
     // A key the toolkit does not see, as the window reports it: `code` is the layout's own, so the letters are
     // where the keyboard has them. Says whether it was a shortcut, and so whether anyone else should see it.
     shortcut(&self, code: u32, mods: u16, repeat: bool) -> bool
@@ -651,7 +671,7 @@ struct Workspace
                     if p.key == Key.Enter then self.accept_array()
                     if p.key == Key.Escape then self.cancel_array()
 
-            self.overlay = layout(self.doc, self.camera, real(r.w), real(r.h))
+            self.lay_out(real(r.w), real(r.h))
 
             return
 
@@ -706,7 +726,7 @@ struct Workspace
                 if p.key == Key.Delete || p.key == Key.Backspace
                     if self.doc.selection.len() > 0 then self.delete()
 
-        self.overlay = layout(self.doc, self.camera, real(r.w), real(r.h), self.hot_grip(c, r))
+        self.lay_out(real(r.w), real(r.h), self.hot_grip(c, r))
     end input
 
     // The handle to show as being under the pointer: the one being dragged, or else whatever is there.
@@ -741,12 +761,15 @@ struct Workspace
         v
     end viewport
 
+    // The viewport with the selection's marks over it.
+    dimensioned(&self) -> &Dimensioned = Dimensioned(self, self.viewport())
+
     // The whole window.
     tree(&self) -> &View
         self.changes.read()
 
         column([menu_bar(self.menus().view(), self.open_menu).restyle(t -> light()),
-                row([self.panel(), self.viewport().flex()]).flex()], 0)
+                row([self.panel(), self.dimensioned().flex()]).flex()], 0)
             .modal(self.array_open, self.array_panel())
             .modal(self.in_dialog, spacer().frame(0, 0))
     end tree
@@ -824,7 +847,8 @@ struct Workspace
                                   separator(),
                                   item("Array…", () -> self.open_array(), enabled = doc.can_arrange)]))
         all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0),
-                               item("Build Volume", () -> self.toggle_volume())]))
+                               item("Build Volume", () -> self.toggle_volume()),
+                               item("Dimensions", () -> self.toggle_dimensions())]))
         all
     end menus
 
@@ -1108,6 +1132,52 @@ impl View for NumberField
     end paint
 end NumberField
 
+// The words of a mark: a size is its number, a gap names its axis.
+mark_text(m: Mark) -> string =
+    if m.gap then s"${["X", "Y", "Z"][m.axis]} gap ${format_number(m.value)}" else format_number(m.value)
+
+// A mark's label, in points: its type, the room around its words, and its colours.
+const MARK_FONT: real = 11.0
+const MARK_PAD: int = 3
+const MARK_BACK: u32 = 0xFFFFFFu32
+const MARK_EDGE: u32 = 0xC9D1DCu32
+const MARK_INK: u32 = 0x1F2937u32
+
+// The viewport with the selection's marks written over it, each on a light label of its own. They are painted
+// after the viewport, so they land on its picture rather than in the hole cut for it.
+struct Dimensioned
+    owner: &Workspace
+    inner: &Viewport
+
+impl View for Dimensioned
+    measure(&self, c: *Canvas, avail: Size) -> Size = self.inner.measure(c, avail)
+
+    paint(&self, c: *Canvas, r: Rect)
+        self.inner.paint(c, r)
+
+        if !self.owner.show_dimensions then return
+
+        c.clip(r)
+        c.push_font_size(MARK_FONT)
+        c.ink(MARK_INK)
+
+        for m in self.owner.measured.marks.view()
+            val words = mark_text(m)
+            val size = c.text_size(words)
+            val x = r.x + int(m.x) - size.w / 2
+            val y = r.y + int(m.y) - size.h / 2
+            val label = Rect(x - MARK_PAD, y - MARK_PAD / 2, size.w + 2 * MARK_PAD, size.h + MARK_PAD)
+
+            c.fill(label, MARK_BACK, MARK_PAD)
+            c.stroke(label, MARK_EDGE, 1, MARK_PAD)
+            c.text(Rect(x, y, size.w, size.h), words)
+
+        c.unink()
+        c.pop_font_size()
+        c.unclip()
+    end paint
+end Dimensioned
+
 private new_number_field(owner: &Workspace, q: Quantity, axis: int, id: int) -> &NumberField
     val shown = signal("")
 
@@ -1198,4 +1268,4 @@ new_workspace() -> &Workspace =
               (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"),
               (answer, parent) -> ask_save_file(answer, parent, three_mf_filters().view(), title = "Export 3MF"), false,
               () -> window(), title -> set_title(title), "", false, CORE_ONE, true, signal(false), signal(0), signal("3"),
-              signal("25"), signal("90"))
+              signal("25"), signal("90"), true, Measures(buf(), buf()))

@@ -5,6 +5,7 @@ import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
 import sh.sysl.tekton.document.{Primitive, Transform, primitive_name}
 import sh.sysl.tekton.handles.{Grip, Layout, layout}
+import sh.sysl.tekton.measure.Mark
 import sh.sysl.tekton.picking.pick
 import sh.sysl.tekton.printer.CORE_ONE
 import sh.sysl.tekton.space.Vec3
@@ -1329,6 +1330,75 @@ build_volume_toggles_from_the_view_menu()
     assert(w.show_volume, "shown again")
     assert(!w.doc.is_dirty() && !w.doc.can_undo, "the document is not edited by a view setting")
 end build_volume_toggles_from_the_view_menu
+
+// A mark's words: a size is its number with at most two places, a gap names its axis.
+@test
+marks_read_as_trimmed_millimetres()
+    assert_eq(mark_text(Mark(0, false, 20.0, 0.0, 0.0)), "20", "whole")
+    assert_eq(mark_text(Mark(1, false, 20.4, 0.0, 0.0)), "20.4", "one place")
+    assert_eq(mark_text(Mark(2, false, 0.25, 0.0, 0.0)), "0.25", "two places")
+    assert_eq(mark_text(Mark(2, false, 1.006, 0.0, 0.0)), "1.01", "rounded to two")
+    assert_eq(mark_text(Mark(0, true, 5.0, 0.0, 0.0)), "X gap 5", "a gap along x")
+    assert_eq(mark_text(Mark(1, true, 2.5, 0.0, 0.0)), "Y gap 2.5", "along y")
+    assert_eq(mark_text(Mark(2, true, 0.0, 0.0, 0.0)), "Z gap 0", "touching along z")
+end marks_read_as_trimmed_millimetres
+
+// Dimensions show from the start: a pair's sizes and gap are written over the viewport, and its gap line joins
+// the strokes. The View menu's row hides all of it and shows it again, leaving the document alone.
+@test
+dimensions_toggle_from_the_view_menu()
+    val w = new_workspace()
+    var c = recorder()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+
+    w.doc.move_to(b, w.doc.find(a).unwrap().transform.translation + Vec3(30.0, 0.0, 0.0)).unwrap()
+    w.doc.toggle_selected(a)
+
+    val before = w.doc.describe()
+
+    assert(w.show_dimensions, "shown from the start")
+    render(w.dimensioned(), &c, AT)
+    assert_eq(w.measured.marks.len(), 4, "three sizes and the gap along x")
+    assert_eq(w.overlay.strokes.len(), 2, "the gap's line, with no handles on a pair")
+
+    val drawn = c.ops.view()
+    var words = 0
+
+    for op in drawn do if op.contains("'X gap 10'") || op.contains("'50'") || op.contains("'20'") then words += 1
+
+    assert_eq(words, 4, "the marks are written")
+
+    choose(w, &c, "View", "Dimensions")
+    assert(!w.show_dimensions, "hidden")
+
+    var hidden = recorder()
+
+    render(w.dimensioned(), &hidden, AT)
+    assert_eq(w.measured.marks.len(), 0, "nothing measured")
+    assert_eq(w.overlay.strokes.len(), 0, "and no line")
+
+    for op in hidden.ops.view() do assert(!op.contains("gap"), "nothing written")
+
+    choose(w, &c, "View", "Dimensions")
+    assert(w.show_dimensions, "shown again")
+    render(w.dimensioned(), &c, AT)
+    assert_eq(w.measured.marks.len(), 4, "measured again")
+    assert_eq(w.doc.describe(), before, "the document is not edited by a view setting")
+end dimensions_toggle_from_the_view_menu
+
+// One shape keeps its handles, and its sizes' marks add no strokes to them.
+@test
+a_single_shape_keeps_exactly_its_handles()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.doc.add_shape(Primitive.Box)
+    render(w.dimensioned(), &c, AT)
+
+    assert_eq(w.measured.marks.len(), 3, "three sizes")
+    assert_eq(w.overlay.strokes.len(), layout(w.doc, w.camera, 900.0, 600.0).strokes.len(), "the handles alone")
+end a_single_shape_keeps_exactly_its_handles
 
 @test
 quit_runs_what_the_workspace_was_given()

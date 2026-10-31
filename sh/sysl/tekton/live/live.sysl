@@ -8,6 +8,7 @@ import sh.sysl.sdl3.control.{Pass, Request, Respond, Routed, error_response, jso
 import sh.sysl.tekton.camera.Camera
 import sh.sysl.tekton.document.{Document, Node, Operation, primitive_name}
 import sh.sysl.tekton.interface.Workspace
+import sh.sysl.tekton.measure.{gaps, selection_box}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.space.Vec3
 import sysl.encoding.json.quoted
@@ -80,9 +81,34 @@ state_json(doc: &Document, camera: &Camera, file: string, dirty: bool, printer: 
     out = out + s"],\"camera\":{\"target\":${vector(camera.target)},\"distance\":${number(camera.distance)},"
     out = out + s"\"yaw\":${number(camera.turn)},\"tilt\":${number(camera.tilt)},\"fov\":${number(camera.fov)}},"
     out = out + s"\"file\":${if file == "" then "null" else quoted(file)},\"dirty\":${dirty},"
-    out = out + s"\"outside_volume\":${outside_volume(doc, printer)}}"
+    out = out + s"\"outside_volume\":${outside_volume(doc, printer)},\"measure\":${measure_json(doc)}}"
     out
 end state_json
+
+// What the selection measures: the size of the box around it in millimetres, and with exactly two things
+// selected the gap between their boxes along x, y and z, `null` along an axis where they overlap. `null` with
+// nothing selected, and `gaps` is `null` unless two are.
+measure_json(doc: &Document) -> string
+    val box = selection_box(doc) match
+        Some(b) -> b
+        None -> return "null"
+
+    val gap_list = gaps(doc) match
+        Some(g) ->
+            var parts = "["
+
+            for i in 0..<3
+                if i > 0 then parts = parts + ","
+
+                parts = parts + (g[i] match
+                    Some(v) -> number(v)
+                    None -> "null")
+
+            parts + "]"
+        None -> "null"
+
+    s"{\"size\":${vector(box.size())},\"gaps\":${gap_list}}"
+end measure_json
 
 // The routes: `GET /tekton/state` and `POST /tekton/quit`. Anything else is left to the toolkit's own.
 routes(w: &Workspace, req: Request) -> Routed

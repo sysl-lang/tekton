@@ -1,0 +1,181 @@
+module sh.sysl.tekton.measure
+
+import sh.sysl.tekton.camera.Camera
+import sh.sysl.tekton.document.Document
+import sh.sysl.tekton.handles.Stroke
+import sh.sysl.tekton.space.{Aabb, Vec3}
+import sysl.buf.{Buf, buf}
+import sysl.math.{max, min}
+
+// The sizes and distances shown over the viewport while something is selected.
+//
+// **Everything measured is an axis-aligned box in world millimetres**: the selection's bounds, joined over
+// every selected thing, and for exactly two things the distance between their two boxes along each axis where
+// they do not overlap. A turned shape is measured by the box that holds it, which is what a printer's bed and
+// a caliper both see. Where the numbers sit on the screen comes from projecting that box, so this module has no
+// GPU and no canvas in it: a renderer draws the strokes and the interface writes the marks.
+
+// How far a size's label stands out from the middle of its edge, away from the middle of the box, in points.
+const LABEL_OFFSET: real = 18.0
+
+// How far a gap's label stands beside the middle of its line, in points.
+const GAP_LABEL_OFFSET: real = 14.0
+
+// A gap's line, in points: its ink and the white under it, so it reads on any colour.
+const GAP_RADIUS: real = 0.75
+const GAP_HALO: real = 1.5
+
+// How far two faces may be apart and still count as touching, in millimetres.
+const TOUCHING: real = 1.0e-9
+
+val GAP_INK: [4]f32 = [0.12, 0.16, 0.24, 1.0]
+val GAP_UNDER: [4]f32 = [1.0, 1.0, 1.0, 0.9]
+
+// A number on the screen: a size of the selection's box along `axis`, or for `gap` the distance between two
+// boxes along it. `x` and `y` are where its middle goes, in viewport points.
+struct Mark
+    axis: int
+    gap: bool
+    value: real
+    x: real
+    y: real
+
+// What the selection measures this frame: the marks to write and the gaps' lines to draw.
+struct Measures
+    marks: Buf[Mark]
+    strokes: Buf[Stroke]
+
+// The box around everything selected where it stands, or nothing with nothing selected.
+selection_box(doc: &Document) -> Option[Aabb]
+    var out: Option[Aabb] = None
+
+    for id in doc.selection.view()
+        doc.find(id) match
+            Some(node) ->
+                val b = doc.bounds_of(node)
+
+                out = Some(out match
+                    Some(e) -> e.joined(b)
+                    None -> b)
+            None -> ()
+
+    out
+end selection_box
+
+// The distance between two boxes along an axis, where they do not overlap along it; 0 where they touch.
+gap_between(a: Aabb, b: Aabb, axis: int) -> Option[real]
+    val apart = max(b.min.axis(axis) - a.max.axis(axis), a.min.axis(axis) - b.max.axis(axis))
+
+    if apart >= -TOUCHING then Some(max(apart, 0.0)) else None
+
+// The two selected things' boxes, in the order they were chosen, when exactly two are selected.
+pair(doc: &Document) -> Option[(Aabb, Aabb)]
+    if doc.selection.len() != 2 then return None
+
+    (doc.find(doc.selection[0]), doc.find(doc.selection[1])) match
+        (Some(p), Some(q)) -> Some((doc.bounds_of(p), doc.bounds_of(q)))
+        _ -> None
+
+// The gaps between the two selected things along x, y and z, when exactly two are selected.
+gaps(doc: &Document) -> Option[[3]Option[real]] =
+    pair(doc) match
+        Some((a, b)) -> Some([gap_between(a, b, 0), gap_between(a, b, 1), gap_between(a, b, 2)])
+        None -> None
+
+// The edge of a box a size along `axis` is written beside: one facing the camera, so the number is not behind
+// what it measures. The two sizes along the ground run along the bottom on the camera's side; the height
+// stands at the corner the near bottom edge along y ends at, away from the camera along y, which is the
+// box's outline rather than its middle.
+dimension_edge(box: Aabb, camera: &Camera, axis: int) -> (Vec3, Vec3)
+    val eye = camera.eye()
+    val c = box.center()
+    val near_x = if eye.x > c.x then box.max.x else box.min.x
+    val near_y = if eye.y > c.y then box.max.y else box.min.y
+    val far_y = if eye.y > c.y then box.min.y else box.max.y
+
+    axis match
+        0 -> (Vec3(box.min.x, near_y, box.min.z), Vec3(box.max.x, near_y, box.min.z))
+        1 -> (Vec3(near_x, box.min.y, box.min.z), Vec3(near_x, box.max.y, box.min.z))
+        _ -> (Vec3(near_x, far_y, box.min.z), Vec3(near_x, far_y, box.max.z))
+end dimension_edge
+
+// The line a gap along `axis` is drawn as: from the face of one box to the facing face of the other, through
+// the middle of where they overlap along each other axis, or halfway between their middles where they do not.
+gap_line(a: Aabb, b: Aabb, axis: int) -> (Vec3, Vec3)
+    val (low, high) = if a.max.axis(axis) <= b.min.axis(axis) then (a, b) else (b, a)
+    var from = low.center()
+
+    for other in 0..<3
+        if other != axis
+            val lo = max(low.min.axis(other), high.min.axis(other))
+            val hi = min(low.max.axis(other), high.max.axis(other))
+            val middle = if lo <= hi then (lo + hi) * 0.5 else (low.center().axis(other) + high.center().axis(other)) * 0.5
+
+            from = from.with_axis(other, middle)
+
+    (from.with_axis(axis, low.max.axis(axis)), from.with_axis(axis, high.min.axis(axis)))
+end gap_line
+
+// What the selection measures, through this camera, in a viewport this many points across.
+measures(doc: &Document, camera: &Camera, width: real, height: real) -> &Measures
+    val out: &Measures = Measures(buf(), buf())
+
+    if width <= 0.0 || height <= 0.0 then return out
+
+    val box = selection_box(doc) match
+        Some(b) -> b
+        None -> return out
+
+    val centre = camera.project(box.center(), width, height)
+
+    for axis in 0..<3
+        val (a, b) = dimension_edge(box, camera, axis)
+
+        camera.project((a + b) * 0.5, width, height) match
+            Some((x, y)) ->
+                val (dx, dy) = centre match
+                    Some((cx, cy)) -> outward(x - cx, y - cy)
+                    None -> (0.0, 0.0)
+
+                out.marks.push(Mark(axis, false, box.size().axis(axis), x + dx * LABEL_OFFSET, y + dy * LABEL_OFFSET))
+            None -> ()
+
+    pair(doc) match
+        Some((a, b)) ->
+            for axis in 0..<3
+                gap_between(a, b, axis) match
+                    Some(g) ->
+                        val (from, to) = gap_line(a, b, axis)
+
+                        (camera.project(from, width, height), camera.project(to, width, height)) match
+                            (Some((ax, ay)), Some((bx, by))) ->
+                                out.strokes.push(Stroke(ax, ay, bx, by, GAP_RADIUS + GAP_HALO, GAP_UNDER))
+                                out.strokes.push(Stroke(ax, ay, bx, by, GAP_RADIUS, GAP_INK))
+                                val (nx, ny) = beside(bx - ax, by - ay)
+
+                                out.marks.push(Mark(axis, true, g, (ax + bx) * 0.5 + nx * GAP_LABEL_OFFSET,
+                                                    (ay + by) * 0.5 + ny * GAP_LABEL_OFFSET))
+                            _ -> ()
+                    None -> ()
+        None -> ()
+
+    out
+end measures
+
+// A direction on the screen at length one, or straight down where there is none.
+private outward(dx: real, dy: real) -> (real, real)
+    val n = (dx * dx + dy * dy).sqrt()
+
+    if n < 1.0e-6 then (0.0, 1.0) else (dx / n, dy / n)
+
+// The direction across a line on the screen at length one, the way that is up the screen, so a gap's label
+// stands beside its line rather than over it. Straight up for a line of no length.
+private beside(dx: real, dy: real) -> (real, real)
+    val n = (dx * dx + dy * dy).sqrt()
+
+    if n < 1.0e-6 then return (0.0, -1.0)
+
+    val (px, py) = (dy / n, -dx / n)
+
+    if py > 0.0 then (-px, -py) else (px, py)
+end beside

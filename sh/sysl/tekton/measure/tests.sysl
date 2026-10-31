@@ -1,0 +1,288 @@
+module sh.sysl.tekton.measure
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.camera.{Camera, new_camera}
+import sh.sysl.tekton.document.{Document, Primitive, Transform, new_document}
+import sh.sysl.tekton.space.{Aabb, Vec3}
+
+// Sizes and gaps as numbers, and where they land on the screen: no window, no GPU, no canvas.
+
+private const W: real = 900.0
+private const H: real = 600.0
+
+private near(a: real, b: real, tolerance: real = 1.0e-6) -> bool = (a - b).abs() <= tolerance
+
+private near_vec(a: Vec3, b: Vec3, tolerance: real = 1.0e-6) -> bool = (a - b).length() <= tolerance
+
+private looking(turn: real, tilt: real) -> &Camera
+    val camera = new_camera()
+
+    camera.turn = turn
+    camera.tilt = tilt
+    camera
+end looking
+
+// A shape of this size whose box starts at `low`, selected alongside whatever already is.
+private put(doc: &Document, low: Vec3, size: Vec3) -> int
+    val before = doc.selection
+    val id = doc.add_shape(Primitive.Box)
+
+    for s in before.view() do doc.toggle_selected(s)
+
+    doc.resize_to(id, size).unwrap()
+
+    val b = doc.bounds_of(doc.find(id).unwrap())
+    val t = doc.find(id).unwrap().transform
+
+    doc.set_transform(id, Transform(t.translation + (low - b.min), t.rotation, t.scale))
+    id
+end put
+
+private cube(low: Vec3, side: real) -> Aabb = Aabb(low, low + Vec3(side, side, side))
+
+private size_marks(m: &Measures) -> [3]real
+    var out = [-1.0, -1.0, -1.0]
+
+    for k in m.marks.view() do if !k.gap then out[k.axis] = k.value
+
+    out
+end size_marks
+
+private gap_marks(m: &Measures) -> [3]real
+    var out = [-1.0, -1.0, -1.0]
+
+    for k in m.marks.view() do if k.gap then out[k.axis] = k.value
+
+    out
+end gap_marks
+
+// ## Sizes
+
+@test
+nothing_selected_measures_nothing()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc.select(None)
+    assert(selection_box(doc).is_none(), "no box")
+    assert(gaps(doc).is_none(), "no gaps")
+    assert_eq(measures(doc, new_camera(), W, H).marks.len(), 0, "no marks")
+end nothing_selected_measures_nothing
+
+@test
+a_shape_is_labelled_with_its_three_sizes()
+    val doc = new_document()
+
+    put(doc, Vec3(0.0, 0.0, 0.0), Vec3(20.4, 1.25, 7.0))
+
+    val m = measures(doc, new_camera(), W, H)
+    val sizes = size_marks(m)
+
+    assert_eq(m.marks.len(), 3, "one mark for each axis")
+    assert(near(sizes[0], 20.4) && near(sizes[1], 1.25) && near(sizes[2], 7.0), s"${sizes[0]} ${sizes[1]} ${sizes[2]}")
+    assert_eq(m.strokes.len(), 0, "a single shape has no gap to draw")
+    assert(gaps(doc).is_none(), "and no gaps to report")
+end a_shape_is_labelled_with_its_three_sizes
+
+// A turned shape is measured by the axis-aligned box that holds it, not by its own sides.
+@test
+a_turned_shape_is_measured_by_the_box_that_holds_it()
+    val doc = new_document()
+    val id = put(doc, Vec3(0.0, 0.0, 0.0), Vec3(20.0, 10.0, 5.0))
+
+    doc.rotate_to(id, Quaternion.from_axis_angle([0.0, 0.0, 1.0], real.pi() / 2.0)).unwrap()
+
+    val quarter = size_marks(measures(doc, new_camera(), W, H))
+
+    assert(near(quarter[0], 10.0, 1.0e-4) && near(quarter[1], 20.0, 1.0e-4) && near(quarter[2], 5.0, 1.0e-4),
+           s"a quarter turn swaps the sides: ${quarter[0]} ${quarter[1]} ${quarter[2]}")
+
+    doc.rotate_to(id, Quaternion.from_axis_angle([0.0, 0.0, 1.0], real.pi() / 4.0)).unwrap()
+
+    val eighth = size_marks(measures(doc, new_camera(), W, H))
+    val across = 30.0 / 2.0.sqrt()
+
+    assert(near(eighth[0], across, 1.0e-4) && near(eighth[1], across, 1.0e-4) && near(eighth[2], 5.0, 1.0e-4),
+           s"an eighth turn widens both: ${eighth[0]} ${eighth[1]}")
+end a_turned_shape_is_measured_by_the_box_that_holds_it
+
+@test
+several_selected_are_labelled_with_the_box_around_them_all()
+    val doc = new_document()
+
+    put(doc, Vec3(0.0, 0.0, 0.0), Vec3(10.0, 10.0, 10.0))
+    put(doc, Vec3(30.0, -5.0, 2.0), Vec3(10.0, 10.0, 20.0))
+    put(doc, Vec3(-12.0, 4.0, 0.0), Vec3(2.0, 3.0, 4.0))
+
+    val sizes = size_marks(measures(doc, new_camera(), W, H))
+
+    assert(near(sizes[0], 52.0) && near(sizes[1], 15.0) && near(sizes[2], 22.0), s"${sizes[0]} ${sizes[1]} ${sizes[2]}")
+    assert(gaps(doc).is_none(), "three are not a pair")
+end several_selected_are_labelled_with_the_box_around_them_all
+
+// ## Gaps
+
+@test
+boxes_apart_along_each_axis_have_that_gap()
+    val a = cube(Vec3(0.0, 0.0, 0.0), 10.0)
+
+    for axis in 0..<3
+        val b = cube(Vec3(0.0, 0.0, 0.0).with_axis(axis, 15.0), 10.0)
+
+        assert(gap_between(a, b, axis) == Some(5.0), s"5 along ${axis}")
+        assert(gap_between(b, a, axis) == Some(5.0), s"either way round, along ${axis}")
+
+        for other in 0..<3 do if other != axis then assert(gap_between(a, b, other).is_none(), "level along the others")
+end boxes_apart_along_each_axis_have_that_gap
+
+@test
+boxes_touching_along_each_axis_have_a_gap_of_nothing()
+    val a = cube(Vec3(0.0, 0.0, 0.0), 10.0)
+
+    for axis in 0..<3
+        val b = cube(Vec3(0.0, 0.0, 0.0).with_axis(axis, 10.0), 10.0)
+
+        assert(gap_between(a, b, axis) == Some(0.0), s"touching along ${axis}")
+        assert(gap_between(b, a, axis) == Some(0.0), s"either way round, along ${axis}")
+end boxes_touching_along_each_axis_have_a_gap_of_nothing
+
+@test
+boxes_overlapping_along_each_axis_have_no_gap()
+    val a = cube(Vec3(0.0, 0.0, 0.0), 10.0)
+
+    for axis in 0..<3
+        val b = cube(Vec3(0.0, 0.0, 0.0).with_axis(axis, 9.5), 10.0)
+        val inside = Aabb(Vec3(2.0, 2.0, 2.0), Vec3(4.0, 4.0, 4.0))
+
+        assert(gap_between(a, b, axis).is_none(), s"overlapping along ${axis}")
+        assert(gap_between(a, inside, axis).is_none(), s"one inside the other along ${axis}")
+
+// Apart along two axes at once: each has its own gap, and the third overlaps.
+@test
+two_selected_report_a_gap_along_each_axis_they_are_apart_on()
+    val doc = new_document()
+
+    put(doc, Vec3(0.0, 0.0, 0.0), Vec3(10.0, 10.0, 10.0))
+    put(doc, Vec3(17.0, 10.0, 3.0), Vec3(10.0, 10.0, 10.0))
+
+    val g = gaps(doc).unwrap()
+
+    assert(g[0] == Some(7.0), "7 along x")
+    assert(g[1] == Some(0.0), "touching along y")
+    assert(g[2].is_none(), "overlapping along z")
+
+    val m = measures(doc, new_camera(), W, H)
+    val shown = gap_marks(m)
+
+    assert(near(shown[0], 7.0) && near(shown[1], 0.0) && shown[2] == -1.0, s"${shown[0]} ${shown[1]} ${shown[2]}")
+    assert_eq(m.strokes.len(), 4, "a line and the white under it for each gap shown")
+end two_selected_report_a_gap_along_each_axis_they_are_apart_on
+
+// The line runs from one face to the facing one, through the middle of where the two overlap.
+@test
+a_gap_line_runs_between_the_facing_faces()
+    val a = Aabb(Vec3(0.0, 0.0, 0.0), Vec3(10.0, 10.0, 10.0))
+    val b = Aabb(Vec3(15.0, 4.0, 6.0), Vec3(25.0, 20.0, 30.0))
+
+    val (from, to) = gap_line(a, b, 0)
+
+    assert(near_vec(from, Vec3(10.0, 7.0, 8.0)) && near_vec(to, Vec3(15.0, 7.0, 8.0)), s"${from.x} ${from.y} ${from.z}")
+
+    val (back, forth) = gap_line(b, a, 0)
+
+    assert(near_vec(back, from) && near_vec(forth, to), "the same line whichever is first")
+
+    // Apart along y too: the line along x sits halfway between their middles along y.
+    val c = Aabb(Vec3(15.0, 20.0, 0.0), Vec3(25.0, 30.0, 10.0))
+    val (p, q) = gap_line(a, c, 0)
+
+    assert(near(p.y, 15.0) && near(q.y, 15.0) && near(p.x, 10.0) && near(q.x, 15.0), s"${p.y} ${q.y}")
+end a_gap_line_runs_between_the_facing_faces
+
+// ## Where the labels go
+
+// Seen from one side and then from the other, each label's edge is on the side facing the camera.
+@test
+labelled_edges_face_the_camera()
+    val box = Aabb(Vec3(0.0, 0.0, 0.0), Vec3(20.0, 10.0, 6.0))
+    val front = looking(0.3, 0.5)
+    val back = looking(0.3 + real.pi(), 0.5)
+
+    for camera in [front, back]
+        val eye = camera.eye()
+        val (xa, xb) = dimension_edge(box, camera, 0)
+        val (ya, yb) = dimension_edge(box, camera, 1)
+        val (za, zb) = dimension_edge(box, camera, 2)
+        val far_y = if xa.y == box.min.y then box.max.y else box.min.y
+        val far_x = if ya.x == box.min.x then box.max.x else box.min.x
+
+        assert(near(xb.x - xa.x, 20.0) && xa.y == xb.y && xa.z == 0.0, "the x edge runs along x, on the ground")
+        assert(near(yb.y - ya.y, 10.0) && ya.x == yb.x && ya.z == 0.0, "the y edge runs along y, on the ground")
+        assert(near(zb.z - za.z, 6.0) && za.x == zb.x && za.y == zb.y, "the z edge stands up")
+        assert((xa.y - eye.y).abs() < (far_y - eye.y).abs(), "the x edge is on the camera's side")
+        assert((ya.x - eye.x).abs() < (far_x - eye.x).abs(), "the y edge is on the camera's side")
+        assert(za.x == ya.x, "the height stands on the near side along x")
+
+    val (front_x, _) = dimension_edge(box, front, 0)
+    val (back_x, _) = dimension_edge(box, back, 0)
+    val (front_y, _) = dimension_edge(box, front, 1)
+    val (back_y, _) = dimension_edge(box, back, 1)
+
+    assert(front_x.y != back_x.y, "turning round moves the x label to the other side")
+    assert(front_y.x != back_y.x, "and the y label")
+end labelled_edges_face_the_camera
+
+// A size's label stands out from its edge, away from the middle of the box, so it is not on the shape.
+@test
+size_labels_stand_outside_the_box()
+    val doc = new_document()
+
+    put(doc, Vec3(0.0, 0.0, 0.0), Vec3(20.0, 20.0, 20.0))
+
+    for camera in [looking(0.3, 0.5), looking(2.0, 1.0)]
+        val box = selection_box(doc).unwrap()
+        val (cx, cy) = camera.project(box.center(), W, H).unwrap()
+
+        for k in measures(doc, camera, W, H).marks.view()
+            val (a, b) = dimension_edge(box, camera, k.axis)
+            val (ex, ey) = camera.project((a + b) * 0.5, W, H).unwrap()
+            val edge = ((ex - cx) * (ex - cx) + (ey - cy) * (ey - cy)).sqrt()
+            val label = ((k.x - cx) * (k.x - cx) + (k.y - cy) * (k.y - cy)).sqrt()
+
+            assert(near(label - edge, LABEL_OFFSET, 1.0e-6), s"axis ${k.axis}: ${label} against ${edge}")
+end size_labels_stand_outside_the_box
+
+// A gap's label stands beside its line, up the screen, so the line shows: from the front, where the line runs
+// rightward, and from behind, where it runs leftward.
+@test
+a_gap_label_stands_above_its_line()
+    val doc = new_document()
+
+    put(doc, Vec3(0.0, 0.0, 0.0), Vec3(10.0, 10.0, 10.0))
+    put(doc, Vec3(30.0, 0.0, 0.0), Vec3(10.0, 10.0, 10.0))
+
+    for camera in [new_camera(), looking(0.3 + real.pi(), 0.5)]
+        val m = measures(doc, camera, W, H)
+        val s = m.strokes[1]
+        var seen = 0
+
+        for k in m.marks.view()
+            if k.gap
+                val mx = (s.ax + s.bx) * 0.5
+                val my = (s.ay + s.by) * 0.5
+
+                assert(near(((k.x - mx) * (k.x - mx) + (k.y - my) * (k.y - my)).sqrt(), GAP_LABEL_OFFSET), "beside the middle")
+                assert(k.y < my, "above it")
+                seen += 1
+
+        assert_eq(seen, 1, "one gap")
+end a_gap_label_stands_above_its_line
+
+@test
+an_empty_viewport_measures_nothing()
+    val doc = new_document()
+
+    put(doc, Vec3(0.0, 0.0, 0.0), Vec3(10.0, 10.0, 10.0))
+    assert_eq(measures(doc, new_camera(), 0.0, 0.0).marks.len(), 0, "nothing to place them in")
+end an_empty_viewport_measures_nothing

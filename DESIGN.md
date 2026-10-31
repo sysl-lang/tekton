@@ -172,4 +172,9 @@ their own tests, so most changes never need the whole application linked or a wi
      frame by twice the clearance per axis, so it is exact on a box, cylinder and sphere however turned, and on a
      cone across its base and height. A torus and a group take none. A solid keeps the value and ignores it; the
      file says `clearance` only when it is not zero; the export, the on-screen hole and `/tekton/state` use it.
+   - **Measuring is done**: the selection's axis-aligned box (joined over a multi-selection) is labelled with its
+     width, depth and height in mm on light labels beside the edges facing the camera, and with exactly two
+     selected each axis they are apart on gets a thin line between the facing faces labelled "X gap 5" (0 where
+     they touch, nothing where they overlap). View → Dimensions shows and hides both; `/tekton/state` reports
+     `measure`: `size`, and `gaps` along x, y, z for a pair.
 7. nex scripting.

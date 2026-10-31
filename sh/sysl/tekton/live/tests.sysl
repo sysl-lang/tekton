@@ -57,7 +57,7 @@ private an_empty_document_reports_nothing_in_it()
     val c = new_camera()
 
     assert_eq(state_json(d, c, "", false),
-              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":null,\"dirty\":false,\"outside_volume\":false}")
+              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":null,\"dirty\":false,\"outside_volume\":false,\"measure\":null}")
 end an_empty_document_reports_nothing_in_it
 
 @test
@@ -70,7 +70,7 @@ private a_small_document_reports_exactly_this()
     w.file = "/tmp/part.tekton"
 
     assert_eq(report(w),
-              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0],\"segments\":64}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":\"/tmp/part.tekton\",\"dirty\":true,\"outside_volume\":false}")
+              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0],\"segments\":64}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":\"/tmp/part.tekton\",\"dirty\":true,\"outside_volume\":false,\"measure\":{\"size\":[40,40,40],\"gaps\":null}}")
     assert_eq(a, 1)
 end a_small_document_reports_exactly_this
 
@@ -157,6 +157,25 @@ private a_number_json_cannot_spell_is_null()
 
     assert(state_json(d, c, "", false).contains("\"distance\":null"), state_json(d, c, "", false))
 end a_number_json_cannot_spell_is_null
+
+// Two selected: the box around both, and the gap between them along each axis, `null` where they overlap.
+@test
+private a_pair_reports_its_size_and_gaps()
+    val w = new_workspace()
+    val a = put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+    val b = put(w, Primitive.Box, Vec3(25.0, 0.0, 30.0), Vec3(1.0, 1.0, 1.0))
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+    assert(report(w).contains("\"measure\":{\"size\":[45,20,50],\"gaps\":[5,null,10]}"), report(w))
+    assert(sysl.encoding.json.parse(report(w)).is_ok(), "still JSON")
+
+    w.doc.toggle_selected(a)
+    assert(report(w).contains("\"measure\":{\"size\":[20,20,20],\"gaps\":null}"), report(w))
+
+    w.doc.select(None)
+    assert(report(w).contains("\"measure\":null"), report(w))
+end a_pair_reports_its_size_and_gaps
 
 @test
 private the_report_is_valid_json_that_reads_back()
