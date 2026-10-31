@@ -1,0 +1,38 @@
+module sh.sysl.tekton.files
+@tests
+
+import sh.sysl.tekton.document.{Pattern, Primitive, moved_to, new_document}
+import sh.sysl.tekton.space.Vec3
+import sysl.fs.{make_temp_dir, remove_dir_all}
+
+// What duplicate and array make is saved and opened again as it was.
+
+@test
+an_array_of_a_group_saves_and_opens_as_it_was()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Cone)
+
+    doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    doc.set_transform(b, moved_to(Vec3(30.0, 0.0, 0.0)))
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+    doc.group_selected().unwrap()
+    doc.mirror_selected(1).unwrap()
+    doc.array_selected(5, Pattern.Ring(true, 72.0)).unwrap()
+    doc.duplicate_selected(1.0).unwrap()
+    doc.array_selected(2, Pattern.Line(2, 40.0)).unwrap()
+
+    val dir = make_temp_dir("tekton-array").unwrap()
+    val file = s"${dir}/array.tekton"
+
+    save_file(doc, file).unwrap()
+
+    val opened = load_file(file).unwrap()
+
+    remove_dir_all(dir).unwrap()
+    assert_eq(opened.items().len, doc.items().len, "every copy")
+    assert_eq(document_text(opened), document_text(doc), "each as it was")
+    assert_eq(opened.next_id, doc.next_id, "ids go on past the copies")
+    assert(opened.problem().is_none(), "nothing wrong with it")
+end an_array_of_a_group_saves_and_opens_as_it_was

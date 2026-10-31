@@ -46,6 +46,11 @@ const MAX_SCALE: real = 1.0e6
 // out of stack.
 const MAX_NESTING: int = 128
 
+// The most copies one array makes. Each copy is another solid a print joins and another mesh the window draws, so
+// a mistyped count of thousands would stall the window for a long time to make something nobody meant; a few
+// hundred is more than any row of pegs or ring of holes a printed part has, and another array can always follow.
+const MAX_ARRAY_COPIES: int = 200
+
 // How far from length one a rotation may be, and from the limits a side may be, by the rounding of the
 // arithmetic that made it.
 const ROTATION_TOLERANCE: real = 1.0e-6
@@ -902,6 +907,104 @@ struct Document
         Ok(())
     end drop_selected
 
+    // The command behind Duplicate: a copy of everything selected, a group with all of its parts, moved `step`
+    // along x, and the copies selected in place of what they copy.
+    duplicate_selected(&self, step: real) -> Result[unit, string]
+        val chosen = self.selected_items()
+
+        if chosen.len() == 0 then return Err("Nothing is selected")
+
+        var placed: Buf[Transform] = buf()
+
+        for node in chosen.view() do placed.push(shifted(node, 0, step).transform)
+
+        self.put_copies(chosen, placed)
+    end duplicate_selected
+
+    // The command behind Array: `count` copies of everything selected, each a step further along `pattern` than
+    // the one before, standing as things of their own and selected in place of what they copy.
+    array_selected(&self, count: int, pattern: Pattern) -> Result[unit, string]
+        val chosen = self.selected_items()
+
+        if chosen.len() == 0 then return Err("Nothing is selected")
+
+        if count < 1 || count > MAX_ARRAY_COPIES then return Err(s"An array makes 1 to ${MAX_ARRAY_COPIES} copies")
+
+        var placed: Buf[Transform] = buf()
+
+        pattern match
+            Line(axis, spacing) ->
+                if !spacing.is_finite() then return Err("Spacing must be a number of millimetres")
+
+                for k in 1..count
+                    for node in chosen.view() do placed.push(shifted(node, axis, real(k) * spacing).transform)
+            Ring(about_origin, degrees) ->
+                if !degrees.is_finite() then return Err("The angle must be a number of degrees")
+
+                val middle = self.extent(chosen.view()).center()
+                val centre = if about_origin then Vec3(0.0, 0.0, 0.0) else Vec3(middle.x, middle.y, 0.0)
+
+                for k in 1..count
+                    val turn = Quaternion.from_axis_angle([0.0, 0.0, 1.0], real(k) * degrees * real.pi() / 180.0)
+
+                    for node in chosen.view()
+                        val t = node.transform
+                        val moved = centre + vec3(turn.rotate((t.translation - centre).array()))
+
+                        val q = turn * t.rotation
+
+                        placed.push(Transform(Vec3(settled(moved.x, 1.0e9), settled(moved.y, 1.0e9), t.translation.z),
+                                              positive_zeros(Quaternion(settled(q.w, 1.0e12), settled(q.x, 1.0e12),
+                                                                        settled(q.y, 1.0e12), settled(q.z, 1.0e12))),
+                                              t.scale))
+
+        self.put_copies(chosen, placed)
+    end array_selected
+
+    // A copy of each of `chosen` at each of `placed`, taken in turn, as one step: the copies join the things on
+    // the ground and are selected. Refused, leaving the document as it was, where one would stand out of bounds.
+    private put_copies(&self, chosen: Buf[&Node], placed: Buf[Transform]) -> Result[unit, string]
+        for t in placed.view()
+            val p = t.translation
+
+            if !t.is_usable() || p.x.abs() > POSITION_LIMIT || p.y.abs() > POSITION_LIMIT || p.z.abs() > POSITION_LIMIT
+                return Err(s"A copy would stand beyond\nthe ${POSITION_LIMIT.round()} mm limit")
+
+        self.record()
+
+        var items: Buf[&Node] = buf()
+        var copies: Buf[int] = buf()
+
+        for item in self.items() do items.push(item)
+
+        for i in 0..<placed.len()
+            val copy = self.fresh_copy(chosen[i % chosen.len()], placed[i])
+
+            items.push(copy)
+            copies.push(copy.id)
+
+        self.put_items(items)
+        self.last_placed = Some(copies[copies.len() - 1])
+        self.selection = copies
+        Ok(())
+    end put_copies
+
+    // A copy of a node and of everything under it, placed by `t`, every node of it with an id of its own. What
+    // the kernel derived is shared with the original, since the copy is the same solid in its own space.
+    private fresh_copy(&self, node: &Node, t: Transform) -> &Node
+        val id = self.next_id
+        var parts: Buf[&Node] = buf()
+
+        self.next_id += 1
+
+        for part in node.children.view() do parts.push(self.fresh_copy(part, part.transform))
+
+        val same = t == node.transform
+
+        Node(id, node.operation, t, node.mirror, node.tint, node.hole, parts, node.derived,
+             if same then node.solid else None, if same then node.bounds else None)
+    end fresh_copy
+
     // The things on the ground that are selected, in the order they stand.
     private selected_items(&self) -> Buf[&Node]
         var chosen: Buf[&Node] = buf()
@@ -1271,6 +1374,13 @@ enum Edge
     Centre
     Max
 
+// How an array lays out its copies: in a line along an axis of the ground, each `spacing` millimetres on from the
+// last, or in a ring about an upright axis, each turned `degrees` further than the last. The ring's axis passes
+// through the middle of the selection, or through the origin.
+enum Pattern
+    Line(axis: int, spacing: real)
+    Ring(about_origin: bool, degrees: real)
+
 private edge_of(b: Aabb, edge: Edge, axis: int) -> real =
     edge match
         Min -> b.min.axis(axis)
@@ -1295,6 +1405,11 @@ private half_turn(axis: int) -> Quaternion[real]
 private positive_zeros(q: Quaternion[real]) -> Quaternion[real] = Quaternion(q.w + 0.0, q.x + 0.0, q.y + 0.0, q.z + 0.0)
 
 private snapped(v: real) -> real = (v / 5.0).ceil() * 5.0
+
+// A number to the nearest `1 / per`, so the sine of a quarter turn that should be one, and a cosine that should be
+// nothing, are: a ring of copies at whole angles then saves the numbers it was meant to have. A nanometre of
+// position and a millionth of a millionth of a turn are far below anything a printer makes.
+private settled(v: real, per: real) -> real = (v * per).round() / per
 
 // The solid of a primitive as a palette makes it: 20 mm across, centred on the z axis, standing on the
 // ground.

@@ -1,0 +1,208 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.sdl3.KMOD_GUI
+import sh.sysl.tekton.document.{Primitive, moved_to}
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+
+// Duplicate in the Edit menu and on Cmd+D, and the array panel: what it shows, what OK and Cancel do, and that
+// nothing else can be asked for while it is up.
+
+private val SCREEN: Rect = Rect(0, 0, 1280, 800)
+
+private tap(w: &Workspace, c: *Recorder, name: string)
+    val v = w.tree()
+
+    c.taps.reset()
+    render(v, c, SCREEN)
+
+    val (x, y) = snapshot(v, c, SCREEN).click_point(name).unwrap()
+
+    c.point(x, y, true)
+    render(w.tree(), c, SCREEN)
+    c.release(x, y)
+    render(w.tree(), c, SCREEN)
+end tap
+
+private shows(w: &Workspace, c: *Recorder, name: string) -> bool
+    val v = w.tree()
+
+    render(v, c, SCREEN)
+    snapshot(v, c, SCREEN).find(name).is_ok()
+end shows
+
+// Whether a row of a menu is live, reading the window with the menu open and leaving it closed.
+private row_live(w: &Workspace, c: *Recorder, title: string, label: string) -> bool
+    assert(w.show_menu(title), title)
+
+    val v = w.tree()
+
+    render(v, c, SCREEN)
+
+    val row = snapshot(v, c, SCREEN).find(s"menu.${title}.${label}").unwrap()
+
+    w.open_menu.set(NO_MENU)
+    row.marks.index_of("disabled").is_none()
+end row_live
+
+// A cylinder at (30, 0, 0), selected, with the array panel put up through the Arrange menu.
+private with_panel(c: *Recorder) -> &Workspace
+    val w = new_workspace()
+    val id = w.doc.add_shape(Primitive.Cylinder)
+
+    w.doc.set_transform(id, moved_to(Vec3(30.0, 0.0, 0.0)))
+    tap(w, c, "menu.Arrange")
+    tap(w, c, "menu.Arrange.Array…")
+    assert(w.array_open.read(), "the panel is up")
+    w
+end with_panel
+
+@test
+duplicate_and_array_are_live_only_with_a_selection()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.doc.add_shape(Primitive.Box)
+
+    assert(row_live(w, &c, "Edit", "Duplicate"), "duplicate")
+    assert(row_live(w, &c, "Arrange", "Array…"), "array")
+
+    w.doc.select(None)
+    assert(!row_live(w, &c, "Edit", "Duplicate"), "no duplicate")
+    assert(!row_live(w, &c, "Arrange", "Array…"), "no array")
+
+    w.open_array()
+    assert(!w.array_open.read(), "the panel stays down")
+    assert(w.problem.read() != "", "and it says why")
+end duplicate_and_array_are_live_only_with_a_selection
+
+@test
+command_d_duplicates_the_selection_one_grid_step_along_x()
+    val w = new_workspace()
+    val id = w.doc.add_shape(Primitive.Box)
+
+    w.doc.set_transform(id, moved_to(Vec3(10.0, 0.0, 0.0)))
+    assert(w.shortcut(u32(u8('d')), KMOD_GUI, false), "taken")
+    assert_eq(w.doc.items().len, 2, "a copy")
+    assert_eq(w.doc.find(w.doc.selection[0]).unwrap().transform.translation.x, 10.0 + w.grid, "a grid step along")
+    assert(w.shortcut(u32(u8('d')), KMOD_GUI, true), "a held key is taken")
+    assert_eq(w.doc.items().len, 2, "and makes no more")
+    assert(!w.shortcut(u32(u8('d')), 0u16, false), "not without command")
+end command_d_duplicates_the_selection_one_grid_step_along_x
+
+@test
+the_panel_shows_count_kind_and_spacing_and_an_angle_for_a_ring()
+    var c = recorder()
+    val w = with_panel(&c)
+
+    for name in ["array.kind.0", "array.kind.4", "array.count", "array.spacing", "array.ok", "array.cancel"]
+        assert(shows(w, &c, name), name)
+
+    assert(!shows(w, &c, "array.angle"), "no angle for a line")
+
+    tap(w, &c, "array.kind.3")
+    assert_eq(w.array_kind.read(), 3, "a ring chosen")
+    assert(shows(w, &c, "array.angle"), "an angle for a ring")
+    assert(!shows(w, &c, "array.spacing"), "no spacing for a ring")
+end the_panel_shows_count_kind_and_spacing_and_an_angle_for_a_ring
+
+@test
+cancel_takes_the_panel_down_and_leaves_the_document_untouched()
+    var c = recorder()
+    val w = with_panel(&c)
+    val before = w.doc.describe()
+
+    w.array_count.set("7")
+    tap(w, &c, "array.cancel")
+    assert(!w.array_open.read(), "down")
+    assert_eq(w.doc.describe(), before, "untouched")
+    assert(!shows(w, &c, "array.ok"), "gone from the window")
+end cancel_takes_the_panel_down_and_leaves_the_document_untouched
+
+@test
+escape_cancels_and_return_answers_ok()
+    var c = recorder()
+    val w = with_panel(&c)
+    val before = w.doc.describe()
+
+    c.key(press(Key.Escape))
+    render(w.tree(), &c, SCREEN)
+    assert(!w.array_open.read(), "escape took it down")
+    assert_eq(w.doc.describe(), before, "untouched")
+
+    w.open_array()
+    w.array_count.set("2")
+    c.key(press(Key.Enter))
+    render(w.tree(), &c, SCREEN)
+    assert(!w.array_open.read(), "return took it down")
+    assert_eq(w.doc.items().len, 3, "two copies")
+end escape_cancels_and_return_answers_ok
+
+@test
+ok_makes_the_array_the_fields_ask_for_as_one_step()
+    var c = recorder()
+    val w = with_panel(&c)
+    val before = w.doc.describe()
+
+    w.array_count.set("3")
+    w.array_spacing.set("12.5")
+    tap(w, &c, "array.kind.1")
+    tap(w, &c, "array.ok")
+    assert(!w.array_open.read(), "down")
+    assert_eq(w.doc.selection.len(), 3, "the copies selected")
+
+    for k in 0..<3
+        assert_eq(w.doc.find(w.doc.selection[k]).unwrap().transform.translation, Vec3(30.0, 12.5 * real(k + 1), 0.0),
+                  s"copy ${k + 1}")
+
+    w.undo()
+    assert_eq(w.doc.describe(), before, "one undo takes it all")
+end ok_makes_the_array_the_fields_ask_for_as_one_step
+
+@test
+ok_with_a_ring_about_the_origin_uses_the_angle_field()
+    var c = recorder()
+    val w = with_panel(&c)
+
+    w.array_count.set("1")
+    w.array_angle.set("90")
+    tap(w, &c, "array.kind.4")
+    tap(w, &c, "array.ok")
+    assert_eq(w.doc.find(w.doc.selection[0]).unwrap().transform.translation, Vec3(0.0, 30.0, 0.0), "a quarter round")
+end ok_with_a_ring_about_the_origin_uses_the_angle_field
+
+@test
+a_count_or_step_that_will_not_do_keeps_the_panel_up_and_says_why()
+    var c = recorder()
+    val w = with_panel(&c)
+    val before = w.doc.describe()
+
+    for (count, step) in [("0", "10"), ("201", "10"), ("2.5", "10"), ("lots", "10"), ("", "10"), ("3", "far")]
+        w.array_count.set(count)
+        w.array_spacing.set(step)
+        tap(w, &c, "array.ok")
+        assert(w.array_open.read(), s"\"${count}\" by \"${step}\": still up")
+        assert(w.problem.read() != "", s"\"${count}\" by \"${step}\": says why")
+        assert_eq(w.doc.describe(), before, s"\"${count}\" by \"${step}\": untouched")
+
+    assert(shows(w, &c, "array.ok"), "still answerable")
+
+    w.array_count.set("200")
+    w.array_spacing.set("5")
+    tap(w, &c, "array.ok")
+    assert(!w.array_open.read(), "the cap itself is fine")
+    assert_eq(w.doc.items().len, 201, "two hundred copies")
+end a_count_or_step_that_will_not_do_keeps_the_panel_up_and_says_why
+
+@test
+while_the_panel_is_up_no_shortcut_reaches_the_document()
+    var c = recorder()
+    val w = with_panel(&c)
+    val before = w.doc.describe()
+
+    // Each on its own, since an undo after a duplicate would put back what the duplicate changed.
+    for letter in ['d', 'z', 'g', 'b']
+        assert(w.shortcut(u32(u8(letter)), KMOD_GUI, false), s"cmd+${letter} taken")
+        assert_eq(w.doc.describe(), before, s"cmd+${letter} left it untouched")
+end while_the_panel_is_up_no_shortcut_reaches_the_document

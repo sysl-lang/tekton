@@ -1,0 +1,319 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.Vec3
+import sysl.buf.{Buf, buf}
+import sysl.container.set
+
+// Duplicate and array: what the copies are, where they stand, and that each command is one step.
+
+private near(a: real, b: real) -> bool = (a - b).abs() <= 1.0e-9
+
+private assert_at(doc: &Document, id: int, at: Vec3, what: string)
+    val p = doc.find(id).unwrap().transform.translation
+
+    for i in 0..<3 do assert(near(p.axis(i), at.axis(i)), s"${what}: axis ${i} is ${p.axis(i)}, not ${at.axis(i)}")
+end assert_at
+
+// Whether a node is turned this many degrees about z and no other way.
+private turned_about_z(doc: &Document, id: int, degrees: real) -> bool =
+    doc.find(id).unwrap().transform.rotation.same_rotation(
+        Quaternion.from_axis_angle([0.0, 0.0, 1.0], degrees * real.pi() / 180.0), 1.0e-9)
+
+// A cylinder of 12 sides, mirrored along x and tinted 7, as a hole at (10, 20, 5) turned a quarter about y and
+// stretched, selected alone.
+private odd_cylinder() -> (&Document, int)
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_segments(id, 12).unwrap()
+    doc.set_transform(id, Transform(Vec3(10.0, 20.0, 5.0), Quaternion.from_axis_angle([0.0, 1.0, 0.0], real.pi() / 2.0),
+                                    Vec3(1.0, 2.0, 0.5)))
+    doc.mirror_selected(0).unwrap()
+    doc.set_hole(true).unwrap()
+    (doc, id)
+end odd_cylinder
+
+// What makes a node what it is, but for its id and where it stands.
+private same_but_placed(a: &Node, b: &Node) -> bool =
+    a.is_group == b.is_group && a.segments == b.segments && a.mirror == b.mirror && a.tint == b.tint && a.hole == b.hole &&
+    a.transform.rotation == b.transform.rotation && a.transform.scale == b.transform.scale &&
+    a.children.len() == b.children.len()
+
+// Every id in the tree, in the order a walk meets them.
+private ids_of(node: &Node, out: Buf[int])
+    out.push(node.id)
+
+    for child in node.children.view() do ids_of(child, out)
+end ids_of
+
+private all_ids_unique(doc: &Document) -> bool
+    var ids: Buf[int] = buf()
+    val seen = set[int]()
+
+    for item in doc.items() do ids_of(item, ids)
+
+    for id in ids.view() do if !seen.add(id) then return false
+
+    true
+end all_ids_unique
+
+// Two boxes 40 apart along x, grouped, with a third box at y = 60; the group is selected.
+private group_and_box() -> (&Document, int, int)
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+    val c = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    doc.set_transform(b, moved_to(Vec3(40.0, 0.0, 0.0)))
+    doc.set_transform(c, moved_to(Vec3(0.0, 60.0, 0.0)))
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val g = doc.group_selected().unwrap()
+
+    (doc, g, c)
+end group_and_box
+
+// ## Duplicate
+
+@test
+a_duplicated_shape_keeps_everything_but_its_id_and_moves_one_step_along_x()
+    val (doc, id) = odd_cylinder()
+    val before = doc.items().len
+
+    doc.duplicate_selected(1.0).unwrap()
+    assert_eq(doc.items().len, before + 1, "one more")
+
+    val copy_id = doc.selection[0]
+    val copy = doc.find(copy_id).unwrap()
+    val original = doc.find(id).unwrap()
+
+    assert_eq(doc.selection.len(), 1, "the copy alone is selected")
+    assert(copy_id != id, "a fresh id")
+    assert(same_but_placed(copy, original), "the same shape")
+    assert_eq(copy.segments, Some(12), "segments kept")
+    assert(copy.mirror.any && copy.mirror == original.mirror, "mirror kept")
+    assert(copy.hole && copy.tint == original.tint, "hole and tint kept")
+
+    doc.local_bounds(original)
+
+    val builds = doc.builds
+
+    doc.local_bounds(copy)
+    assert_eq(doc.builds, builds, "the original's triangles shared, not built again")
+    assert_at(doc, copy_id, Vec3(11.0, 20.0, 5.0), "one step along x")
+    assert_at(doc, id, Vec3(10.0, 20.0, 5.0), "the original stays")
+    assert(doc.next_id > copy_id, "the next id is past the copy's")
+end a_duplicated_shape_keeps_everything_but_its_id_and_moves_one_step_along_x
+
+@test
+a_duplicated_group_copies_every_part_with_ids_of_their_own()
+    val (doc, g, _) = group_and_box()
+
+    doc.duplicate_selected(5.0).unwrap()
+
+    val copy = doc.find(doc.selection[0]).unwrap()
+    val original = doc.find(g).unwrap()
+
+    assert(copy.is_group && copy.id != g, "a new group")
+    assert_eq(copy.children.len(), 2, "both parts")
+
+    for i in 0..<2
+        assert(copy.children[i].id != original.children[i].id, s"part ${i} has an id of its own")
+        assert(copy.children[i].transform == original.children[i].transform, s"part ${i} stands where it stood")
+        assert(same_but_placed(copy.children[i], original.children[i]), s"part ${i} is the same")
+
+    assert(all_ids_unique(doc), "no id twice")
+    assert_at(doc, copy.id, original.transform.translation + Vec3(5.0, 0.0, 0.0), "the group moved")
+    assert(near(doc.bounds_of(copy).size().x, doc.bounds_of(original).size().x), "the same solid")
+end a_duplicated_group_copies_every_part_with_ids_of_their_own
+
+@test
+a_duplicated_selection_of_several_copies_each_and_selects_the_copies()
+    val (doc, g, c) = group_and_box()
+
+    doc.toggle_selected(c)
+    doc.duplicate_selected(2.0).unwrap()
+    assert_eq(doc.items().len, 4, "two more")
+    assert_eq(doc.selection.len(), 2, "both copies selected")
+    assert(!doc.is_selected(g) && !doc.is_selected(c), "the originals are not")
+    assert(doc.find(doc.selection[0]).unwrap().is_group, "the group's copy first")
+    assert_at(doc, doc.selection[1], Vec3(2.0, 60.0, 0.0), "the box's copy")
+    assert(all_ids_unique(doc), "no id twice")
+end a_duplicated_selection_of_several_copies_each_and_selects_the_copies
+
+@test
+a_duplicate_is_one_step_that_undo_and_redo_take_back_and_put_back()
+    val (doc, g, _) = group_and_box()
+    val before = doc.describe()
+
+    doc.duplicate_selected(1.0).unwrap()
+
+    val after = doc.describe()
+
+    assert(doc.undo(), "undone")
+    assert_eq(doc.describe(), before, "as it was, selection and all")
+    assert(doc.redo(), "redone")
+    assert_eq(doc.describe(), after, "the copy back")
+end a_duplicate_is_one_step_that_undo_and_redo_take_back_and_put_back
+
+@test
+with_nothing_selected_duplicate_and_array_are_refused_and_change_nothing()
+    val (doc, _, _) = group_and_box()
+
+    doc.select(None)
+
+    val before = doc.describe()
+    val steps = doc.undos.len()
+
+    assert(doc.duplicate_selected(1.0).is_err(), "no duplicate")
+    assert(doc.array_selected(3, Pattern.Line(0, 10.0)).is_err(), "no array")
+    assert_eq(doc.describe(), before, "unchanged")
+    assert_eq(doc.undos.len(), steps, "no step")
+end with_nothing_selected_duplicate_and_array_are_refused_and_change_nothing
+
+@test
+a_copy_that_would_stand_beyond_the_limit_is_refused()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(id, moved_to(Vec3(POSITION_LIMIT, 0.0, 0.0)))
+
+    val before = doc.describe()
+
+    assert(doc.duplicate_selected(1.0).is_err(), "past the limit")
+    assert(doc.array_selected(2, Pattern.Line(1, -1500.0)).is_err(), "the second copy past it along y")
+    assert(doc.array_selected(1, Pattern.Line(0, real.nan())).is_err(), "no spacing")
+    assert(doc.array_selected(1, Pattern.Ring(true, real.infinity())).is_err(), "no angle")
+    assert_eq(doc.describe(), before, "unchanged")
+    assert(doc.array_selected(1, Pattern.Line(1, -1500.0)).is_ok(), "one copy is within it")
+end a_copy_that_would_stand_beyond_the_limit_is_refused
+
+// ## Linear array
+
+@test
+a_line_array_puts_each_copy_a_spacing_further_along_its_axis()
+    for axis in 0..<3
+        val doc = new_document()
+        val id = doc.add_shape(Primitive.Box)
+
+        doc.set_transform(id, moved_to(Vec3(5.0, 6.0, 7.0)))
+        doc.array_selected(4, Pattern.Line(axis, 25.0)).unwrap()
+        assert_eq(doc.selection.len(), 4, s"axis ${axis}: four copies selected")
+        assert_eq(doc.items().len, 5, s"axis ${axis}: separate things, not a group")
+
+        for k in 0..<4
+            val at = Vec3(5.0, 6.0, 7.0)
+
+            assert_at(doc, doc.selection[k], at.with_axis(axis, at.axis(axis) + real(k + 1) * 25.0),
+                      s"axis ${axis}, copy ${k + 1}")
+
+        assert_at(doc, id, Vec3(5.0, 6.0, 7.0), s"axis ${axis}: the original stays")
+end a_line_array_puts_each_copy_a_spacing_further_along_its_axis
+
+@test
+a_line_array_of_several_keeps_each_copy_where_its_original_stands_in_the_row()
+    val (doc, g, c) = group_and_box()
+    val gx = doc.find(g).unwrap().transform.translation
+
+    doc.toggle_selected(c)
+    doc.array_selected(2, Pattern.Line(0, -50.0)).unwrap()
+    assert_eq(doc.selection.len(), 4, "two of each")
+    assert_at(doc, doc.selection[0], gx + Vec3(-50.0, 0.0, 0.0), "the group, once")
+    assert_at(doc, doc.selection[1], Vec3(-50.0, 60.0, 0.0), "the box, once")
+    assert_at(doc, doc.selection[2], gx + Vec3(-100.0, 0.0, 0.0), "the group, twice")
+    assert_at(doc, doc.selection[3], Vec3(-100.0, 60.0, 0.0), "the box, twice")
+    assert(all_ids_unique(doc), "no id twice")
+end a_line_array_of_several_keeps_each_copy_where_its_original_stands_in_the_row
+
+@test
+an_array_counts_from_one_to_the_cap_and_no_further()
+    for (count, fine) in [(0, false), (-1, false), (1, true), (MAX_ARRAY_COPIES, true), (MAX_ARRAY_COPIES + 1, false)]
+        val doc = new_document()
+
+        doc.add_shape(Primitive.Box)
+
+        val before = doc.describe()
+        val made = doc.array_selected(count, Pattern.Line(1, 5.0))
+
+        assert_eq(made.is_ok(), fine, s"${count} copies")
+
+        if fine
+            assert_eq(doc.selection.len(), usize(count), s"${count} made")
+        else
+            assert_eq(doc.describe(), before, s"${count}: unchanged")
+            assert_eq(made.unwrap_err(), "An array makes 1 to 200 copies", "it says the range")
+end an_array_counts_from_one_to_the_cap_and_no_further
+
+@test
+an_array_is_one_step_that_undo_and_redo_take_back_and_put_back()
+    val (doc, _, _) = group_and_box()
+    val before = doc.describe()
+
+    doc.array_selected(5, Pattern.Ring(false, 30.0)).unwrap()
+
+    val after = doc.describe()
+
+    assert(doc.undo(), "undone")
+    assert_eq(doc.describe(), before, "as it was")
+    assert(doc.redo(), "redone")
+    assert_eq(doc.describe(), after, "all five back")
+end an_array_is_one_step_that_undo_and_redo_take_back_and_put_back
+
+// ## Ring array
+
+@test
+a_ring_about_the_origin_turns_each_copy_and_carries_it_round()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_transform(id, moved_to(Vec3(30.0, 0.0, 4.0)))
+    doc.array_selected(3, Pattern.Ring(true, 90.0)).unwrap()
+
+    val expected = [Vec3(0.0, 30.0, 4.0), Vec3(-30.0, 0.0, 4.0), Vec3(0.0, -30.0, 4.0)]
+
+    for k in 0..<3
+        assert_at(doc, doc.selection[k], expected[k], s"copy ${k + 1}")
+        assert(turned_about_z(doc, doc.selection[k], real(k + 1) * 90.0), s"copy ${k + 1} turned")
+
+    assert(doc.find(doc.selection[0]).unwrap().transform.translation.x == 0.0, "a quarter turn lands exactly")
+end a_ring_about_the_origin_turns_each_copy_and_carries_it_round
+
+@test
+a_ring_about_the_middle_spins_the_selection_about_its_own_centre()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(a, moved_to(Vec3(100.0, 50.0, 0.0)))
+    doc.set_transform(b, moved_to(Vec3(140.0, 50.0, 0.0)))
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+    doc.array_selected(1, Pattern.Ring(false, 180.0)).unwrap()
+
+    // The middle is (120, 50): a half turn swaps the two.
+    assert_at(doc, doc.selection[0], Vec3(140.0, 50.0, 0.0), "a's copy where b is")
+    assert_at(doc, doc.selection[1], Vec3(100.0, 50.0, 0.0), "b's copy where a is")
+    assert(turned_about_z(doc, doc.selection[0], 180.0), "turned half round")
+end a_ring_about_the_middle_spins_the_selection_about_its_own_centre
+
+@test
+a_ring_of_a_turned_shape_adds_its_turn_to_the_one_it_had()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val tilt = Quaternion.from_axis_angle([1.0, 0.0, 0.0], 0.3)
+
+    doc.set_transform(id, Transform(Vec3(20.0, 0.0, 10.0), tilt, Vec3(1.0, 1.0, 1.0)))
+    doc.array_selected(2, Pattern.Ring(true, 120.0)).unwrap()
+
+    for k in 0..<2
+        val q = doc.find(doc.selection[k]).unwrap().transform.rotation
+        val want = Quaternion.from_axis_angle([0.0, 0.0, 1.0], real(k + 1) * 120.0 * real.pi() / 180.0) * tilt
+
+        assert(q.same_rotation(want, 1.0e-9), s"copy ${k + 1}: the tilt, then the turn")
+
+    assert_at(doc, doc.selection[0], Vec3(-10.0, 20.0 * (3.0).sqrt() / 2.0, 10.0), "a third of the way round")
+end a_ring_of_a_turned_shape_adds_its_turn_to_the_one_it_had
