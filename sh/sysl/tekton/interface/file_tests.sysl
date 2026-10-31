@@ -533,19 +533,52 @@ while_the_question_is_up_the_window_behind_takes_nothing()
     assert_eq(w.doc.items().len, count, "the palette")
 
     // A drag and the wheel over the viewport, which are read by position.
-    c.point(800, 200, true)
+    c.point(1240, 60, true)
     render(w.tree(), &c, WINDOW)
-    c.point(900, 300, true)
+    c.point(1180, 120, true)
     render(w.tree(), &c, WINDOW)
-    c.release(900, 300)
+    c.release(1180, 120)
     render(w.tree(), &c, WINDOW)
-    c.point(800, 200, false)
+    c.point(1240, 60, false)
     c.spin(0.0, 50.0)
     render(w.tree(), &c, WINDOW)
     assert_eq(w.camera.turn, turn, "the view stayed")
     assert_eq(w.camera.distance, distance, "at its distance")
     assert(w.asking.read(), "and it is still asking")
+
+    // The same drag with the question gone does turn the view, so the above could have failed.
+    w.answer_cancel()
+    render(w.tree(), &c, WINDOW)
+    c.point(1240, 60, true)
+    render(w.tree(), &c, WINDOW)
+    c.point(1180, 120, true)
+    render(w.tree(), &c, WINDOW)
+    assert(w.camera.turn != turn, "the view turns")
+
+    // A turn of the view already going on when the question comes up stops there, button still down.
+    w.new_file()
+    render(w.tree(), &c, WINDOW)
+
+    val stopped = w.camera.turn
+
+    c.point(1100, 200, true)
+    render(w.tree(), &c, WINDOW)
+    assert_eq(w.camera.turn, stopped, "the view stops under the question")
 end while_the_question_is_up_the_window_behind_takes_nothing
+
+@test
+a_failed_save_as_after_the_question_stops_what_was_going_to_happen()
+    val (w, d, quits) = workspace()
+    var c = recorder()
+
+    w.add(Primitive.Box)
+    w.request_quit()
+    d.answer = chosen("/no/such/directory/a.tekton")
+    tap(w, &c, "question.save")
+    assert_eq(quits.read(), 0, "still here")
+    assert_eq(w.file, "", "with no file")
+    assert(w.problem.read().starts_with("Could not save a.tekton: "), w.problem.read())
+end a_failed_save_as_after_the_question_stops_what_was_going_to_happen
 
 // A dialog that does not answer until the test says.
 private struct Held
