@@ -268,6 +268,10 @@ struct Node
 
     // Whether a parent cuts this out of its solids instead of joining it to them.
     hole: bool
+
+    // How far a hole is grown on every side before it cuts, in millimetres, so that a printed part fits it. Kept
+    // while the node is solid, and ignored.
+    clearance: real
     children: Buf[&Node]
     derived: &Derived
 
@@ -290,30 +294,46 @@ struct Node
             Group -> true
             _ -> false
 
+    // Whether a clearance can grow this node: a box, cylinder, sphere or cone. A torus cannot, because stretching
+    // it widens its inner opening where a clearance must narrow it, and a group cannot, because stretching its box
+    // moves its parts apart instead of growing each of them.
+    takes_clearance -> bool =
+        self.operation match
+            Shape(p, _) -> p != Primitive.Torus
+            Group -> false
+
     // This node somewhere else: the same triangles.
     private with_transform(&self, t: Transform) -> &Node =
-        Node(self.id, self.operation, t, self.mirror, self.tint, self.hole, self.children, self.derived, None, None)
+        Node(self.id, self.operation, t, self.mirror, self.tint, self.hole, self.clearance, self.children,
+             self.derived, None, None)
 
     // This node reflected otherwise and placed by `t`: its own solid is another, so nothing derived holds.
     private with_mirror(&self, t: Transform, m: Mirror) -> &Node =
-        Node(self.id, self.operation, t, m, self.tint, self.hole, self.children, Derived(None, None), None, None)
+        Node(self.id, self.operation, t, m, self.tint, self.hole, self.clearance, self.children, Derived(None, None),
+             None, None)
 
-    // This node as solid or as hole: the same triangles in the same place.
+    // This node as solid or as hole: the same triangles in the same place, but a clearance grows only a hole, so
+    // a node with one cuts from somewhere else.
     private with_hole(&self, hole: bool) -> &Node =
-        Node(self.id, self.operation, self.transform, self.mirror, self.tint, hole, self.children, self.derived,
-             self.solid, self.bounds)
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, hole, self.clearance, self.children,
+             self.derived, if self.clearance == 0.0 then self.solid else None, self.bounds)
+
+    // This node with another clearance: the same triangles in the same place, cut from somewhere else.
+    private with_clearance(&self, clearance: real) -> &Node =
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, clearance, self.children,
+             self.derived, None, self.bounds)
 
     // This shape with another number of sides, so nothing derived from the old one holds.
     private with_segments(&self, segments: int) -> &Node =
         self.operation match
             Shape(p, _) ->
                 Node(self.id, Operation.Shape(p, segments), self.transform, self.mirror, self.tint, self.hole,
-                     self.children, Derived(None, None), None, None)
+                     self.clearance, self.children, Derived(None, None), None, None)
             Group -> self
 
     // This node made of other children, so nothing derived from the old ones holds.
     private with_children(&self, children: Buf[&Node]) -> &Node =
-        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, children,
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, self.clearance, children,
              Derived(None, None), None, None)
 
     // This tree with the node of `with`'s id replaced by `with`, sharing everything off the path to it; or
@@ -348,7 +368,8 @@ struct Node
         for child in self.children.view() do parts = s"${parts}${child.model()}"
 
         s"${self.id} ${name} ${self.tint} ${self.hole} ${t.translation.x} ${t.translation.y} ${t.translation.z} " +
-        s"${q.w} ${q.x} ${q.y} ${q.z} ${t.scale.x} ${t.scale.y} ${t.scale.z}${mirror_text(self.mirror)} (${parts})"
+        s"${q.w} ${q.x} ${q.y} ${q.z} ${t.scale.x} ${t.scale.y} ${t.scale.z}${mirror_text(self.mirror)}" +
+        s"${if self.clearance == 0.0 then "" else s" clearance:${self.clearance}"} (${parts})"
     end model
 
     private find(&self, id: int) -> Option[&Node]
@@ -609,7 +630,7 @@ struct Document
 
         for item in self.items() do items.push(item)
 
-        items.push(Node(id, Operation.Shape(p, ROUND_SEGMENTS), moved_to(at), NO_MIRROR, id - 1, false, buf(),
+        items.push(Node(id, Operation.Shape(p, ROUND_SEGMENTS), moved_to(at), NO_MIRROR, id - 1, false, 0.0, buf(),
                         Derived(None, None), None, None))
         self.put_items(items)
         self.next_id += 1
@@ -646,6 +667,24 @@ struct Document
         self.put_node(node.with_segments(wanted))
         Ok(())
     end set_segments
+
+    // The command behind the clearance field: how far a hole grows on every side before it cuts, held to what a
+    // printer needs. A shape a clearance cannot grow is refused, and so is a number that is no distance; one that
+    // changes nothing is not a step. A solid takes one too, and keeps it for when it is a hole again.
+    set_clearance(&self, id: int, clearance: real) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+
+        if !node.takes_clearance then return Err("Only a box, cylinder, sphere or cone has a clearance")
+        if !clearance.is_finite() then return Err("Clearance must be a number of millimetres")
+
+        val wanted = clamped_clearance(clearance)
+
+        if wanted == node.clearance then return Ok(())
+
+        self.record()
+        self.put_node(node.with_clearance(wanted))
+        Ok(())
+    end set_clearance
 
     // The command behind the solid and hole buttons, on everything selected.
     set_hole(&self, hole: bool) -> Result[unit, string]
@@ -755,8 +794,8 @@ struct Document
 
                 if tint.is_none() && !item.hole then tint = Some(item.tint)
 
-        val group = Node(self.next_id, Operation.Group, moved_to(origin), NO_MIRROR, tint.unwrap(), false, parts,
-                         Derived(None, None), None, None)
+        val group = Node(self.next_id, Operation.Group, moved_to(origin), NO_MIRROR, tint.unwrap(), false, 0.0,
+                         parts, Derived(None, None), None, None)
         val joined = self.local_of(group)
 
         joined.status() match
@@ -848,8 +887,8 @@ struct Document
 
         self.next_id += 1
 
-        Node(id, Operation.Group, group.transform, group.mirror, part.tint, part.hole, inside, Derived(None, None),
-             None, None)
+        Node(id, Operation.Group, group.transform, group.mirror, part.tint, part.hole, 0.0, inside,
+             Derived(None, None), None, None)
     end wrapped_part
 
     // Whether a mirror and a drop have something to work on.
@@ -1001,7 +1040,7 @@ struct Document
 
         val same = t == node.transform
 
-        Node(id, node.operation, t, node.mirror, node.tint, node.hole, parts, node.derived,
+        Node(id, node.operation, t, node.mirror, node.tint, node.hole, node.clearance, parts, node.derived,
              if same then node.solid else None, if same then node.bounds else None)
     end fresh_copy
 
@@ -1228,11 +1267,34 @@ struct Document
 
         self.builds += 1
 
-        val s = transformed(local, node.transform)
+        val s = transformed(local, self.cut_transform(node))
 
         node.solid = Some(s)
         s
     end solid_of
+
+    // Where a node's solid is placed to be joined or cut, and where a hole is drawn: its transform, or for a hole
+    // with a clearance, that transform stretched in the shape's own frame by twice the clearance along each of
+    // its axes, about the middle of its box.
+    //
+    // **A stretch, not a true offset, because a stretch is exact for every shape that takes a clearance and keeps
+    // a round one round.** A box grows by the clearance on every face and a cylinder or sphere on every side,
+    // however it is turned, because the stretch is applied before the rotation. A cone grows by the clearance
+    // across its base and at each end; its slope moves out by a little less. The kernel's only 3D offset is a
+    // Minkowski sum with a ball, which would round a box's edges, cut short of the clearance between a ball's
+    // facets, and cost a full solid on every move.
+    cut_transform(&self, node: &Node) -> Transform
+        if !node.hole || node.clearance == 0.0 then return node.transform
+
+        val t = node.transform
+        val local = self.local_bounds(node)
+        val size = local.size()
+        val middle = local.center()
+        val c = node.clearance * 2.0
+        val grown = Vec3(t.scale.x + c / size.x, t.scale.y + c / size.y, t.scale.z + c / size.z)
+
+        Transform(t.translation + t.turned(middle.times(t.scale) - middle.times(grown)), t.rotation, grown)
+    end cut_transform
 
     // The one solid a printer is sent, in millimetres: every part joined and every hole cut out, as if the whole
     // document were one group, so a hole standing on the ground cuts whatever it overlaps. Or why there is none:
@@ -1321,8 +1383,8 @@ new_document(next_revision: int = 1) -> &Document = restored_document(buf(), 1, 
 // **`next_revision` goes on from the document this one replaces**, because a renderer knows a mesh by its node's
 // id and its revision, and a new document's first shape has the id an old one's did.
 restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], next_revision: int) -> &Document
-    val root = Node(0, Operation.Group, identity_transform(), NO_MIRROR, 0, false, items, Derived(None, None), None,
-                    None)
+    val root = Node(0, Operation.Group, identity_transform(), NO_MIRROR, 0, false, 0.0, items, Derived(None, None),
+                    None, None)
 
     Document(root, buf(), last_placed, next_id, 0, next_revision, buf(), buf(), false, None, HISTORY_MESH_BYTES,
              model_text(root), root, false)
@@ -1330,12 +1392,12 @@ end restored_document
 
 // A shape as a file says it.
 restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool, segments: int = ROUND_SEGMENTS,
-               mirror: Mirror = NO_MIRROR) -> &Node =
-    Node(id, Operation.Shape(p, segments), t, mirror, tint, hole, buf(), Derived(None, None), None, None)
+               mirror: Mirror = NO_MIRROR, clearance: real = 0.0) -> &Node =
+    Node(id, Operation.Shape(p, segments), t, mirror, tint, hole, clearance, buf(), Derived(None, None), None, None)
 
 // A group as a file says it.
 restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node], mirror: Mirror = NO_MIRROR) -> &Node =
-    Node(id, Operation.Group, t, mirror, tint, hole, parts, Derived(None, None), None, None)
+    Node(id, Operation.Group, t, mirror, tint, hole, 0.0, parts, Derived(None, None), None, None)
 
 // What makes a tree what it is, as text.
 private model_text(node: &Node) -> string = node.model()
@@ -1433,6 +1495,12 @@ const MAX_SEGMENTS: int = 512
 
 // A number of sides held to the range a round shape may have.
 clamped_segments(n: int) -> int = max(MIN_SEGMENTS, min(MAX_SEGMENTS, n))
+
+// The most a hole grows on each side, in millimetres: well past the few tenths a printed fit needs, and short of
+// turning a hole into another shape.
+const MAX_CLEARANCE: real = 2.0
+
+clamped_clearance(c: real) -> real = max(0.0, min(MAX_CLEARANCE, c))
 
 // How many sides a torus's tube has: three eighths of its ring's, as many as a ring of 64 always gave it.
 torus_tube_segments(segments: int) -> int = max(MIN_SEGMENTS, segments * 3 / 8)

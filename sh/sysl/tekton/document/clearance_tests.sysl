@@ -1,0 +1,251 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.Vec3
+import sysl.math.pi
+
+// Hole clearance: how much a hole grows before it cuts, measured on what the kernel cuts with.
+
+private close(a: real, b: real, tolerance: real = 1.0e-9) -> bool = (a - b).abs() <= tolerance
+
+private close_vec(a: Vec3, b: Vec3, tolerance: real = 1.0e-9) -> bool =
+    close(a.x, b.x, tolerance) && close(a.y, b.y, tolerance) && close(a.z, b.z, tolerance)
+
+private regular_area(r: real, n: int) -> real = 0.5 * real(n) * r * r * (2.0 * pi / real(n)).sin()
+
+// A shape of this size, made a hole.
+private hole_of(doc: &Document, p: Primitive, size: Vec3) -> int
+    val id = doc.add_shape(p)
+
+    doc.resize_to(id, size).unwrap()
+    doc.set_hole(true).unwrap()
+    id
+end hole_of
+
+// The box around the solid a node is joined or cut with, from the kernel.
+private cut_min(doc: &Document, id: int) -> Vec3
+    val m = doc.solid_of(doc.find(id).unwrap()).bounding_box().min()
+
+    Vec3(m.x, m.y, m.z)
+end cut_min
+
+private cut_max(doc: &Document, id: int) -> Vec3
+    val m = doc.solid_of(doc.find(id).unwrap()).bounding_box().max()
+
+    Vec3(m.x, m.y, m.z)
+end cut_max
+
+private cut_size(doc: &Document, id: int) -> Vec3 = cut_max(doc, id) - cut_min(doc, id)
+
+private cut_middle(doc: &Document, id: int) -> Vec3 = (cut_max(doc, id) + cut_min(doc, id)) * 0.5
+
+private cut_volume(doc: &Document, id: int) -> real = doc.solid_of(doc.find(id).unwrap()).volume()
+
+@test
+a_box_hole_cuts_wider_by_twice_the_clearance_about_the_same_middle()
+    val doc = new_document()
+    val id = hole_of(doc, Primitive.Box, Vec3(10.0, 10.0, 10.0))
+    val middle = cut_middle(doc, id)
+
+    assert(close_vec(cut_size(doc, id), Vec3(10.0, 10.0, 10.0)), "10 mm without a clearance")
+    assert(close(cut_volume(doc, id), 1000.0, 1.0e-6), "1000 mm3 without")
+
+    doc.set_clearance(id, 0.2).unwrap()
+    assert(close_vec(cut_size(doc, id), Vec3(10.4, 10.4, 10.4)), s"10.4 mm with 0.2: ${cut_size(doc, id)}")
+    assert(close(cut_volume(doc, id), 10.4 * 10.4 * 10.4, 1.0e-6), "a 10.4 mm cube")
+    assert(close_vec(cut_middle(doc, id), middle), "grown on every side, not from one corner")
+    assert(close_vec(doc.size_of(doc.find(id).unwrap()), Vec3(10.0, 10.0, 10.0)), "the size it is drawn at stays")
+
+@test
+a_cylinder_hole_grows_across_and_at_each_end()
+    val doc = new_document()
+    val id = hole_of(doc, Primitive.Cylinder, Vec3(10.0, 10.0, 10.0))
+    val low = cut_min(doc, id)
+    val high = cut_max(doc, id)
+
+    assert(close(cut_volume(doc, id), regular_area(5.0, ROUND_SEGMENTS) * 10.0, 1.0e-6), "a 10 mm cylinder")
+
+    doc.set_clearance(id, 0.2).unwrap()
+    assert(close_vec(cut_size(doc, id), Vec3(10.4, 10.4, 10.4)), "10.4 mm across and tall")
+    assert(close(cut_volume(doc, id), regular_area(5.2, ROUND_SEGMENTS) * 10.4, 1.0e-6), "a 10.4 mm cylinder")
+    assert(close(cut_min(doc, id).z, low.z - 0.2), "0.2 lower at the bottom")
+    assert(close(cut_max(doc, id).z, high.z + 0.2), "0.2 higher at the top")
+
+@test
+a_stretched_box_grows_by_the_clearance_on_each_axis_not_in_proportion()
+    val doc = new_document()
+    val id = hole_of(doc, Primitive.Box, Vec3(4.0, 20.0, 60.0))
+
+    doc.set_clearance(id, 0.5).unwrap()
+    assert(close_vec(cut_size(doc, id), Vec3(5.0, 21.0, 61.0)), s"each side 1 mm more: ${cut_size(doc, id)}")
+
+@test
+a_turned_hole_grows_in_its_own_frame()
+    val doc = new_document()
+    val id = hole_of(doc, Primitive.Box, Vec3(10.0, 20.0, 30.0))
+    val half = 0.5.sqrt()
+
+    // A quarter turn about x: its own y lies along z.
+    doc.rotate_to(id, Quaternion(half, half, 0.0, 0.0)).unwrap()
+
+    val middle = cut_middle(doc, id)
+
+    doc.set_clearance(id, 0.2).unwrap()
+    assert(close_vec(cut_size(doc, id), Vec3(10.4, 30.4, 20.4), 1.0e-6), s"turned with it: ${cut_size(doc, id)}")
+    assert(close_vec(cut_middle(doc, id), middle, 1.0e-6), s"about its middle: ${cut_middle(doc, id)} against ${middle}")
+    assert(close(cut_volume(doc, id), 10.4 * 20.4 * 30.4, 1.0e-6), "still a box 0.4 larger each way")
+
+    // An eighth turn about z: the box across the corner is its own box grown, then turned.
+    val cos = (pi / 8.0).cos()
+    val sin = (pi / 8.0).sin()
+
+    doc.rotate_to(id, Quaternion(cos, 0.0, 0.0, sin)).unwrap()
+
+    val across = (10.4 + 20.4) * half
+
+    assert(close_vec(cut_size(doc, id), Vec3(across, across, 30.4), 1.0e-6), s"across the corner: ${cut_size(doc, id)}")
+    assert(close(cut_volume(doc, id), 10.4 * 20.4 * 30.4, 1.0e-6), "no larger for being turned")
+
+@test
+a_mirrored_hole_grows_about_the_same_middle()
+    val doc = new_document()
+    val id = hole_of(doc, Primitive.Cone, Vec3(10.0, 10.0, 10.0))
+    val middle = cut_middle(doc, id)
+
+    doc.mirror_selected(2).unwrap()
+    doc.set_clearance(id, 0.3).unwrap()
+    assert(close_vec(cut_size(doc, id), Vec3(10.6, 10.6, 10.6)), "0.6 larger")
+    assert(close_vec(cut_middle(doc, id), middle), "about its middle")
+
+@test
+a_sphere_and_a_cone_grow_by_the_clearance_along_their_axes()
+    for p in [Primitive.Sphere, Primitive.Cone]
+        val doc = new_document()
+        val id = hole_of(doc, p, Vec3(10.0, 10.0, 16.0))
+        val before = cut_size(doc, id)
+
+        doc.set_clearance(id, 0.25).unwrap()
+        assert(close_vec(cut_size(doc, id), before + Vec3(0.5, 0.5, 0.5)), s"a ${primitive_name(p)} 0.5 larger")
+
+    val doc = new_document()
+    val ball = hole_of(doc, Primitive.Sphere, Vec3(10.0, 10.0, 10.0))
+    val small = cut_volume(doc, ball)
+
+    doc.set_clearance(ball, 0.2).unwrap()
+    assert(close(cut_volume(doc, ball) / small, 1.04 * 1.04 * 1.04, 1.0e-9), "a sphere stays a sphere, 1.04 times across")
+
+@test
+a_torus_and_a_group_take_no_clearance()
+    val doc = new_document()
+    val ring = hole_of(doc, Primitive.Torus, Vec3(10.0, 10.0, 4.0))
+
+    assert(!doc.find(ring).unwrap().takes_clearance, "a torus")
+    assert(doc.set_clearance(ring, 0.2).is_err(), "refused on a torus")
+    assert_eq(doc.find(ring).unwrap().clearance, 0.0, "and nothing set")
+
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Cylinder)
+
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val group = doc.group_selected().unwrap()
+
+    doc.set_hole(true).unwrap()
+    assert(doc.find(group).unwrap().hole, "a hole group")
+    assert(!doc.find(group).unwrap().takes_clearance, "takes none")
+    assert(doc.set_clearance(group, 0.2).is_err(), "refused on a group")
+
+    for p in [Primitive.Box, Primitive.Cylinder, Primitive.Sphere, Primitive.Cone]
+        assert(doc.find(doc.add_shape(p)).unwrap().takes_clearance, s"a ${primitive_name(p)} takes one")
+
+@test
+a_hole_inside_a_group_cuts_with_its_clearance()
+    val doc = new_document()
+    val block = doc.add_shape(Primitive.Box)
+    val drill = doc.add_shape(Primitive.Cylinder)
+
+    // A 10 mm hole through the middle of the 20 mm block, taller than it.
+    doc.resize_to(drill, Vec3(10.0, 10.0, 30.0)).unwrap()
+    doc.move_to(drill, doc.find(block).unwrap().transform.translation - Vec3(0.0, 0.0, 5.0)).unwrap()
+    doc.set_hole(true).unwrap()
+    doc.select(Some(block))
+    doc.toggle_selected(drill)
+
+    val group = doc.group_selected().unwrap()
+    val tight = doc.solid_of(doc.find(group).unwrap()).volume()
+
+    assert(close(tight, 8000.0 - regular_area(5.0, ROUND_SEGMENTS) * 20.0, 1.0e-6), s"a 10 mm hole: ${tight}")
+    doc.set_clearance(drill, 0.2).unwrap()
+
+    val loose = doc.solid_of(doc.find(group).unwrap()).volume()
+
+    assert(close(loose, 8000.0 - regular_area(5.2, ROUND_SEGMENTS) * 20.0, 1.0e-6), s"a 10.4 mm hole: ${loose}")
+    assert(close(doc.final_solid().unwrap().volume(), loose, 1.0e-6), "and what is exported")
+
+@test
+a_solid_keeps_its_clearance_and_ignores_it()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+
+    doc.resize_to(id, Vec3(10.0, 10.0, 10.0)).unwrap()
+    doc.set_clearance(id, 0.2).unwrap()
+    assert_eq(doc.find(id).unwrap().clearance, 0.2, "kept on a solid")
+    assert(close_vec(cut_size(doc, id), Vec3(10.0, 10.0, 10.0)), "a solid is joined at its own size")
+    assert_eq(doc.cut_transform(doc.find(id).unwrap()), doc.find(id).unwrap().transform, "placed by its transform")
+    assert(close(doc.final_solid().unwrap().volume(), 1000.0, 1.0e-6), "and exported at it")
+
+    doc.set_hole(true).unwrap()
+    assert(close_vec(cut_size(doc, id), Vec3(10.4, 10.4, 10.4)), "a hole again cuts with it")
+
+    doc.set_hole(false).unwrap()
+    assert(close_vec(cut_size(doc, id), Vec3(10.0, 10.0, 10.0)), "solid again, its own size")
+    assert_eq(doc.find(id).unwrap().clearance, 0.2, "still kept")
+
+@test
+a_clearance_is_held_from_0_to_2_mm_and_must_be_a_number()
+    for (asked, kept) in [(-1.0, 0.0), (0.0, 0.0), (0.1, 0.1), (0.2, 0.2), (1.99, 1.99), (2.0, 2.0), (2.01, 2.0),
+                          (1.0e300, 2.0)]
+        assert_eq(clamped_clearance(asked), kept, s"clamped ${asked}")
+
+        val doc = new_document()
+        val id = hole_of(doc, Primitive.Box, Vec3(10.0, 10.0, 10.0))
+
+        doc.set_clearance(id, asked).unwrap()
+        assert_eq(doc.find(id).unwrap().clearance, kept, s"set ${asked}")
+
+    val doc = new_document()
+    val id = hole_of(doc, Primitive.Box, Vec3(10.0, 10.0, 10.0))
+
+    doc.set_clearance(id, 0.4).unwrap()
+
+    for bad in [0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0]
+        assert(doc.set_clearance(id, bad).is_err(), s"refused: ${bad}")
+        assert_eq(doc.find(id).unwrap().clearance, 0.4, "kept")
+
+    assert(doc.set_clearance(9999, 0.2).is_err(), "nothing there")
+
+@test
+a_clearance_edit_is_one_step_and_undoes()
+    val doc = new_document()
+    val id = hole_of(doc, Primitive.Cylinder, Vec3(10.0, 10.0, 10.0))
+    val steps = doc.undos.len()
+
+    doc.mark_saved()
+    doc.set_clearance(id, 0.2).unwrap()
+    assert_eq(doc.undos.len(), steps + 1, "one step")
+    assert(doc.is_dirty(), "something to save")
+    assert(close_vec(cut_size(doc, id), Vec3(10.4, 10.4, 10.4)), "grown")
+
+    doc.set_clearance(id, 0.2).unwrap()
+    assert_eq(doc.undos.len(), steps + 1, "the same number is no step")
+
+    assert(doc.undo(), "undone")
+    assert_eq(doc.find(id).unwrap().clearance, 0.0, "none again")
+    assert(close_vec(cut_size(doc, id), Vec3(10.0, 10.0, 10.0)), "and cuts at 10")
+    assert(!doc.is_dirty(), "as saved")
+
+    assert(doc.redo(), "redone")
+    assert_eq(doc.find(id).unwrap().clearance, 0.2, "0.2 again")
+    assert(close_vec(cut_size(doc, id), Vec3(10.4, 10.4, 10.4)), "and cuts at 10.4")

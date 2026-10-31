@@ -1,0 +1,64 @@
+module sh.sysl.tekton.export
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.document.{Document, Node, Primitive, Transform, identity_transform, restored_document, restored_group,
+                                restored_shape}
+import sh.sysl.tekton.space.Vec3
+import sysl.buf.{Buf, buf}
+import sysl.encoding.get_u32_le
+import sysl.math.pi
+
+// What an exported file holds when a hole has a clearance.
+
+private stl_real(b: []const u8, at: usize) -> real = real(f32.from_bits(get_u32_le(b[at..<at + 4]).unwrap()))
+
+private stl_point(b: []const u8, at: usize) -> Vec3 = Vec3(stl_real(b, at), stl_real(b, at + 4), stl_real(b, at + 8))
+
+// The volume a binary STL file's triangles enclose, as a slicer would find it.
+private stl_volume(bytes: Buf[u8]) -> real
+    val b = bytes.view()
+    var sum = 0.0
+
+    for i in 0..<usize(get_u32_le(b[80..<84]).unwrap())
+        val at = 84 + 50 * i + 12
+
+        sum += stl_point(b, at).dot(stl_point(b, at + 12).cross(stl_point(b, at + 24))) / 6.0
+
+    sum
+end stl_volume
+
+// The 20 mm box with a 10 mm hole through it, taller than the box, cut with this clearance.
+private drilled(clearance: real) -> &Document
+    var parts: Buf[&Node] = buf()
+    val drill = Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(0.5, 0.5, 1.5))
+
+    parts.push(restored_shape(2, Primitive.Box, identity_transform(), 0, false))
+    parts.push(restored_shape(3, Primitive.Cylinder, drill, 1, true, clearance = clearance))
+
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_group(1, identity_transform(), 0, false, parts))
+    restored_document(items, 4, None, 1)
+end drilled
+
+private disc(r: real) -> real = 0.5 * 64.0 * r * r * (2.0 * pi / 64.0).sin()
+
+@test
+an_exported_hole_is_as_wide_as_its_clearance_makes_it()
+    for (clearance, radius) in [(0.0, 5.0), (0.2, 5.2), (0.5, 5.5)]
+        val doc = drilled(clearance)
+        val read = stl_volume(stl_bytes(doc.final_mesh().unwrap()))
+        val want = 8000.0 - disc(radius) * 20.0
+
+        assert((read - want).abs() <= want * 1.0e-5, s"clearance ${clearance}: ${read} against ${want}")
+
+@test
+a_solid_with_a_clearance_exports_at_its_own_size()
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_shape(1, Primitive.Box, identity_transform(), 0, false, clearance = 0.5))
+
+    val read = stl_volume(stl_bytes(restored_document(items, 2, None, 1).final_mesh().unwrap()))
+
+    assert((read - 8000.0).abs() <= 1.0e-3, s"20 mm cubed: ${read}")

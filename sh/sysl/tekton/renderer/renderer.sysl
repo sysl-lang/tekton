@@ -275,12 +275,14 @@ volume_vertices(printer: Printer) -> Buf[f32]
     out
 end volume_vertices
 
-// Put a node's transform in the uniforms.
+// Put where a node is drawn in the uniforms: a hole as large as it cuts.
 private place(u: *Uniforms, doc: &Document, id: int)
     doc.find(id) match
         Some(node) ->
-            u.model = node.transform.matrix().floats()
-            u.normals = node.transform.normal_matrix().floats()
+            val t = doc.cut_transform(node)
+
+            u.model = t.matrix().floats()
+            u.normals = t.normal_matrix().floats()
         None -> ()
 
 private is_hole(doc: &Document, id: int) -> bool =

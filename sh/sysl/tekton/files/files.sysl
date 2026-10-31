@@ -4,7 +4,7 @@ import sh.sysl.hocon.{Value, parse}
 import sh.sysl.parsing.{Source, Span, source_of}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.DialogResult
-import sh.sysl.tekton.document.{Document, MAX_SEGMENTS, MIN_SEGMENTS, Mirror, NO_MIRROR, Node, Operation, PRIMITIVES, Primitive, ROUND_SEGMENTS, Transform, is_round, primitive_name, restored_document, restored_group, restored_shape}
+import sh.sysl.tekton.document.{Document, MAX_CLEARANCE, MAX_SEGMENTS, MIN_SEGMENTS, Mirror, NO_MIRROR, Node, Operation, PRIMITIVES, Primitive, ROUND_SEGMENTS, Transform, is_round, primitive_name, restored_document, restored_group, restored_shape}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf, byte_sink}
 import sysl.container.{Set, set}
@@ -47,6 +47,9 @@ import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
 
 // A round shape also says how many sides it has, as `segments`. Format 2 added it, so a format 1 file, which
 // never says, gives every round shape the number it was always drawn with.
+//
+// A box, cylinder, sphere or cone with a clearance says how much, in millimetres, as `clearance = 0.2`, solid or
+// hole; one without says nothing.
 
 // The format this writes, and the newest it reads. A key an older reader would refuse is a new format, so that
 // reader says "too new" rather than "unknown key".
@@ -106,6 +109,8 @@ private write_node(b: &StrBuilder, node: &Node, indent: string)
         None -> ()
 
     if node.mirror.any then b.push(s"${inner}mirror = [${node.mirror.x}, ${node.mirror.y}, ${node.mirror.z}]\n")
+
+    if node.clearance != 0.0 then b.push(s"${inner}clearance = ${real_text(node.clearance)}\n")
 
     if node.is_group
         b.push(s"${inner}parts = [\n")
@@ -241,6 +246,10 @@ private struct Reading
 
             if !listed.is_arr() then return Err(self.refusal(listed.span, "`parts` must be a list"))
 
+            v.get("clearance") match
+                Some(given) -> return Err(self.refusal(given.span, "a group has no `clearance`"))
+                None -> ()
+
             var children: Buf[&Node] = buf()
 
             for item in listed.items().view() do children.push(self.node(item)?)
@@ -263,7 +272,19 @@ private struct Reading
                 int(n)
             None -> ROUND_SEGMENTS
 
-        Ok(restored_shape(id, primitive, t, tint, hole, segments, mirror))
+        val clearance = v.get("clearance") match
+            Some(given) ->
+                if primitive == Primitive.Torus then return Err(self.refusal(given.span, s"a ${kind} has no `clearance`"))
+
+                val c = given.as_real().ok_or(self.refusal(given.span, "`clearance` must be a number"))?
+
+                if !(c >= 0.0 && c <= MAX_CLEARANCE)
+                    return Err(self.refusal(given.span, s"`clearance` must be from 0 to ${MAX_CLEARANCE.round()} mm"))
+
+                c
+            None -> 0.0
+
+        Ok(restored_shape(id, primitive, t, tint, hole, segments, mirror, clearance))
     end node
 
     line_of_id(&self, id: int) -> usize
@@ -275,7 +296,7 @@ private struct Reading
 end Reading
 
 private is_node_key(key: string) -> bool
-    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "mirror", "segments", "parts"]
+    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "mirror", "segments", "clearance", "parts"]
         if k == key then return true
 
     false

@@ -38,7 +38,8 @@ version, read by itself before anything else, so a newer format is told "too new
 holds the tree, `next` (the id the next node gets) and `last` (what the next shape is placed beside). Meshes are
 derived, and the selection and the history belong to a session. Every number is written as the shortest text
 that reads back as the same value, so a saved document comes back bit for bit. A round shape writes its
-`segments`; format 2 added them, and a format 1 file still opens, its round shapes at the default 64.
+`segments`; format 2 added them, and a format 1 file still opens, its round shapes at the default 64. A shape
+with a hole clearance writes `clearance` in millimetres, and one without says nothing.
 
 A bad file is refused with its line and the problem, and whatever is open stays as it was. That covers more than
 syntax: an id used twice, a transform no edit could make, groups nested past 128, a group the kernel cannot
@@ -118,7 +119,7 @@ Everything runs without a window, so a test or an agent can use the application 
   else passes on to them):
   - `GET /tekton/state` answers one line of JSON: `items` (the document's tree: each node's `id`, `kind`,
     `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, for a round shape
-    its `segments`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
+    its `segments`, for one with a hole clearance its `clearance`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
     `fov`), `file` (the path, or `null`) and `dirty`. A number JSON cannot spell is `null`.
   - `POST /tekton/quit` quits at once, asking nothing about unsaved changes, so a session nobody can answer
     can be ended; the answer is sent, and the program exits on the next frame. A `GET` of it is refused.
@@ -163,4 +164,9 @@ their own tests, so most changes never need the whole application linked or a wi
      menu) puts up a small panel for 1–200 copies in a line along x, y or z at a spacing in mm, or in a ring about
      an upright axis through the selection's middle or the origin, each turned a given angle further. The copies
      stand as things of their own, selected, sharing their originals' triangles. Each is one undo step.
+   - **Hole clearances are done**: a box, cylinder, sphere or cone set to Hole has a "Clearance, mm" field (0–2,
+     clamped, one undo step) that grows it by that much on every side before it cuts, by stretching it in its own
+     frame by twice the clearance per axis, so it is exact on a box, cylinder and sphere however turned, and on a
+     cone across its base and height. A torus and a group take none. A solid keeps the value and ignores it; the
+     file says `clearance` only when it is not zero; the export, the on-screen hole and `/tekton/state` use it.
 7. nex scripting.

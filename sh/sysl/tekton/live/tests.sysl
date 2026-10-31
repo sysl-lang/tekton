@@ -75,6 +75,17 @@ private a_small_document_reports_exactly_this()
 end a_small_document_reports_exactly_this
 
 @test
+private a_clearance_is_reported_only_where_there_is_one()
+    val w = new_workspace()
+    val cut = put(w, Primitive.Cylinder, Vec3(0.0, 0.0, 0.0), Vec3(0.5, 0.5, 2.0))
+
+    w.doc.set_hole(true).expect("a hole")
+    assert(!report(w).contains("clearance"), "none")
+    w.doc.set_clearance(cut, 0.2).expect("a clearance")
+    assert(report(w).contains("\"rotation\":[1,0,0,0],\"segments\":64,\"clearance\":0.2}"), report(w))
+end a_clearance_is_reported_only_where_there_is_one
+
+@test
 private a_group_reports_its_children_and_a_hole_says_so()
     val w = new_workspace()
     val box = put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))

@@ -36,6 +36,8 @@ private node_json(doc: &Document, node: &Node) -> string
         Some(n) -> out = out + s",\"segments\":${n}"
         None -> ()
 
+    if node.clearance != 0.0 then out = out + s",\"clearance\":${number(node.clearance)}"
+
     if node.is_group
         out = out + ",\"children\":["
 

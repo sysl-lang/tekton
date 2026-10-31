@@ -38,6 +38,7 @@ private assert_same_node(a: &Node, b: &Node)
     assert_eq(a.id, b.id, "id")
     assert_eq(a.tint, b.tint, "tint")
     assert_eq(a.hole, b.hole, "hole")
+    same_number(a.clearance, b.clearance, "clearance")
     assert_eq(a.is_group, b.is_group, "kind")
     assert(a.mirror == b.mirror, "mirror")
     assert_same_transform(a.transform, b.transform)
@@ -712,3 +713,65 @@ a_wrong_mirror_is_refused_on_its_own_line()
 
     assert(good.items()[0].mirror == Mirror(false, true, false), "a right one is read")
 end a_wrong_mirror_is_refused_on_its_own_line
+
+// ## Hole clearance
+
+@test
+a_clearance_comes_back_and_only_a_shape_with_one_writes_it()
+    val doc = new_document()
+    val hole = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_hole(true).unwrap()
+    doc.set_clearance(hole, 0.2).unwrap()
+
+    val solid = doc.add_shape(Primitive.Box)
+
+    doc.set_clearance(solid, 1.0 / 3.0).unwrap()
+
+    val plain = doc.add_shape(Primitive.Cone)
+
+    doc.set_hole(true).unwrap()
+
+    val text = document_text(doc)
+    val back = round_trip(doc)
+
+    assert_same_document(doc, back)
+    assert_eq(back.find(hole).unwrap().clearance, 0.2, "the hole's")
+    assert_eq(back.find(solid).unwrap().clearance, 1.0 / 3.0, "a solid's, kept to the bit")
+    assert_eq(back.find(plain).unwrap().clearance, 0.0, "none")
+    assert(text.contains("    clearance = 0.2\n"), text)
+    assert_eq(replace_all(text, "clearance", "").len, text.len - 2 * "clearance".len, "written by the two that have one")
+    assert(text.starts_with("tekton = 2\n"), "still format 2")
+end a_clearance_comes_back_and_only_a_shape_with_one_writes_it
+
+@test
+a_file_without_a_clearance_opens_with_none()
+    for file in [SHAPE_FILE, ROUND_FILE, GROUP_FILE]
+        val doc = document_from_text(file).unwrap()
+
+        for item in doc.items()
+            assert_eq(item.clearance, 0.0, "none")
+
+            for part in item.children.view() do assert_eq(part.clearance, 0.0, "none in a group")
+
+        assert(!document_text(doc).contains("clearance"), "and none written")
+end a_file_without_a_clearance_opens_with_none
+
+@test
+a_wrong_clearance_is_refused_on_its_own_line()
+    val after = "    scale = [1.0, 1.0, 1.0]\n"
+
+    for (put, why) in [("-0.1", "`clearance` must be from 0 to 2 mm"), ("2.5", "`clearance` must be from 0 to 2 mm"),
+                       ("1e400", "`clearance` must be from 0 to 2 mm"), ("wide", "`clearance` must be a number"),
+                       ("[0.2]", "`clearance` must be a number")]
+        assert_eq(refusal(with(after, s"${after}    clearance = ${put}\n")), s"line 13: ${why}", put)
+
+    for (put, kept) in [("0", 0.0), ("0.2", 0.2), ("2", 2.0)]
+        assert_eq(document_from_text(with(after, s"${after}    clearance = ${put}\n")).unwrap().items()[0].clearance, kept,
+                  put)
+
+    assert_eq(refusal(replace_all(with(after, s"${after}    clearance = 0.2\n"), "kind = box", "kind = torus")),
+              "line 13: a torus has no `clearance`", "a torus")
+    assert_eq(refusal(replace_all(GROUP_FILE, "    parts = [\n      {", "    clearance = 0.2\n    parts = [\n      {")),
+              "line 13: a group has no `clearance`", "a group")
+end a_wrong_clearance_is_refused_on_its_own_line

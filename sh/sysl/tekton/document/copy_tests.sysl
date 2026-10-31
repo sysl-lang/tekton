@@ -32,13 +32,14 @@ private odd_cylinder() -> (&Document, int)
                                     Vec3(1.0, 2.0, 0.5)))
     doc.mirror_selected(0).unwrap()
     doc.set_hole(true).unwrap()
+    doc.set_clearance(id, 0.3).unwrap()
     (doc, id)
 end odd_cylinder
 
 // What makes a node what it is, but for its id and where it stands.
 private same_but_placed(a: &Node, b: &Node) -> bool =
     a.is_group == b.is_group && a.segments == b.segments && a.mirror == b.mirror && a.tint == b.tint && a.hole == b.hole &&
-    a.transform.rotation == b.transform.rotation && a.transform.scale == b.transform.scale &&
+    a.clearance == b.clearance && a.transform.rotation == b.transform.rotation && a.transform.scale == b.transform.scale &&
     a.children.len() == b.children.len()
 
 // Every id in the tree, in the order a walk meets them.
@@ -95,6 +96,7 @@ a_duplicated_shape_keeps_everything_but_its_id_and_moves_one_step_along_x()
     assert(copy_id != id, "a fresh id")
     assert(same_but_placed(copy, original), "the same shape")
     assert_eq(copy.segments, Some(12), "segments kept")
+    assert_eq(copy.clearance, 0.3, "clearance kept")
     assert(copy.mirror.any && copy.mirror == original.mirror, "mirror kept")
     assert(copy.hole && copy.tint == original.tint, "hole and tint kept")
 

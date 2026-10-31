@@ -92,6 +92,7 @@ enum Quantity
     Size
     Rotation
     Segments
+    Clearance
 
 // A click selected or cleared the selection, or the palette added a shape. What a document's panel
 // shows follows this.
@@ -872,7 +873,8 @@ struct Workspace
              spacer().frame(1, 0).background(0xCBD2DCu32)])
     end panel
 
-    // The nine number fields and the segments field, made once, because each remembers what is being typed in it.
+    // The nine number fields, the segments field and the clearance field, made once, because each remembers what
+    // is being typed in it.
     number_fields(&self) -> []&NumberField
         if self.fields.len() == 0
             for q in [Quantity.Position, Quantity.Size, Quantity.Rotation]
@@ -881,7 +883,8 @@ struct Workspace
 
                     self.fields.push(new_number_field(self, q, axis, id))
 
-            self.fields.push(new_number_field(self, Quantity.Segments, 0, FIRST_FIELD_ID + int(self.fields.len())))
+            for q in [Quantity.Segments, Quantity.Clearance]
+                self.fields.push(new_number_field(self, q, 0, FIRST_FIELD_ID + int(self.fields.len())))
 
         self.fields.view()
     end number_fields
@@ -932,6 +935,10 @@ struct Workspace
                     parts.push(text("Segments").font_size(11.0))
                     parts.push(row([fields[9].view().named("panel.segments")], 3))
 
+                if node.hole && node.takes_clearance
+                    parts.push(text("Clearance, mm").font_size(11.0))
+                    parts.push(row([fields[10].view().named("panel.clearance")], 3))
+
                 if node.is_group
                     parts.push(row([self.small_button("Ungroup", () -> self.ungroup(), "panel.ungroup", true).flex(),
                                     self.small_button("Delete", () -> self.delete(), "panel.delete", true).flex()], 6))
@@ -954,7 +961,8 @@ struct Workspace
             Position -> node.transform.translation.axis(axis)
             Size -> self.doc.size_of(node).axis(axis)
             Rotation -> euler_degrees(node.transform.rotation)[axis]
-            Segments -> real(node.segments?))
+            Segments -> real(node.segments?)
+            Clearance -> node.clearance)
     end number
 
     // The command behind a number typed into a field.
@@ -971,6 +979,7 @@ struct Workspace
                 else
                     // Held to what an int holds; the document holds it to what a shape may have.
                     self.doc.set_segments(id, int(max(-1.0e6, min(1.0e6, value))))
+            Clearance -> self.doc.set_clearance(id, value)
             Rotation ->
                 if !value.is_finite()
                     Err("Rotation must be a number of degrees")
