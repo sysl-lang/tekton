@@ -4,7 +4,7 @@ import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
 import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
                      ask_save_file, message_button}
-import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Primitive, Transform, new_document, primitive_name}
+import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_name}
 import sh.sysl.tekton.export.{export_3mf, export_stl}
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
@@ -39,6 +39,16 @@ const NUMBER_WIDTH: int = 52
 const FIRST_FIELD_ID: int = 100
 
 const WRONG_INK: u32 = 0xD92D20u32
+
+// What an array lays its copies out as, in the order its panel offers them: the first three are lines along x, y
+// and z, and the last two rings about an upright axis.
+val ARRAY_KINDS = ["Line along X", "Line along Y", "Line along Z", "Ring about the middle", "Ring about the origin"]
+const FIRST_RING: int = 3
+
+// The keyboard ids of the array panel's count, spacing and angle fields.
+const ARRAY_COUNT_ID: int = 120
+const ARRAY_SPACING_ID: int = 121
+const ARRAY_ANGLE_ID: int = 122
 
 // What the question about unsaved changes answers for each of its buttons, and the line under its title.
 const SAVE_ANSWER: i32 = 1
@@ -158,10 +168,18 @@ struct Workspace
     printer: Printer
     show_volume: bool
 
+    // Whether the array panel is up, which of `ARRAY_KINDS` it has chosen, and what is typed into its fields. The
+    // fields keep what was typed from one array to the next.
+    array_open: &Signal[bool]
+    array_kind: &Signal[int]
+    array_count: &Signal[string]
+    array_spacing: &Signal[string]
+    array_angle: &Signal[string]
+
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
     // Whether something is over the viewport that the pointer belongs to instead.
-    private covered(&self) -> bool = self.open_menu.read() != NO_MENU || self.in_dialog.read()
+    private covered(&self) -> bool = self.open_menu.read() != NO_MENU || self.in_dialog.read() || self.array_open.read()
 
     // Ask first if this would lose anything, and otherwise do it. A drag or an open dialog finishes first.
     private guarded(&self, intent: Intent)
@@ -386,6 +404,61 @@ struct Workspace
 
     drop_to_bed(&self) = if !self.is_editing() then self.answer(self.doc.drop_selected())
 
+    // A copy of the selection one grid step to the right, selected.
+    duplicate(&self) = if !self.is_editing() then self.answer(self.doc.duplicate_selected(self.grid))
+
+    // Put up the array panel over everything, with nothing typing anywhere else.
+    open_array(&self)
+        if self.is_editing() then return
+
+        self.open_menu.set(NO_MENU)
+
+        if self.doc.selection.len() == 0 then return self.answer(Err("Nothing is selected"))
+
+        self.release_keyboard = true
+        self.problem.set("")
+        self.array_open.set(true)
+        self.changed()
+    end open_array
+
+    // Take the panel down and leave the document as it was.
+    cancel_array(&self)
+        self.release_keyboard = true
+        self.problem.set("")
+        self.array_open.set(false)
+        self.changed()
+    end cancel_array
+
+    // The panel's OK: the array its fields ask for. A count or a step that is no number, or one the document
+    // refuses, keeps the panel up and says why.
+    accept_array(&self)
+        val made = self.array_from_fields().and_then(a -> self.doc.array_selected(a.0, a.1))
+
+        made match
+            Ok(_) ->
+                self.release_keyboard = true
+                self.array_open.set(false)
+            Err(_) -> ()
+
+        self.answer(made)
+    end accept_array
+
+    // The count and the pattern the panel's fields ask for.
+    private array_from_fields(&self) -> Result[(int, Pattern), string]
+        val typed = self.array_count.read()
+        val count = parse_real(typed).map_err(e -> s"\"${typed}\" is not a number")?
+
+        // Held to what an int holds; the document holds it to what an array may make.
+        if !count.is_finite() || count != count.round() then return Err("Copies must be a whole number")
+
+        val kind = self.array_kind.read()
+        val text = if kind >= FIRST_RING then self.array_angle.read() else self.array_spacing.read()
+        val step = parse_real(text).map_err(e -> s"\"${text}\" is not a number")?
+        val pattern = if kind >= FIRST_RING then Pattern.Ring(kind > FIRST_RING, step) else Pattern.Line(kind, step)
+
+        Ok((int(max(-1.0e6, min(1.0e6, count))), pattern))
+    end array_from_fields
+
     undo(&self)
         if !self.is_editing()
             self.doc.undo()
@@ -416,6 +489,9 @@ struct Workspace
 
         if (mods & KMOD_GUI) == 0u16 || self.typing then return false
 
+        // The array panel is answered before anything else is asked for.
+        if self.array_open.read() then return true
+
         val shift = (mods & KMOD_SHIFT) != 0u16
 
         if code == u32(u8('n')) || code == u32(u8('o')) || code == u32(u8('s'))
@@ -444,6 +520,11 @@ struct Workspace
 
         if code == u32(u8('b'))
             if !repeat then self.drop_to_bed()
+
+            return true
+
+        if code == u32(u8('d'))
+            if !repeat then self.duplicate()
 
             return true
 
@@ -562,6 +643,13 @@ struct Workspace
 
         if self.covered() || self.menu_press
             self.typing = c.focus() != NOBODY
+
+            // Return answers the array panel as OK does and Escape as Cancel does.
+            if self.array_open.read()
+                for p in c.keys()
+                    if p.key == Key.Enter then self.accept_array()
+                    if p.key == Key.Escape then self.cancel_array()
+
             self.overlay = layout(self.doc, self.camera, real(r.w), real(r.h))
 
             return
@@ -658,8 +746,39 @@ struct Workspace
 
         column([menu_bar(self.menus().view(), self.open_menu).restyle(t -> light()),
                 row([self.panel(), self.viewport().flex()]).flex()], 0)
+            .modal(self.array_open, self.array_panel())
             .modal(self.in_dialog, spacer().frame(0, 0))
     end tree
+
+    // The array panel: what kind of array, how many copies, how far apart, and OK or Cancel.
+    private array_panel(&self) -> &View
+        val kind = self.array_kind.read()
+        val ring = kind >= FIRST_RING
+        var parts: Buf[&View] = buf()
+
+        parts.push(text("Array").font_size(16.0))
+
+        for i in 0..<ARRAY_KINDS.len do parts.push(radio(self.array_kind, int(i), ARRAY_KINDS[i]).named(s"array.kind.${i}"))
+
+        parts.push(text("Copies").font_size(11.0))
+        parts.push(text_field(self.array_count, ARRAY_COUNT_ID, NUMBER_WIDTH).font_size(11.0).named("array.count"))
+
+        if ring
+            parts.push(text("Angle between copies, degrees").font_size(11.0))
+            parts.push(text_field(self.array_angle, ARRAY_ANGLE_ID, NUMBER_WIDTH).font_size(11.0).named("array.angle"))
+        else
+            parts.push(text("Spacing, mm").font_size(11.0))
+            parts.push(text_field(self.array_spacing, ARRAY_SPACING_ID, NUMBER_WIDTH).font_size(11.0)
+                .named("array.spacing"))
+
+        for line in split(wrapped(self.problem.read(), PROBLEM_ROOM), "\n")
+            if line != "" then parts.push(text(line).font_size(11.0).foreground(WRONG_INK))
+
+        parts.push(row([button("Cancel", () -> self.cancel_array(), Role.Primary, Variant.Soft).named("array.cancel").flex(),
+                        button("OK", () -> self.accept_array(), Role.Primary, Variant.Filled).named("array.ok").flex()], 6))
+
+        column(parts.view(), 6).padding(16).background(0xFFFFFFu32, 8).border(0xCBD2DCu32, 1, 8).restyle(t -> light())
+    end array_panel
 
     // The menus, each row live only where its command would do something now.
     private menus(&self) -> Buf[Menu]
@@ -679,6 +798,7 @@ struct Workspace
                                item("Redo", () -> self.redo(), "Cmd+Shift+Z", enabled = doc.can_redo),
                                separator(),
                                item("Delete", () -> self.delete(), "Delete", enabled = doc.can_delete),
+                               item("Duplicate", () -> self.duplicate(), "Cmd+D", enabled = doc.can_arrange),
                                separator(),
                                item("Group", () -> self.group(), "Cmd+G", enabled = doc.can_group()),
                                item("Ungroup", () -> self.ungroup(), "Cmd+Shift+G", enabled = doc.can_ungroup()),
@@ -699,7 +819,9 @@ struct Workspace
                                   item("Align Centre Z", () -> self.align(2, Edge.Centre), enabled = doc.can_align),
                                   item("Align Top", () -> self.align(2, Edge.Max), enabled = doc.can_align),
                                   separator(),
-                                  item("Drop to Bed", () -> self.drop_to_bed(), "Cmd+B", enabled = doc.can_arrange)]))
+                                  item("Drop to Bed", () -> self.drop_to_bed(), "Cmd+B", enabled = doc.can_arrange),
+                                  separator(),
+                                  item("Array…", () -> self.open_array(), enabled = doc.can_arrange)]))
         all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0),
                                item("Build Volume", () -> self.toggle_volume())]))
         all
@@ -1066,4 +1188,5 @@ new_workspace() -> &Workspace =
               (answer, parent) -> ask_save_file(answer, parent, document_filters().view(), title = "Save As"),
               (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"),
               (answer, parent) -> ask_save_file(answer, parent, three_mf_filters().view(), title = "Export 3MF"), false,
-              () -> window(), title -> set_title(title), "", false, CORE_ONE, true)
+              () -> window(), title -> set_title(title), "", false, CORE_ONE, true, signal(false), signal(0), signal("3"),
+              signal("25"), signal("90"))

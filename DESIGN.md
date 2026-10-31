@@ -158,4 +158,9 @@ their own tests, so most changes never need the whole application linked or a wi
      transform's scale stays positive and exported triangles face outward; Align lines up the low side, middle
      or high side of two or more boxes on one axis; Drop to Bed (Cmd+B) lowers or raises the selection onto z = 0.
      Each is one undo step.
+   - Duplicate and array: Duplicate (Edit menu, Cmd+D) copies the selection, groups with all their parts, one grid
+     step along x, each node with a fresh id and everything else kept, and selects the copies; Array… (Arrange
+     menu) puts up a small panel for 1–200 copies in a line along x, y or z at a spacing in mm, or in a ring about
+     an upright axis through the selection's middle or the origin, each turned a given angle further. The copies
+     stand as things of their own, selected, sharing their originals' triangles. Each is one undo step.
 7. nex scripting.
