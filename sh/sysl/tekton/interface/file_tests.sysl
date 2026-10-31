@@ -683,6 +683,37 @@ while_a_file_dialog_is_up_nothing_can_change_what_it_was_asked_about()
     remove_dir_all(where).unwrap()
 end while_a_file_dialog_is_up_nothing_can_change_what_it_was_asked_about
 
+// Writes a recognisable pattern over a few kilobytes of the stack below the caller, so a closure that still
+// lives in a frame that has returned would read garbage.
+private scribble(depth: int, seed: int) -> int
+    var junk = [0; 256]
+    for i in 0..<256
+        junk[i] = seed * 31 + i + depth
+
+    if depth == 0 then junk[seed % 256] else junk[depth % 256] + scribble(depth - 1, seed + 1)
+
+@test
+a_dialog_answer_after_the_asking_frame_has_returned_still_reaches_the_document()
+    val (w, _, quits) = workspace()
+    val where = dir()
+    val file = box_file(where)
+    val held: &Held = Held(None)
+
+    w.ask_open = (answer, parent) -> held.answer = Some(answer)
+    w.open_file()
+    assert(held.answer.is_some(), "the dialog is up")
+
+    assert(scribble(24, 7) != 0, "the stack below the asking frame is overwritten")
+
+    val answer = held.answer.unwrap()
+
+    answer(chosen(file))
+    assert(!w.in_dialog.read(), "answered")
+    assert_eq(w.doc.items().len, 1, "and the file reached the document")
+    assert_eq(quits.read(), 0, "without a quit")
+    remove_dir_all(where).unwrap()
+end a_dialog_answer_after_the_asking_frame_has_returned_still_reaches_the_document
+
 @test
 the_mark_follows_undo_back_to_what_was_saved()
     val (w, d, _) = workspace()

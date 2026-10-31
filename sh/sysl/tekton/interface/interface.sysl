@@ -135,9 +135,6 @@ struct Workspace
     ask_save: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
     ask_export_stl: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
 
-    // What the last dialog answers to, which has to outlive the frame that showed it.
-    answering: Option[&Fn(DialogResult) -> unit]
-
     // Whether the next frame takes the keyboard from whichever field has it.
     release_keyboard: bool
 
@@ -204,7 +201,6 @@ struct Workspace
         val answer: &Fn(DialogResult) -> unit = r -> self.dialog_answered(asked, r)
 
         self.in_dialog.set(true)
-        self.answering = Some(answer)
         show(answer, (self.parent)())
     end show_dialog
 
@@ -981,5 +977,5 @@ new_workspace() -> &Workspace =
               signal(false),
               (answer, parent) -> ask_open_file(answer, parent, document_filters().view(), title = "Open"),
               (answer, parent) -> ask_save_file(answer, parent, document_filters().view(), title = "Save As"),
-              (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"), None, false,
+              (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"), false,
               () -> window(), title -> set_title(title), "", false)

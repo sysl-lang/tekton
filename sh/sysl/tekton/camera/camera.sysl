@@ -3,7 +3,7 @@ module sh.sysl.tekton.camera
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.space.{Mat4, Ray, Vec3, vec3}
 import sh.sysl.tekton.document.Document
-import sysl.math.{clamp, max, min}
+import sysl.math.{max, min}
 
 // A camera orbiting a point near the ground.
 //
@@ -58,7 +58,7 @@ struct Camera
     // Turn the view by a drag of this many points. The model follows the pointer.
     orbit(&self, dx: real, dy: real)
         self.turn -= dx * ORBIT_RATE
-        self.tilt = clamp(self.tilt + dy * ORBIT_RATE, MIN_TILT, MAX_TILT)
+        self.tilt = (self.tilt + dy * ORBIT_RATE).clamp(MIN_TILT, MAX_TILT)
 
     // Slide the view by a drag of this many points, across a viewport this many points tall, so what is at
     // the target's depth stays under the pointer.
@@ -66,13 +66,12 @@ struct Camera
         val scale = self.half_height() * 2.0 / height
         val t = self.target - self.right() * (dx * scale) + self.up() * (dy * scale)
 
-        self.target = Vec3(clamp(t.x, -PAN_LIMIT, PAN_LIMIT), clamp(t.y, -PAN_LIMIT, PAN_LIMIT),
-                           clamp(t.z, 0.0, LIFT_LIMIT))
+        self.target = Vec3(t.x.clamp(-PAN_LIMIT, PAN_LIMIT), t.y.clamp(-PAN_LIMIT, PAN_LIMIT), t.z.clamp(0.0, LIFT_LIMIT))
     end pan
 
     // Move toward the view's centre, or away, by a turn of the wheel in points. Positive is toward.
     zoom(&self, amount: real) =
-        self.distance = clamp(self.distance * (-amount * ZOOM_RATE).exp(), MIN_DISTANCE, MAX_DISTANCE)
+        self.distance = (self.distance * (-amount * ZOOM_RATE).exp()).clamp(MIN_DISTANCE, MAX_DISTANCE)
 
     // Look at everything in the document, from far enough back that it all fits.
     frame(&self, doc: &Document)
@@ -92,7 +91,7 @@ struct Camera
         val across = (high - low).length()
 
         self.target = (low + high) * 0.5
-        self.distance = clamp(across * FRAME_MARGIN / (self.fov * 0.5).tan() * 0.5, MIN_DISTANCE, MAX_DISTANCE)
+        self.distance = (across * FRAME_MARGIN / (self.fov * 0.5).tan() * 0.5).clamp(MIN_DISTANCE, MAX_DISTANCE)
     end frame
 
     // Frame the document, if the last shape placed has landed outside what is in view at this aspect.

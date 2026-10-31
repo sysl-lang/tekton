@@ -160,7 +160,7 @@ struct Drag
         val up = self.start.turned(Vec3(0.0, 0.0, 1.0))
         val travel = line_travel(camera, self.grab, up, width, height, dx, dy)
         val s = self.sides()
-        val z = clamp(to_grid(s.z + travel, k), MIN_SIZE, MAX_SIZE)
+        val z = to_grid(s.z + travel, k).clamp(MIN_SIZE, MAX_SIZE)
 
         if !k.keep then return self.resized(Vec3(s.x, s.y, z), self.base_middle())
 
@@ -186,8 +186,8 @@ struct Drag
 
             return self.resized(proportional(s, wanted), fixed)
 
-        self.resized(Vec3(clamp(to_grid(along.x * cx, k), MIN_SIZE, MAX_SIZE),
-                          clamp(to_grid(along.y * cy, k), MIN_SIZE, MAX_SIZE), s.z), fixed)
+        self.resized(Vec3(to_grid(along.x * cx, k).clamp(MIN_SIZE, MAX_SIZE),
+                          to_grid(along.y * cy, k).clamp(MIN_SIZE, MAX_SIZE), s.z), fixed)
     end resize_corner
 
     private turn(self, camera: &Camera, ray: Ray, width: real, height: real, x: real, y: real, axis: int, k: DragKeys) -> Transform
