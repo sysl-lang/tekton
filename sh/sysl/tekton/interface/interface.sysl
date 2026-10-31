@@ -4,7 +4,7 @@ import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
 import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
                      ask_save_file, message_button}
-import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform, new_document, primitive_name}
+import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Primitive, Transform, new_document, primitive_name}
 import sh.sysl.tekton.export.export_stl
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
@@ -347,6 +347,12 @@ struct Workspace
 
     delete(&self) = if !self.is_editing() then self.answer(self.doc.delete_selected())
 
+    mirror(&self, axis: int) = if !self.is_editing() then self.answer(self.doc.mirror_selected(axis))
+
+    align(&self, axis: int, edge: Edge) = if !self.is_editing() then self.answer(self.doc.align_selected(axis, edge))
+
+    drop_to_bed(&self) = if !self.is_editing() then self.answer(self.doc.drop_selected())
+
     undo(&self)
         if !self.is_editing()
             self.doc.undo()
@@ -395,6 +401,11 @@ struct Workspace
         if code == u32(u8('g'))
             if !repeat
                 if shift then self.ungroup() else self.group()
+
+            return true
+
+        if code == u32(u8('b'))
+            if !repeat then self.drop_to_bed()
 
             return true
 
@@ -634,6 +645,21 @@ struct Workspace
                                separator(),
                                item("Solid", () -> self.set_hole(false), enabled = doc.can_set_hole(false)),
                                item("Hole", () -> self.set_hole(true), enabled = doc.can_set_hole(true))]))
+        all.push(menu("Arrange", [item("Mirror X", () -> self.mirror(0), enabled = doc.can_arrange),
+                                  item("Mirror Y", () -> self.mirror(1), enabled = doc.can_arrange),
+                                  item("Mirror Z", () -> self.mirror(2), enabled = doc.can_arrange),
+                                  separator(),
+                                  item("Align Left", () -> self.align(0, Edge.Min), enabled = doc.can_align),
+                                  item("Align Centre X", () -> self.align(0, Edge.Centre), enabled = doc.can_align),
+                                  item("Align Right", () -> self.align(0, Edge.Max), enabled = doc.can_align),
+                                  item("Align Front", () -> self.align(1, Edge.Min), enabled = doc.can_align),
+                                  item("Align Centre Y", () -> self.align(1, Edge.Centre), enabled = doc.can_align),
+                                  item("Align Back", () -> self.align(1, Edge.Max), enabled = doc.can_align),
+                                  item("Align Bottom", () -> self.align(2, Edge.Min), enabled = doc.can_align),
+                                  item("Align Centre Z", () -> self.align(2, Edge.Centre), enabled = doc.can_align),
+                                  item("Align Top", () -> self.align(2, Edge.Max), enabled = doc.can_align),
+                                  separator(),
+                                  item("Drop to Bed", () -> self.drop_to_bed(), "Cmd+B", enabled = doc.can_arrange)]))
         all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0)]))
         all
     end menus

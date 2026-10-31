@@ -145,4 +145,9 @@ their own tests, so most changes never need the whole application linked or a wi
 5. Saving and opening, then STL and 3MF export.
 6. Printing: the printer's bed in the viewport, control over facets on round shapes, measuring, align, mirror
    and array, hole clearances, chamfers, text.
+   - Mirror and align, in an Arrange menu: Mirror X/Y/Z reflects the selection along a ground axis through the
+     middle of its box, stored as a node's reflection along its own nearest axis (`mirror` in a file) so a
+     transform's scale stays positive and exported triangles face outward; Align lines up the low side, middle
+     or high side of two or more boxes on one axis; Drop to Bed (Cmd+B) lowers or raises the selection onto z = 0.
+     Each is one undo step.
 7. nex scripting.

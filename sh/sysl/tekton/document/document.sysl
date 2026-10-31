@@ -70,6 +70,10 @@ primitive_name(p: Primitive) -> string =
         Cone -> "Cone"
         Torus -> "Torus"
 
+// The axes a node is reflected along, as a model's text says them: nothing where it is not reflected at all.
+private mirror_text(m: Mirror) -> string =
+    if !m.any then "" else s" mirror:${if m.x then "x" else ""}${if m.y then "y" else ""}${if m.z then "z" else ""}"
+
 // What a node computes. A group's solid is its solid children joined, with its hole children cut out.
 enum Operation
     Shape(primitive: Primitive)
@@ -223,11 +227,32 @@ struct Derived
     local: Option[&Manifold]
     mesh: Option[&Mesh]
 
+// Which of a node's own axes its solid is reflected along, through the middle of its own box, before its
+// transform.
+//
+// **A reflection is the node's, never its transform's.** A `Transform` keeps its scale above zero, so sizes,
+// handles and a composed group stay what they were, and the triangles a mirrored node is drawn and exported with
+// come from the kernel already facing outward.
+struct Mirror derives Eq
+    x: bool
+    y: bool
+    z: bool
+
+    any -> bool = self.x || self.y || self.z
+
+    on(self, axis: int) -> bool = [self.x, self.y, self.z][axis]
+
+    // The same with one axis reflected once more.
+    flipped(self, axis: int) -> Mirror = Mirror(self.x != (axis == 0), self.y != (axis == 1), self.z != (axis == 2))
+
+val NO_MIRROR = Mirror(false, false, false)
+
 // One operation in the tree, with what the kernel last derived from it.
 struct Node
     id: int
     operation: Operation
     transform: Transform
+    mirror: Mirror
     tint: int
 
     // Whether a parent cuts this out of its solids instead of joining it to them.
@@ -250,16 +275,21 @@ struct Node
 
     // This node somewhere else: the same triangles.
     private with_transform(&self, t: Transform) -> &Node =
-        Node(self.id, self.operation, t, self.tint, self.hole, self.children, self.derived, None, None)
+        Node(self.id, self.operation, t, self.mirror, self.tint, self.hole, self.children, self.derived, None, None)
+
+    // This node reflected otherwise and placed by `t`: its own solid is another, so nothing derived holds.
+    private with_mirror(&self, t: Transform, m: Mirror) -> &Node =
+        Node(self.id, self.operation, t, m, self.tint, self.hole, self.children, Derived(None, None), None, None)
 
     // This node as solid or as hole: the same triangles in the same place.
     private with_hole(&self, hole: bool) -> &Node =
-        Node(self.id, self.operation, self.transform, self.tint, hole, self.children, self.derived, self.solid,
-             self.bounds)
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, hole, self.children, self.derived,
+             self.solid, self.bounds)
 
     // This node made of other children, so nothing derived from the old ones holds.
     private with_children(&self, children: Buf[&Node]) -> &Node =
-        Node(self.id, self.operation, self.transform, self.tint, self.hole, children, Derived(None, None), None, None)
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, children,
+             Derived(None, None), None, None)
 
     // This tree with the node of `with`'s id replaced by `with`, sharing everything off the path to it; or
     // nothing, if that id is not here.
@@ -293,7 +323,7 @@ struct Node
         for child in self.children.view() do parts = s"${parts}${child.model()}"
 
         s"${self.id} ${name} ${self.tint} ${self.hole} ${t.translation.x} ${t.translation.y} ${t.translation.z} " +
-        s"${q.w} ${q.x} ${q.y} ${q.z} ${t.scale.x} ${t.scale.y} ${t.scale.z} (${parts})"
+        s"${q.w} ${q.x} ${q.y} ${q.z} ${t.scale.x} ${t.scale.y} ${t.scale.z}${mirror_text(self.mirror)} (${parts})"
     end model
 
     private find(&self, id: int) -> Option[&Node]
@@ -554,7 +584,8 @@ struct Document
 
         for item in self.items() do items.push(item)
 
-        items.push(Node(id, Operation.Shape(p), moved_to(at), id - 1, false, buf(), Derived(None, None), None, None))
+        items.push(Node(id, Operation.Shape(p), moved_to(at), NO_MIRROR, id - 1, false, buf(), Derived(None, None),
+                        None, None))
         self.put_items(items)
         self.next_id += 1
         self.last_placed = Some(id)
@@ -686,7 +717,7 @@ struct Document
 
                 if tint.is_none() && !item.hole then tint = Some(item.tint)
 
-        val group = Node(self.next_id, Operation.Group, moved_to(origin), tint.unwrap(), false, parts,
+        val group = Node(self.next_id, Operation.Group, moved_to(origin), NO_MIRROR, tint.unwrap(), false, parts,
                          Derived(None, None), None, None)
         val joined = self.local_of(group)
 
@@ -753,11 +784,12 @@ struct Document
                 items.push(item)
                 chosen.push(item.id)
             else
-                for part in item.children.view()
+                for each in item.children.view()
+                    val part = self.reflected_in(item, each)
                     val freed = composed(item.transform, part.transform) match
                         Some(t) -> part.with_transform(t)
                         None if item.children.len() == 1 -> item
-                        None -> self.wrapped_part(item, part)
+                        None -> self.wrapped_part(item, each)
 
                     items.push(freed)
                     chosen.push(freed.id)
@@ -778,8 +810,147 @@ struct Document
 
         self.next_id += 1
 
-        Node(id, Operation.Group, group.transform, part.tint, part.hole, inside, Derived(None, None), None, None)
+        Node(id, Operation.Group, group.transform, group.mirror, part.tint, part.hole, inside, Derived(None, None),
+             None, None)
     end wrapped_part
+
+    // Whether a mirror and a drop have something to work on.
+    can_arrange -> bool = self.selection.len() > 0
+
+    // Whether `align_selected` has what it asks for: two or more things.
+    can_align -> bool = self.selection.len() > 1
+
+    // The command behind Mirror: what is selected is reflected along an axis of the ground, through the middle of
+    // the box around all of it, and stays in that box.
+    mirror_selected(&self, axis: int) -> Result[unit, string]
+        val chosen = self.selected_items()
+
+        if chosen.len() == 0 then return Err("Nothing is selected")
+
+        val middle = self.extent(chosen.view()).center().axis(axis)
+        var changed: Buf[&Node] = buf()
+
+        for node in chosen.view() do changed.push(self.reflected(node, axis, middle))
+
+        self.put_arranged(changed)
+        Ok(())
+    end mirror_selected
+
+    // The command behind Align: each selected thing moves along an axis until the low side, the middle or the high
+    // side of its box meets that of the box around them all.
+    align_selected(&self, axis: int, edge: Edge) -> Result[unit, string]
+        val chosen = self.selected_items()
+
+        if chosen.len() < 2 then return Err("Select two or more to align")
+
+        val all = self.extent(chosen.view())
+        var changed: Buf[&Node] = buf()
+
+        for node in chosen.view()
+            changed.push(shifted(node, axis, edge_of(all, edge, axis) - edge_of(self.bounds_of(node), edge, axis)))
+
+        self.put_arranged(changed)
+        Ok(())
+    end align_selected
+
+    // The command behind Drop to Bed: what is selected moves straight down or up, as one, until its lowest point
+    // is on the ground.
+    drop_selected(&self) -> Result[unit, string]
+        val chosen = self.selected_items()
+
+        if chosen.len() == 0 then return Err("Nothing is selected")
+
+        val low = self.extent(chosen.view()).min.z
+        var changed: Buf[&Node] = buf()
+
+        for node in chosen.view() do changed.push(shifted(node, 2, -low))
+
+        self.put_arranged(changed)
+        Ok(())
+    end drop_selected
+
+    // The things on the ground that are selected, in the order they stand.
+    private selected_items(&self) -> Buf[&Node]
+        var chosen: Buf[&Node] = buf()
+
+        for item in self.items() do if self.is_selected(item.id) then chosen.push(item)
+
+        chosen
+    end selected_items
+
+    // The box around all of these where they stand.
+    private extent(&self, nodes: []&Node) -> Aabb
+        var e = self.bounds_of(nodes[0])
+
+        for node in nodes
+            val b = self.bounds_of(node)
+
+            e = Aabb(Vec3(min(e.min.x, b.min.x), min(e.min.y, b.min.y), min(e.min.z, b.min.z)),
+                     Vec3(max(e.max.x, b.max.x), max(e.max.y, b.max.y), max(e.max.z, b.max.z)))
+
+        e
+    end extent
+
+    // These in place of the things on the ground with their ids, as one step; or nothing, where each is as it was.
+    private put_arranged(&self, changed: Buf[&Node])
+        var any = false
+
+        for node in changed.view()
+            self.find(node.id) match
+                Some(was) -> if was.transform != node.transform || was.mirror != node.mirror then any = true
+                None -> ()
+
+        if !any then return
+
+        self.record()
+
+        var items: Buf[&Node] = buf()
+
+        for item in self.items()
+            var next = item
+
+            for node in changed.view() do if node.id == item.id then next = node
+
+            items.push(next)
+
+        self.put_items(items)
+    end put_arranged
+
+    // A part of `group` with the group's own reflection given to it, so it can leave the group and stay as it was.
+    private reflected_in(&self, group: &Node, part: &Node) -> &Node
+        if !group.mirror.any then return part
+
+        val middle = self.local_bounds(group).center()
+        var out = part
+
+        for axis in 0..<3 do if group.mirror.on(axis) then out = self.reflected(out, axis, middle.axis(axis))
+
+        out
+    end reflected_in
+
+    // This node reflected through the plane of its parent's space where coordinate `axis` is `at`.
+    //
+    // **A reflection along an axis of the parent is a reflection along the node's own axis nearest it, and a new
+    // turn**: the old one between half turns about the two axes. A half turn about an axis is that axis as a
+    // quaternion, so the new turn's numbers are the old ones moved and negated, and reflecting twice gives the old
+    // turn back exactly. The middle of the node's own box, which its reflection leaves where it is, lands where
+    // the plane sends it.
+    private reflected(&self, node: &Node, axis: int, at: real) -> &Node
+        val t = node.transform
+        val own = vec3(t.rotation.conjugate().rotate(unit_axis(axis).array()))
+        var nearest = 0
+
+        for i in 1..<3 do if own.axis(i).abs() > own.axis(nearest).abs() then nearest = i
+
+        val product = half_turn(axis) * t.rotation * half_turn(nearest)
+        val turn = positive_zeros(if product.dot(t.rotation) < 0.0 then -product else product)
+        val middle = self.local_bounds(node).center().times(t.scale)
+        val shift = 2.0 * (at - (t.translation + t.turned(middle)).axis(axis))
+        val moved = t.translation.with_axis(axis, t.translation.axis(axis) + shift)
+        val placed = Transform(moved + (t.turned(middle) - vec3(turn.rotate(middle.array()))), turn, t.scale)
+
+        node.with_mirror(placed, node.mirror.flipped(nearest))
+    end reflected
 
     // The command behind a typed position.
     move_to(&self, id: int, p: Vec3) -> Result[unit, string]
@@ -889,7 +1060,7 @@ struct Document
 
         self.builds += 1
 
-        val s = node.operation match
+        val made = node.operation match
             Shape(p) -> primitive_solid(p)
             Group ->
                 var solids: Buf[&Manifold] = buf()
@@ -905,8 +1076,10 @@ struct Document
                 else
                     batch(solids.view(), Op.Add).difference(batch(holes.view(), Op.Add))
 
-        node.derived.local = Some(s)
-        s
+        val own =if node.mirror.any then mirrored(made, node.mirror) else made
+
+        node.derived.local = Some(own)
+        own
     end local_of
 
     // A node's solid in its parent's space, computed once until an edit clears it.
@@ -996,19 +1169,20 @@ new_document(next_revision: int = 1) -> &Document = restored_document(buf(), 1, 
 // **`next_revision` goes on from the document this one replaces**, because a renderer knows a mesh by its node's
 // id and its revision, and a new document's first shape has the id an old one's did.
 restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], next_revision: int) -> &Document
-    val root = Node(0, Operation.Group, identity_transform(), 0, false, items, Derived(None, None), None, None)
+    val root = Node(0, Operation.Group, identity_transform(), NO_MIRROR, 0, false, items, Derived(None, None), None,
+                    None)
 
     Document(root, buf(), last_placed, next_id, 0, next_revision, buf(), buf(), false, None, HISTORY_MESH_BYTES,
              model_text(root), root, false)
 end restored_document
 
 // A shape as a file says it.
-restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool) -> &Node =
-    Node(id, Operation.Shape(p), t, tint, hole, buf(), Derived(None, None), None, None)
+restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool, mirror: Mirror = NO_MIRROR) -> &Node =
+    Node(id, Operation.Shape(p), t, mirror, tint, hole, buf(), Derived(None, None), None, None)
 
 // A group as a file says it.
-restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node]) -> &Node =
-    Node(id, Operation.Group, t, tint, hole, parts, Derived(None, None), None, None)
+restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node], mirror: Mirror = NO_MIRROR) -> &Node =
+    Node(id, Operation.Group, t, mirror, tint, hole, parts, Derived(None, None), None, None)
 
 // What makes a tree what it is, as text.
 private model_text(node: &Node) -> string = node.model()
@@ -1041,6 +1215,35 @@ end scale_for
 keeping(t: Transform, point: Vec3, before: Transform) -> Transform =
     Transform(before.apply(point) - t.turned(point.times(t.scale)), t.rotation, t.scale)
 
+// Which side of a box an alignment lines up.
+enum Edge
+    Min
+    Centre
+    Max
+
+private edge_of(b: Aabb, edge: Edge, axis: int) -> real =
+    edge match
+        Min -> b.min.axis(axis)
+        Centre -> b.center().axis(axis)
+        Max -> b.max.axis(axis)
+
+// This node moved along one axis of its parent's space.
+private shifted(node: &Node, axis: int, by: real) -> &Node
+    val t = node.transform
+
+    node.with_transform(Transform(t.translation.with_axis(axis, t.translation.axis(axis) + by), t.rotation, t.scale))
+
+private unit_axis(axis: int) -> Vec3 = Vec3(0.0, 0.0, 0.0).with_axis(axis, 1.0)
+
+// The half turn about an axis, which as a quaternion is the axis itself.
+private half_turn(axis: int) -> Quaternion[real]
+    val a = unit_axis(axis)
+
+    Quaternion(0.0, a.x, a.y, a.z)
+
+// The same quaternion with any negative zero made zero, so a turn that comes back to where it was reads the same.
+private positive_zeros(q: Quaternion[real]) -> Quaternion[real] = Quaternion(q.w + 0.0, q.x + 0.0, q.y + 0.0, q.z + 0.0)
+
 private snapped(v: real) -> real = (v / 5.0).ceil() * 5.0
 
 // The solid of a primitive as a palette makes it: 20 mm across, centred on the z axis, standing on the
@@ -1066,6 +1269,20 @@ private bounds_of_solid(m: &Manifold) -> Aabb
     val b = m.bounding_box()
 
     Aabb(from_kernel(b.min()), from_kernel(b.max()))
+
+// A solid reflected along these of its axes through the middle of its own box, so it stands where it stood.
+private mirrored(m: &Manifold, mirror: Mirror) -> &Manifold
+    if m.is_empty() then return m
+
+    val c = bounds_of_solid(m).center()
+    var s = m.translate(-c.x, -c.y, -c.z)
+
+    if mirror.x then s = s.mirror(1.0, 0.0, 0.0)
+    if mirror.y then s = s.mirror(0.0, 1.0, 0.0)
+    if mirror.z then s = s.mirror(0.0, 0.0, 1.0)
+
+    s.translate(c.x, c.y, c.z)
+end mirrored
 
 private from_kernel(v: KernelVec3) -> Vec3 = Vec3(v.x, v.y, v.z)
 

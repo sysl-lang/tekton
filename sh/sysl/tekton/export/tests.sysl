@@ -434,3 +434,29 @@ a_name_is_escaped_wherever_it_is_written()
     assert(part.contains("name=\"a&lt;b\">"), "in the object's name")
     assert(!part.contains("a<b"), "nowhere raw")
 end a_name_is_escaped_wherever_it_is_written
+
+// A mirrored part is reflected in the file too, and its triangles still face outward: a slicer finds the same
+// positive volume, and the cone's point is where the reflection put it.
+@test
+a_mirrored_shape_exports_reflected_and_facing_outward()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Cone)
+
+    val plain = volume_of(facets_of(stl_bytes(doc.final_mesh().unwrap())))
+
+    for axis in [2, 0]
+        doc.mirror_selected(axis).unwrap()
+
+    val facets = facets_of(stl_bytes(doc.final_mesh().unwrap()))
+    var widest_low = 0.0
+
+    assert(plain > 0.0, "the plain cone faces outward")
+    assert((volume_of(facets) - plain).abs() < 1.0e-3, "the mirrored one encloses the same, positively")
+
+    for f in facets.view()
+        for p in f.corners
+            if p.z < 1.0e-4 then widest_low = if p.x.abs() > widest_low then p.x.abs() else widest_low
+
+    assert(widest_low < 1.0e-4, "the point is on the ground")
+end a_mirrored_shape_exports_reflected_and_facing_outward

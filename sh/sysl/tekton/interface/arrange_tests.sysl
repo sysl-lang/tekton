@@ -1,0 +1,120 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.sdl3.KMOD_GUI
+import sh.sysl.tekton.document.{Edge, Primitive, Transform}
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+
+// The Arrange menu: which rows are live, and that a row does what it says.
+
+private val WHOLE: Rect = Rect(0, 0, 1280, 800)
+
+// Whether a row of the Arrange menu is live, reading the window with the menu open and leaving it closed.
+private arrange_live(w: &Workspace, c: *Recorder, label: string) -> bool
+    assert(w.show_menu("Arrange"), "an Arrange menu")
+
+    val v = w.tree()
+
+    render(v, c, WHOLE)
+
+    val row = snapshot(v, c, WHOLE).find(s"menu.Arrange.${label}").unwrap()
+
+    w.open_menu.set(NO_MENU)
+    row.marks.index_of("disabled").is_none()
+end arrange_live
+
+private val MIRRORS = ["Mirror X", "Mirror Y", "Mirror Z"]
+private val ALIGNS = ["Align Left", "Align Centre X", "Align Right", "Align Front", "Align Centre Y", "Align Back",
+                      "Align Bottom", "Align Centre Z", "Align Top"]
+
+// A box at the origin and a box at x = 60 and z = 30.
+private apart() -> (&Workspace, int, int)
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+
+    w.doc.set_transform(a, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    w.doc.set_transform(b, Transform(Vec3(60.0, 0.0, 30.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    (w, a, b)
+end apart
+
+@test
+the_arrange_menu_stands_between_edit_and_view()
+    val w = new_workspace()
+
+    for (title, at) in [("Edit", 1), ("Arrange", 2), ("View", 3)]
+        assert(w.show_menu(title), title)
+        assert_eq(w.open_menu.read(), at, title)
+
+    w.open_menu.set(NO_MENU)
+end the_arrange_menu_stands_between_edit_and_view
+
+@test
+with_nothing_selected_every_arrange_row_is_dead()
+    val (w, _, _) = apart()
+    var c = recorder()
+
+    w.doc.select(None)
+
+    for label in MIRRORS do assert(!arrange_live(w, &c, label), label)
+    for label in ALIGNS do assert(!arrange_live(w, &c, label), label)
+
+    assert(!arrange_live(w, &c, "Drop to Bed"), "drop")
+end with_nothing_selected_every_arrange_row_is_dead
+
+@test
+one_selected_may_be_mirrored_and_dropped_but_not_aligned()
+    val (w, _, b) = apart()
+    var c = recorder()
+
+    w.doc.select(Some(b))
+
+    for label in MIRRORS do assert(arrange_live(w, &c, label), label)
+    for label in ALIGNS do assert(!arrange_live(w, &c, label), label)
+
+    assert(arrange_live(w, &c, "Drop to Bed"), "drop")
+end one_selected_may_be_mirrored_and_dropped_but_not_aligned
+
+@test
+two_selected_may_be_aligned()
+    val (w, a, b) = apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+
+    for label in ALIGNS do assert(arrange_live(w, &c, label), label)
+end two_selected_may_be_aligned
+
+@test
+the_rows_do_what_they_say()
+    val (w, a, b) = apart()
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+    w.align(2, Edge.Max)
+    assert_eq(w.doc.bounds_of(w.doc.find(a).unwrap()).max.z, 50.0, "tops lined up")
+    assert_eq(w.problem.read(), "", "nothing to complain of")
+
+    w.drop_to_bed()
+    assert_eq(w.doc.bounds_of(w.doc.find(a).unwrap()).min.z, 0.0, "dropped")
+
+    w.mirror(0)
+    assert(w.doc.find(a).unwrap().mirror.x, "mirrored")
+
+    w.doc.select(None)
+    w.mirror(0)
+    assert(w.problem.read() != "", "with nothing selected it says why")
+end the_rows_do_what_they_say
+
+@test
+command_b_drops_the_selection_to_the_bed()
+    val (w, _, b) = apart()
+
+    w.doc.select(Some(b))
+    assert(w.shortcut(98, KMOD_GUI, false), "taken")
+    assert_eq(w.doc.bounds_of(w.doc.find(b).unwrap()).min.z, 0.0, "on the bed")
+    assert(!w.shortcut(98, 0u16, false), "not without command")
+end command_b_drops_the_selection_to_the_bed

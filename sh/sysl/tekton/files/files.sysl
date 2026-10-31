@@ -4,7 +4,7 @@ import sh.sysl.hocon.{Value, parse}
 import sh.sysl.parsing.{Source, Span, source_of}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.DialogResult
-import sh.sysl.tekton.document.{Document, Node, Operation, PRIMITIVES, Primitive, Transform, primitive_name, restored_document, restored_group, restored_shape}
+import sh.sysl.tekton.document.{Document, Mirror, NO_MIRROR, Node, Operation, PRIMITIVES, Primitive, Transform, primitive_name, restored_document, restored_group, restored_shape}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf, byte_sink}
 import sysl.container.{Set, set}
@@ -39,7 +39,8 @@ import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
 //
 // A file holds the tree and what the next edit needs: `next` is the id the next node gets, which also chooses
 // its colour, and `last` the thing the next shape is placed beside. Meshes are derived, and the selection and the
-// history belong to a session.
+// history belong to a session. A node reflected along some of its own axes says which, as `mirror = [true, false,
+// false]` after its `scale`, and one that is not says nothing.
 //
 // **Every number is written as the shortest text that reads back as the same value**, so a transform comes back
 // bit for bit.
@@ -95,6 +96,8 @@ private write_node(b: &StrBuilder, node: &Node, indent: string)
     b.push(s"${inner}at = ${numbers_text([t.translation.x, t.translation.y, t.translation.z])}\n")
     b.push(s"${inner}turn = ${numbers_text([q.w, q.x, q.y, q.z])}\n")
     b.push(s"${inner}scale = ${numbers_text([t.scale.x, t.scale.y, t.scale.z])}\n")
+
+    if node.mirror.any then b.push(s"${inner}mirror = [${node.mirror.x}, ${node.mirror.y}, ${node.mirror.z}]\n")
 
     if node.is_group
         b.push(s"${inner}parts = [\n")
@@ -185,6 +188,22 @@ private struct Reading
         Ok(Transform(Vec3(at[0], at[1], at[2]), Quaternion(q[0], q[1], q[2], q[3]), Vec3(s[0], s[1], s[2])))
     end transform
 
+    // Which of a node's axes it is reflected along: none, where the file does not say.
+    mirror(&self, node: Value) -> Result[Mirror, string]
+        val v = node.get("mirror") match
+            Some(given) -> given
+            None -> return Ok(NO_MIRROR)
+        val wrong = self.refusal(v.span, "`mirror` must be a list of three of true or false")
+
+        if !v.is_arr() || v.items().len() != 3 then return Err(wrong)
+
+        var on: Buf[bool] = buf()
+
+        for item in v.items().view() do on.push(item.as_bool().ok_or(wrong)?)
+
+        Ok(Mirror(on[0], on[1], on[2]))
+    end mirror
+
     // One node and everything under it.
     node(&self, v: Value) -> Result[&Node, string]
         if !v.is_obj() then return Err(self.refusal(v.span, "a node must be an object"))
@@ -199,6 +218,7 @@ private struct Reading
         val hole_value = self.needed(v, "hole")?
         val hole = hole_value.as_bool().ok_or(self.refusal(hole_value.span, "`hole` must be true or false"))?
         val t = self.transform(v)?
+        val mirror = self.mirror(v)?
 
         if id == 0 then return Err(self.refusal(v.span, "`id` must be above zero"))
         if long(id) >= self.next_id then return Err(self.refusal(v.span, s"`id` ${id} is not below `next`"))
@@ -217,13 +237,13 @@ private struct Reading
 
             for item in listed.items().view() do children.push(self.node(item)?)
 
-            return Ok(restored_group(id, t, tint, hole, children))
+            return Ok(restored_group(id, t, tint, hole, children, mirror))
 
         val primitive = primitive_named(kind).ok_or(self.refusal(kind_value.span, s"unknown kind `${kind}`"))?
 
         if parts.is_some() then return Err(self.refusal(v.span, s"a ${kind} has no `parts`"))
 
-        Ok(restored_shape(id, primitive, t, tint, hole))
+        Ok(restored_shape(id, primitive, t, tint, hole, mirror))
     end node
 
     line_of_id(&self, id: int) -> usize
@@ -235,7 +255,7 @@ private struct Reading
 end Reading
 
 private is_node_key(key: string) -> bool
-    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "parts"]
+    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "mirror", "parts"]
         if k == key then return true
 
     false
