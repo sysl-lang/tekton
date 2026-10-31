@@ -8,38 +8,24 @@
 //     tekton --demo --menu Edit                       with that menu of the bar open
 //     tekton --holes                                a part with a hole cut in it, and a hole not yet grouped
 //     tekton --demo --control /tmp/tekton.sock        driven over HTTP on that socket, in the window as usual
+//     tekton --demo --control /tmp/tekton.sock --hidden   the same with no window on the screen
 //
 // The shaders are Metal Shading Language, so this runs on a Mac, in a shell inside the desktop session.
 
 import sh.sysl.sdl3.{GPU_SHADERFORMAT_MSL, deliver_dialogs}
+import sh.sysl.sdl3.control.{Request, Routed}
 import sh.sysl.tekton.interface.new_workspace
+import sh.sysl.tekton.live.{routes as live_routes}
+import sh.sysl.tekton.options.parse_options
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.signal
 import sh.sysl.ui_sdl.{app, run, save_frame, stop}
-import sysl.text.{parse_int, parse_real, split}
+import sysl.text.{parse_int, split}
 
 // How many frames a shot lets pass first, for the window and the shaders to settle.
 const SHOT_SETTLE: int = 5
-
-// `WxH`, if it is that.
-private parse_size(s: string) -> Option[(int, int)]
-    val at = s.index_of("x")?
-    val w = parse_int(s[0..<at]).ok()?
-    val h = parse_int(s[at + 1..<s.len]).ok()?
-
-    Some((w, h))
-end parse_size
-
-// `TURN,TILT` in radians, if it is that.
-private parse_view(s: string) -> Option[(real, real)]
-    val at = s.index_of(",")?
-    val turn = parse_real(s[0..<at]).ok()?
-    val tilt = parse_real(s[at + 1..<s.len]).ok()?
-
-    Some((turn, tilt))
-end parse_view
 
 // A box with a round hole cut through it, in a group, and beside it a block with a hole not yet grouped.
 private add_hole_scene(doc: &Document)
@@ -64,47 +50,14 @@ private add_hole_scene(doc: &Document)
 end add_hole_scene
 
 main(args: []string) -> Result[unit, string]
-    var shot = ""
-    var width = 1280
-    var height = 800
-    var demo = false
-    var holes = false
-    var selected = ""
-    var view: Option[(real, real)] = None
-    var opened = ""
-    var file = ""
-    var control = ""
-    var i = 1
-
-    while i < args.len
-        args[i] match
-            "--demo" -> demo = true
-            "--holes" -> holes = true
-            "--shot" ->
-                i += 1
-                shot = args[i]
-            "--size" ->
-                i += 1
-                (width, height) = parse_size(args[i]).ok_or(s"not a size: ${args[i]}")?
-            "--select" ->
-                i += 1
-                selected = args[i]
-            "--view" ->
-                i += 1
-                view = Some(parse_view(args[i]).ok_or(s"not a view: ${args[i]}")?)
-            "--menu" ->
-                i += 1
-                opened = args[i]
-            "--control" ->
-                i += 1
-                control = args[i]
-            other ->
-                if other.starts_with("--") then return Err(s"unknown option: ${other}")
-
-                file = other
-
-        i += 1
-
+    val o = parse_options(args)?
+    val shot = o.shot
+    val demo = o.demo
+    val holes = o.holes
+    val selected = o.selected
+    val view = o.view
+    val opened = o.opened
+    val file = o.file
     val w = new_workspace()
 
     if file != "" && !w.open_path(file) then eprints(s"${w.problem.read()}\n")
@@ -135,8 +88,10 @@ main(args: []string) -> Result[unit, string]
 
     val frames = signal(0)
 
-    run(app(w.title(), () -> w.tree(), () -> 0xDDE2E9u32, width, height, gpu = GPU_SHADERFORMAT_MSL, control = control,
-            on_event = e ->
+    val routes: &Fn(Request) -> Routed = req -> live_routes(w, req)
+
+    run(app(w.title(), () -> w.tree(), () -> 0xDDE2E9u32, o.width, o.height, gpu = GPU_SHADERFORMAT_MSL,
+            control = o.control, routes = routes, hidden = o.hidden, on_event = e ->
         e.kind() match
             Quit | WindowCloseRequested ->
                 w.request_quit()

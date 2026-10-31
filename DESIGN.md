@@ -111,16 +111,26 @@ Everything runs without a window, so a test or an agent can use the application 
   `/shot` is the real frame, the 3D viewport included. Without the flag, nothing listens.
   **A person can watch it happen.** Control runs in the real window, and the controlled pointer is drawn
   over the frame with a mark while a button is held; a drag moves at a watchable pace.
-  **Not yet**: a `GET /tekton/state` answering the document, selection, camera, file and unsaved mark, since
-  `syslui-sdl` gives an application no way to add a route; and offscreen running, since it has no hidden
-  window.
+  **Tekton's own two routes**, added through `syslui-sdl`'s `routes` (asked before the built-ins; everything
+  else passes on to them):
+  - `GET /tekton/state` answers one line of JSON: `items` (the document's tree: each node's `id`, `kind`,
+    `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, and for a group
+    its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
+    `fov`), `file` (the path, or `null`) and `dirty`. A number JSON cannot spell is `null`.
+  - `POST /tekton/quit` quits at once, asking nothing about unsaved changes, so a session nobody can answer
+    can be ended; the answer is sent, and the program exits on the next frame. A `GET` of it is refused.
+    The window's own close still asks.
+
+  **`--hidden`**, meant with `--control`, creates the window hidden: it paints every frame as usual,
+  `/shot` reads it back, and nothing appears on the screen. It still needs a desktop session (Aqua) to
+  open at all; there is no headless mode below that.
 - **Screenshots are real frames**: the same GPU pass and interface, read back into a PNG. Pixel
   assertions run against a fixed camera and size. `--menu <title>` takes one with that menu open.
 
 Most of this belongs below Tekton, so every application gets it. sdl3 owns the socket, input
 by coordinates through `SDL_PushEvent` (the real event path), and reading a frame back into a PNG, so any
 SDL program can be controlled. syslUI adds what SDL cannot know: named controls and the snapshot of what
-is on screen. syslui-sdl joins the two. Tekton adds only its own `state` report and its viewport.
+is on screen. syslui-sdl joins the two. Tekton adds only its own `state` and `quit` routes and its viewport.
 
 **Building stays fast by keeping layers apart.** The document, kernel glue and renderer are modules with
 their own tests, so most changes never need the whole application linked or a window opened.

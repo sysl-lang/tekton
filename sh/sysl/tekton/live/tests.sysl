@@ -1,0 +1,241 @@
+module sh.sysl.tekton.live
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.sdl3.control.{Pass, Request, Respond, Routed}
+import sh.sysl.tekton.camera.new_camera
+import sh.sysl.tekton.document.{Primitive, Transform, new_document}
+import sh.sysl.tekton.interface.{Workspace, new_workspace}
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+import sysl.buf.buf
+import sysl.text.from_utf8_lossy
+
+private val IDENTITY: Quaternion[real] = Quaternion.identity()
+
+// A workspace that counts what it is asked to quit, and what it is asked about unsaved changes.
+private counted() -> (&Workspace, &Signal[int], &Signal[int])
+    val w = new_workspace()
+    val quits = signal(0)
+    val asks = signal(0)
+
+    w.quit = () -> quits.set(quits.read() + 1)
+    w.ask_changes = (title, parent) ->
+        asks.set(asks.read() + 1)
+        Ok(None)
+    (w, quits, asks)
+end counted
+
+private request(method: string, path: string) -> Request = Request(method, path, "", buf(), buf())
+
+private answer(r: Routed) -> (int, string)
+    r match
+        Respond(resp) -> (resp.status, from_utf8_lossy(resp.body.view()))
+        Pass -> panic("expected an answer")
+        _ -> panic("expected an answer")
+end answer
+
+private passes(r: Routed) -> bool
+    r match
+        Pass -> true
+        _ -> false
+end passes
+
+private put(w: &Workspace, p: Primitive, at: Vec3, scale: Vec3) -> int
+    val id = w.doc.add_shape(p)
+
+    w.doc.set_transform(id, Transform(at, IDENTITY, scale))
+    id
+end put
+
+// The camera and file a report is about, given where the tests leave them.
+private report(w: &Workspace) -> string = state_json(w.doc, w.camera, w.file, w.doc.is_dirty())
+
+@test
+private an_empty_document_reports_nothing_in_it()
+    val d = new_document()
+    val c = new_camera()
+
+    assert_eq(state_json(d, c, "", false),
+              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":null,\"dirty\":false}")
+end an_empty_document_reports_nothing_in_it
+
+@test
+private a_small_document_reports_exactly_this()
+    val w = new_workspace()
+    val a = put(w, Primitive.Box, Vec3(1.0, 2.0, 3.0), Vec3(1.0, 1.0, 1.0))
+    val b = put(w, Primitive.Sphere, Vec3(10.0, 0.0, 0.0), Vec3(2.0, 2.0, 2.0))
+
+    w.doc.select(Some(b))
+    w.file = "/tmp/part.tekton"
+
+    assert_eq(report(w),
+              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0]}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":\"/tmp/part.tekton\",\"dirty\":true}")
+    assert_eq(a, 1)
+end a_small_document_reports_exactly_this
+
+@test
+private a_group_reports_its_children_and_a_hole_says_so()
+    val w = new_workspace()
+    val box = put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+    val cut = put(w, Primitive.Cylinder, Vec3(0.0, 0.0, 0.0), Vec3(0.5, 0.5, 2.0))
+
+    w.doc.select(Some(cut))
+    w.doc.set_hole(true).expect("a hole")
+    w.doc.select(Some(box))
+    w.doc.toggle_selected(cut)
+    w.doc.group_selected().expect("a group")
+
+    val text = report(w)
+
+    assert(text.contains("\"kind\":\"group\""), text)
+    assert(text.contains("\"children\":[{\"id\":1,\"kind\":\"box\",\"hole\":false"), text)
+    assert(text.contains("{\"id\":2,\"kind\":\"cylinder\",\"hole\":true"), text)
+    assert(!text.contains("\"children\":[],"), "a shape has no children key at all")
+    val first = text.index_of("\"children\"").unwrap()
+
+    assert(text[first + 1..<text.len].index_of("\"children\"").is_none(), "only the group has them")
+end a_group_reports_its_children_and_a_hole_says_so
+
+@test
+private selection_keeps_the_order_it_was_chosen_in_and_clearing_it_empties_it()
+    val w = new_workspace()
+    val a = put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+    val b = put(w, Primitive.Cone, Vec3(50.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+
+    w.doc.select(Some(b))
+    w.doc.toggle_selected(a)
+
+    assert(report(w).contains("\"selection\":[2,1]"), report(w))
+
+    w.doc.select(None)
+
+    assert(report(w).contains("\"selection\":[]"), report(w))
+end selection_keeps_the_order_it_was_chosen_in_and_clearing_it_empties_it
+
+@test
+private a_saved_document_is_clean_and_an_edit_dirties_it()
+    val w = new_workspace()
+
+    put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+    w.doc.mark_saved()
+
+    assert(report(w).ends_with("\"dirty\":false}"), report(w))
+
+    w.doc.set_transform(1, Transform(Vec3(5.0, 0.0, 0.0), IDENTITY, Vec3(1.0, 1.0, 1.0)))
+
+    assert(report(w).ends_with("\"dirty\":true}"), report(w))
+end a_saved_document_is_clean_and_an_edit_dirties_it
+
+@test
+private a_file_name_is_escaped_as_a_json_string()
+    val d = new_document()
+    val c = new_camera()
+
+    assert(state_json(d, c, "/tmp/a \"b\" \\ c\n.tekton", false).contains("\"file\":\"/tmp/a \\\"b\\\" \\\\ c\\n.tekton\""),
+           state_json(d, c, "/tmp/a \"b\" \\ c\n.tekton", false))
+    assert(state_json(d, c, "/tmp/é.tekton", false).contains("\"file\":\"/tmp/"), "a non-ASCII name is kept whole")
+end a_file_name_is_escaped_as_a_json_string
+
+@test
+private a_number_json_cannot_spell_is_null()
+    val d = new_document()
+    val c = new_camera()
+
+    c.distance = 1.0 / 0.0
+
+    assert(state_json(d, c, "", false).contains("\"distance\":null"), state_json(d, c, "", false))
+end a_number_json_cannot_spell_is_null
+
+@test
+private the_report_is_valid_json_that_reads_back()
+    val w = new_workspace()
+
+    put(w, Primitive.Torus, Vec3(1.5, -2.5, 3.0), Vec3(1.0, 1.0, 1.0))
+
+    assert(sysl.encoding.json.parse(report(w)).is_ok(), report(w))
+    assert(sysl.encoding.json.parse(state_json(w.doc, w.camera, "/tmp/a \"q\" \\ \n.t", true)).is_ok(), "an escaped name too")
+end the_report_is_valid_json_that_reads_back
+
+@test
+private the_state_route_answers_and_leaves_the_document_alone()
+    val (w, quits, asks) = counted()
+
+    put(w, Primitive.Box, Vec3(1.0, 2.0, 3.0), Vec3(1.0, 1.0, 1.0))
+
+    val (status, body) = answer(routes(w, request("GET", "/tekton/state")))
+
+    assert_eq(status, 200)
+    assert_eq(body, report(w) + "\n")
+    assert_eq(quits.read() + asks.read(), 0, "asking is not quitting")
+end the_state_route_answers_and_leaves_the_document_alone
+
+@test
+private the_state_route_takes_get_only()
+    val (w, quits, _) = counted()
+    val (status, _) = answer(routes(w, request("POST", "/tekton/state")))
+
+    assert_eq(status, 405)
+    assert_eq(quits.read(), 0, "refused")
+end the_state_route_takes_get_only
+
+@test
+private other_paths_pass_to_the_toolkit()
+    val (w, quits, _) = counted()
+
+    assert(passes(routes(w, request("GET", "/snapshot"))), "snapshot")
+    assert(passes(routes(w, request("GET", "/state"))), "sdl3's state")
+    assert(passes(routes(w, request("POST", "/click"))), "click")
+    assert(passes(routes(w, request("GET", "/"))), "root")
+    assert(passes(routes(w, request("GET", "/tekton"))), "the prefix alone")
+    assert(passes(routes(w, request("GET", "/tekton/statex"))), "a longer name")
+    assert(passes(routes(w, request("GET", "/tekton/state/"))), "a trailing slash is another path")
+    assert(passes(routes(w, request("POST", "/tekton/other"))), "an unknown one")
+    assert_eq(quits.read(), 0, "none of them quit")
+end other_paths_pass_to_the_toolkit
+
+@test
+private the_quit_route_quits_without_asking_even_with_unsaved_changes()
+    val (w, quits, asks) = counted()
+
+    put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+
+    assert(w.doc.is_dirty(), "unsaved")
+
+    val (status, body) = answer(routes(w, request("POST", "/tekton/quit")))
+
+    assert_eq(status, 200)
+    assert_eq(body, "{\"ok\":true}\n")
+    assert_eq(quits.read(), 1, "quit")
+    assert_eq(asks.read(), 0, "and asked nothing")
+end the_quit_route_quits_without_asking_even_with_unsaved_changes
+
+@test
+private the_quit_route_ignores_a_dialog_and_an_open_question()
+    val (w, quits, asks) = counted()
+
+    w.in_dialog.set(true)
+    routes(w, request("POST", "/tekton/quit"))
+
+    assert_eq(quits.read(), 1, "a dialog does not hold it")
+    assert_eq(asks.read(), 0, "no question")
+end the_quit_route_ignores_a_dialog_and_an_open_question
+
+@test
+private the_quit_route_takes_post_only()
+    val (w, quits, _) = counted()
+    val (status, _) = answer(routes(w, request("GET", "/tekton/quit")))
+
+    assert_eq(status, 405)
+    assert_eq(quits.read(), 0, "a GET, which a browser or a prefetch can send, does not stop the program")
+end the_quit_route_takes_post_only
+
+@test
+private the_windows_own_close_still_asks()
+    val (w, quits, asks) = counted()
+
+    put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+    w.request_quit()
+
+    assert_eq(asks.read(), 1, "asked")
+    assert_eq(quits.read(), 0, "answered Cancel, so still here")
+end the_windows_own_close_still_asks

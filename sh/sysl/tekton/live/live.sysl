@@ -1,0 +1,86 @@
+module sh.sysl.tekton.live
+
+// What a session driven over its control socket can ask of Tekton beyond the toolkit's own routes: a report of
+// the document, selection, camera, file and unsaved mark, and a way to stop without anyone to answer a question.
+// Only reachable over that socket; without `--control` nothing listens.
+
+import sh.sysl.sdl3.control.{Pass, Request, Respond, Routed, error_response, json}
+import sh.sysl.tekton.camera.Camera
+import sh.sysl.tekton.document.{Document, Node, Operation, primitive_name}
+import sh.sysl.tekton.interface.Workspace
+import sh.sysl.tekton.space.Vec3
+import sysl.encoding.json.quoted
+import sysl.text.to_lower
+
+// A number as JSON. JSON has no spelling for infinity or NaN, so they are `null`.
+private number(x: real) -> string = if x.is_finite() then s"${x}" else "null"
+
+private vector(v: Vec3) -> string = s"[${number(v.x)},${number(v.y)},${number(v.z)}]"
+
+// One node and everything under it: its id, what it is, whether it cuts or joins, where it is in its
+// parent's space, how big it is along its own axes in millimetres, and how it is turned as a quaternion.
+private node_json(doc: &Document, node: &Node) -> string
+    val kind = node.operation match
+        Shape(p) -> to_lower(primitive_name(p))
+        Group -> "group"
+    val q = node.transform.rotation
+    val size = doc.size_of(node)
+    var out = s"{\"id\":${node.id},\"kind\":${quoted(kind)},\"hole\":${node.hole},"
+
+    out = out + s"\"position\":${vector(node.transform.translation)},\"size\":${vector(size)},"
+    out = out + s"\"rotation\":[${number(q.w)},${number(q.x)},${number(q.y)},${number(q.z)}]"
+
+    if node.is_group
+        out = out + ",\"children\":["
+
+        for i in 0..<node.children.len()
+            if i > 0 then out = out + ","
+
+            out = out + node_json(doc, node.children[i])
+
+        out = out + "]"
+
+    out + "}"
+end node_json
+
+// The whole report, on one line: the tree, the selected ids in the order they were chosen, the camera, the file
+// (or `null` before there is one) and whether anything is unsaved.
+state_json(doc: &Document, camera: &Camera, file: string, dirty: bool) -> string
+    var out = "{\"items\":["
+
+    val items = doc.items()
+
+    for i in 0..<items.len
+        if i > 0 then out = out + ","
+
+        out = out + node_json(doc, items[i])
+
+    out = out + "],\"selection\":["
+
+    for i in 0..<doc.selection.len()
+        if i > 0 then out = out + ","
+
+        out = out + s"${doc.selection[i]}"
+
+    out = out + s"],\"camera\":{\"target\":${vector(camera.target)},\"distance\":${number(camera.distance)},"
+    out = out + s"\"yaw\":${number(camera.turn)},\"tilt\":${number(camera.tilt)},\"fov\":${number(camera.fov)}},"
+    out = out + s"\"file\":${if file == "" then "null" else quoted(file)},\"dirty\":${dirty}}"
+    out
+end state_json
+
+// The routes: `GET /tekton/state` and `POST /tekton/quit`. Anything else is left to the toolkit's own.
+routes(w: &Workspace, req: Request) -> Routed
+    if req.path == "/tekton/state"
+        if req.method != "GET" then return Respond(error_response(405, "/tekton/state takes GET"))
+
+        return Respond(json(200, state_json(w.doc, w.camera, w.file, w.doc.is_dirty()) + "\n"))
+
+    if req.path == "/tekton/quit"
+        if req.method != "POST" then return Respond(error_response(405, "/tekton/quit takes POST"))
+
+        w.quit_now()
+
+        return Respond(json(200, "{\"ok\":true}\n"))
+
+    Pass
+end routes

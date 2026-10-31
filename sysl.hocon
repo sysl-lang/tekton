@@ -27,5 +27,5 @@ dependencies {
   manifold   { git = "github.com/sysl-lang/manifold",   version = "0.1.1" }
   quaternion { git = "github.com/sysl-lang/quaternion", version = "0.1.0" }
   syslui     { git = "github.com/sysl-lang/syslui",     version = "0.1.15" }
-  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.16" }
+  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.17" }
 }

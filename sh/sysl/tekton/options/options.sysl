@@ -1,0 +1,89 @@
+module sh.sysl.tekton.options
+
+// The command line: what `tekton` was asked to open and how to run it.
+
+import sysl.text.{parse_int, parse_real}
+
+struct Options
+    shot: string
+    width: int
+    height: int
+    demo: bool
+    holes: bool
+    selected: string
+    view: Option[(real, real)]
+    opened: string
+    file: string
+    control: string
+
+    // Whether the window is not shown, for a session driven over `control` that should not appear on screen.
+    hidden: bool
+end Options
+
+// `WxH`, if it is that.
+parse_size(s: string) -> Option[(int, int)]
+    val at = s.index_of("x")?
+    val w = parse_int(s[0..<at]).ok()?
+    val h = parse_int(s[at + 1..<s.len]).ok()?
+
+    Some((w, h))
+end parse_size
+
+// `TURN,TILT` in radians, if it is that.
+parse_view(s: string) -> Option[(real, real)]
+    val at = s.index_of(",")?
+    val turn = parse_real(s[0..<at]).ok()?
+    val tilt = parse_real(s[at + 1..<s.len]).ok()?
+
+    Some((turn, tilt))
+end parse_view
+
+// The options in `args`, whose first is the program's own name; or what is wrong with them.
+parse_options(args: []string) -> Result[Options, string]
+    var o = Options("", 1280, 800, false, false, "", None, "", "", "", false)
+    var i = 1
+
+    while i < args.len
+        args[i] match
+            "--demo" -> o.demo = true
+            "--holes" -> o.holes = true
+            "--hidden" -> o.hidden = true
+            "--shot" ->
+                i += 1
+                if i >= args.len then return Err("--shot takes a file")
+
+                o.shot = args[i]
+            "--size" ->
+                i += 1
+                if i >= args.len then return Err("--size takes WxH")
+
+                (o.width, o.height) = parse_size(args[i]).ok_or(s"not a size: ${args[i]}")?
+            "--select" ->
+                i += 1
+                if i >= args.len then return Err("--select takes shape numbers")
+
+                o.selected = args[i]
+            "--view" ->
+                i += 1
+                if i >= args.len then return Err("--view takes TURN,TILT")
+
+                o.view = Some(parse_view(args[i]).ok_or(s"not a view: ${args[i]}")?)
+            "--menu" ->
+                i += 1
+                if i >= args.len then return Err("--menu takes a menu's title")
+
+                o.opened = args[i]
+            "--control" ->
+                i += 1
+                if i >= args.len then return Err("--control takes a socket")
+
+                o.control = args[i]
+            other ->
+                if other.starts_with("--") then return Err(s"unknown option: ${other}")
+
+                o.file = other
+
+        i += 1
+
+    Ok(o)
+end parse_options

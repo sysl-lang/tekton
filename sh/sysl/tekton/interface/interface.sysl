@@ -259,6 +259,10 @@ struct Workspace
         self.guarded(Intent.Quit)
     end request_quit
 
+    // Quit at once, asking nothing, whatever is unsaved: for a session driven over its control socket, which has
+    // nobody to answer the question.
+    quit_now(&self) = (self.quit)()
+
     // Save to the file this document has, and without one ask where.
     save(&self, after: Option[Intent] = None)
         if self.is_editing() || self.in_dialog.read() then return

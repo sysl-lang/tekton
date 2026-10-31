@@ -1,0 +1,64 @@
+module sh.sysl.tekton.options
+
+private parsed(args: []string) -> Options = parse_options(args).unwrap()
+
+private why(args: []string) -> string
+    parse_options(args) match
+        Ok(_) -> panic("expected the options to be refused")
+        Err(e) -> e
+end why
+
+@test
+private no_arguments_is_the_default_window()
+    val o = parsed(["tekton"])
+
+    assert_eq(o.width, 1280)
+    assert_eq(o.height, 800)
+    assert(!o.demo && !o.holes && !o.hidden, "no flags")
+    assert_eq(o.control, "")
+    assert_eq(o.file, "")
+    assert_eq(o.shot, "")
+end no_arguments_is_the_default_window
+
+@test
+private hidden_is_a_flag_of_its_own_and_goes_with_control()
+    assert(parsed(["tekton", "--hidden"]).hidden, "hidden")
+    assert(!parsed(["tekton", "--control", "/tmp/a.sock"]).hidden, "control alone shows the window")
+
+    val o = parsed(["tekton", "--demo", "--control", "/tmp/a.sock", "--hidden"])
+
+    assert(o.hidden && o.demo, "both")
+    assert_eq(o.control, "/tmp/a.sock")
+end hidden_is_a_flag_of_its_own_and_goes_with_control
+
+@test
+private every_option_with_its_value()
+    val o = parsed(["tekton", "--shot", "f.png", "--size", "1400x900", "--select", "1,3", "--view", "0.3,0.5", "--menu",
+                    "Edit", "--holes", "part.tekton"])
+
+    assert_eq(o.shot, "f.png")
+    assert_eq((o.width, o.height), (1400, 900))
+    assert_eq(o.selected, "1,3")
+    assert_eq(o.view.unwrap(), (0.3, 0.5))
+    assert_eq(o.opened, "Edit")
+    assert(o.holes, "holes")
+    assert_eq(o.file, "part.tekton")
+end every_option_with_its_value
+
+@test
+private a_bad_option_or_value_is_refused_by_name()
+    assert_eq(why(["tekton", "--bogus"]), "unknown option: --bogus")
+    assert_eq(why(["tekton", "--size", "big"]), "not a size: big")
+    assert_eq(why(["tekton", "--size", "10xhigh"]), "not a size: 10xhigh")
+    assert_eq(why(["tekton", "--view", "1"]), "not a view: 1")
+end a_bad_option_or_value_is_refused_by_name
+
+@test
+private an_option_missing_its_value_is_refused_not_read_past_the_end()
+    assert_eq(why(["tekton", "--control"]), "--control takes a socket")
+    assert_eq(why(["tekton", "--shot"]), "--shot takes a file")
+    assert_eq(why(["tekton", "--size"]), "--size takes WxH")
+    assert_eq(why(["tekton", "--select"]), "--select takes shape numbers")
+    assert_eq(why(["tekton", "--view"]), "--view takes TURN,TILT")
+    assert_eq(why(["tekton", "--menu"]), "--menu takes a menu's title")
+end an_option_missing_its_value_is_refused_not_read_past_the_end

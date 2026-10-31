@@ -7,5 +7,5 @@ github.com/sysl-lang/quaternion v0.1.0 sha256:e4d82c4df2c20683d64e344a57063d543e
 github.com/sysl-lang/sdl3 v0.3.20 sha256:4892e984b513ccfd2fdff00c5451c9f26c560494a2e27ed64c92dc159f6a25a0
 github.com/sysl-lang/skitter v0.3.5 sha256:f388fefb6d53ff4c609b3bdd3e12466dc7bc7bfc89cd892bbf791d80fa121ab0
 github.com/sysl-lang/syslui v0.1.15 sha256:ac4b19a65a012acdfd16c1807480f10e743be55530a725db474208c28f3e8897
-github.com/sysl-lang/syslui-sdl v0.2.16 sha256:d509d56950b2410afc756b13ce12596cd45c7a93ee50dbbff95b7a99cb790388
+github.com/sysl-lang/syslui-sdl v0.2.17 sha256:68b157301fbe04de8e8f95da4e6630fcf38b3e90f71a29021fdd3864eba8205f
 github.com/sysl-lang/toml v0.1.4 sha256:459fd45c4d0a721e67b2ecca417732f1a726bf38705d331e8d452fe4370a3683
