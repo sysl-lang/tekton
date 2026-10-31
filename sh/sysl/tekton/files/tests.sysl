@@ -3,7 +3,7 @@ module sh.sysl.tekton.files
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.DialogResult
-import sh.sysl.tekton.document.{Document, Node, PRIMITIVES, Primitive, Transform, identity_transform, new_document, restored_document,
+import sh.sysl.tekton.document.{Document, Mirror, NO_MIRROR, Node, PRIMITIVES, Primitive, Transform, identity_transform, new_document, restored_document,
                                 restored_group, restored_shape}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf}
@@ -39,6 +39,7 @@ private assert_same_node(a: &Node, b: &Node)
     assert_eq(a.tint, b.tint, "tint")
     assert_eq(a.hole, b.hole, "hole")
     assert_eq(a.is_group, b.is_group, "kind")
+    assert(a.mirror == b.mirror, "mirror")
     assert_same_transform(a.transform, b.transform)
 
     a.operation match
@@ -658,3 +659,56 @@ bad_segments_are_refused_on_their_line()
 
     assert_eq(refusal(with("scale = [1.0, 1.0, 1.0]", "scale = [1.0, 1.0, 1.0]\n    segments = 12")),
               "line 13: a box has no `segments`", "a box")
+
+// ## Mirrored nodes
+
+@test
+a_mirrored_shape_and_a_mirrored_group_come_back_as_they_were()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Cone)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.mirror_selected(2).unwrap()
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val g = doc.group_selected().unwrap()
+
+    doc.mirror_selected(0).unwrap()
+    doc.mirror_selected(1).unwrap()
+
+    val text = document_text(doc)
+    val back = round_trip(doc)
+
+    assert(text.contains("mirror = [false, false, true]"), "the box says it")
+    assert(text.contains("mirror = [true, true, false]"), "and the group")
+    assert(back.find(g).unwrap().mirror == Mirror(true, true, false), "the group's comes back")
+    assert(back.find(b).unwrap().mirror == Mirror(false, false, true), "the part's comes back")
+    assert(back.find(a).unwrap().mirror == NO_MIRROR, "and the other part has none")
+    assert_same_document(doc, back)
+    back.select(Some(g))
+    assert_eq(back.describe(), doc.describe(), "the same model, a session's selection aside")
+    assert(back.mesh_of(back.find(g).unwrap()).volume() > 0.0, "facing outward")
+end a_mirrored_shape_and_a_mirrored_group_come_back_as_they_were
+
+@test
+a_node_that_is_not_mirrored_writes_no_mirror()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    assert(!document_text(doc).contains("mirror"), "nothing to say")
+end a_node_that_is_not_mirrored_writes_no_mirror
+
+@test
+a_wrong_mirror_is_refused_on_its_own_line()
+    val wanted = "line 13: `mirror` must be a list of three of true or false"
+
+    for bad in ["[true, false]", "[1, 0, 0]", "true", "[true, false, false, false]"]
+        assert_eq(refusal(with("    scale = [1.0, 1.0, 1.0]\n", s"    scale = [1.0, 1.0, 1.0]\n    mirror = ${bad}\n")),
+                  wanted, bad)
+
+    val good = document_from_text(with("    scale = [1.0, 1.0, 1.0]\n",
+                                       "    scale = [1.0, 1.0, 1.0]\n    mirror = [false, true, false]\n")).unwrap()
+
+    assert(good.items()[0].mirror == Mirror(false, true, false), "a right one is read")
+end a_wrong_mirror_is_refused_on_its_own_line

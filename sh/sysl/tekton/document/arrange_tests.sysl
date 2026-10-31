@@ -1,0 +1,371 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.{Aabb, Vec3}
+import sysl.math.{max, min, pi}
+
+// Mirror, align and drop: what each does to where things stand, and that each is one step.
+
+private close(a: real, b: real) -> bool = (a - b).abs() <= 1.0e-9
+
+private assert_same_box(a: Aabb, b: Aabb, what: string)
+    for i in 0..<3
+        assert(close(a.min.axis(i), b.min.axis(i)), s"${what}: low side ${i}")
+        assert(close(a.max.axis(i), b.max.axis(i)), s"${what}: high side ${i}")
+end assert_same_box
+
+private box_of(doc: &Document, id: int) -> Aabb = doc.bounds_of(doc.find(id).unwrap())
+
+private place(doc: &Document, id: int, at: Vec3) = doc.set_transform(id, moved_to(at))
+
+// A box at the origin and one at x = 60, both selected.
+private two_boxes() -> (&Document, int, int)
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    place(doc, a, Vec3(0.0, 0.0, 0.0))
+    place(doc, b, Vec3(60.0, 0.0, 0.0))
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+    (doc, a, b)
+end two_boxes
+
+// The two boxes made one group, which is uneven along x: a reflection of it is not the same thing.
+private uneven_group() -> (&Document, int, int, int)
+    val (doc, a, b) = two_boxes()
+    val g = doc.group_selected().unwrap()
+
+    (doc, g, a, b)
+end uneven_group
+
+// The middle of a part of a group, where it would stand on its own.
+private part_middle(doc: &Document, id: int) -> Vec3 = box_of(doc, id).center()
+
+// ## Mirror
+
+@test
+a_mirrored_shape_is_reflected_along_that_axis_and_stays_in_its_box()
+    for axis in 0..<3
+        val doc = new_document()
+        val id = doc.add_shape(Primitive.Cone)
+        val before = box_of(doc, id)
+        val t = doc.find(id).unwrap().transform
+
+        assert(doc.mirror_selected(axis).is_ok(), "mirrored")
+
+        val node = doc.find(id).unwrap()
+
+        assert(node.mirror == NO_MIRROR.flipped(axis), "reflected along that axis and no other")
+        assert(node.transform == t, "an unturned shape keeps its numbers")
+        assert_same_box(box_of(doc, id), before, "the same box")
+end a_mirrored_shape_is_reflected_along_that_axis_and_stays_in_its_box
+
+@test
+a_cone_mirrored_along_z_stands_on_its_point()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Cone)
+
+    doc.mirror_selected(2).unwrap()
+
+    val node = doc.find(id).unwrap()
+    val mesh = doc.mesh_of(node)
+    var widest_low = 0.0
+    var widest_high = 0.0
+
+    for i in 0..<mesh.vertex_count()
+        val p = node.transform.apply(mesh.position(u32(i)))
+        val r = (p.x * p.x + p.y * p.y).sqrt()
+
+        if p.z < 1.0e-6 then widest_low = max(widest_low, r)
+        if p.z > 20.0 - 1.0e-6 then widest_high = max(widest_high, r)
+
+    assert(widest_low < 1.0e-6, "the point is on the ground")
+    assert((widest_high - 10.0).abs() < 1.0e-4, "the base is at the top, as near as a mesh's floats come")
+    assert(mesh.volume() > 0.0, "its triangles still face outward")
+end a_cone_mirrored_along_z_stands_on_its_point
+
+@test
+mirroring_twice_gives_back_exactly_what_was_there()
+    for axis in 0..<3
+        val doc = new_document()
+
+        doc.add_shape(Primitive.Box)
+
+        val before = doc.describe()
+
+        doc.mirror_selected(axis).unwrap()
+        assert(doc.describe() != before, "once is a change")
+        doc.mirror_selected(axis).unwrap()
+        assert_eq(doc.describe(), before, "twice is none")
+end mirroring_twice_gives_back_exactly_what_was_there
+
+@test
+mirroring_a_turned_shape_twice_puts_it_back()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Cone)
+
+    doc.rotate_to(id, Quaternion.from_axis_angle([1.0, 0.0, 0.0], 0.5)).unwrap()
+
+    val t = doc.find(id).unwrap().transform
+    val before = box_of(doc, id)
+
+    doc.mirror_selected(1).unwrap()
+    assert_same_box(box_of(doc, id), before, "reflected in place")
+    doc.mirror_selected(1).unwrap()
+
+    val back = doc.find(id).unwrap()
+
+    assert(back.mirror == NO_MIRROR, "not reflected")
+    assert(back.transform.rotation == t.rotation, "the same turn, exactly")
+
+    for i in 0..<3 do assert(close(back.transform.translation.axis(i), t.translation.axis(i)), "where it was")
+end mirroring_a_turned_shape_twice_puts_it_back
+
+// A group's parts swap sides, which ungrouping shows: each part comes out where the reflection put it.
+@test
+a_mirrored_group_swaps_its_parts_and_they_stay_swapped_when_freed()
+    val (doc, g, a, b) = uneven_group()
+    val before = box_of(doc, g)
+
+    doc.mirror_selected(0).unwrap()
+    assert(doc.find(g).unwrap().mirror == NO_MIRROR.flipped(0), "the group is reflected")
+    assert_same_box(box_of(doc, g), before, "in its own box")
+    assert(doc.mesh_of(doc.find(g).unwrap()).volume() > 0.0, "facing outward")
+
+    doc.ungroup_selected().unwrap()
+    assert(close(part_middle(doc, a).x, 60.0), "the left box went right")
+    assert(close(part_middle(doc, b).x, 0.0), "the right box went left")
+    assert(doc.find(a).unwrap().mirror == NO_MIRROR.flipped(0), "each part carries the reflection")
+end a_mirrored_group_swaps_its_parts_and_they_stay_swapped_when_freed
+
+// A group turned a quarter about z holds its parts along y, the left box at y = -30 and the right at y = 30, so a
+// reflection along y swaps them, which ungrouping shows. The group is reflected along its own x, the axis nearest
+// the ground's y.
+@test
+a_turned_group_mirrored_swaps_its_parts_along_the_ground_axis()
+    for mirrored in [false, true]
+        val (doc, g, a, b) = uneven_group()
+
+        doc.rotate_to(g, Quaternion.from_axis_angle([0.0, 0.0, 1.0], pi/ 2.0)).unwrap()
+
+        if mirrored
+            doc.mirror_selected(1).unwrap()
+            assert(doc.find(g).unwrap().mirror == NO_MIRROR.flipped(0), "along its own x")
+
+        doc.ungroup_selected().unwrap()
+
+        val side = if mirrored then -1.0 else 1.0
+
+        assert(close(part_middle(doc, a).y, -30.0 * side), "the left box")
+        assert(close(part_middle(doc, b).y, 30.0 * side), "the right box")
+        assert(close(part_middle(doc, a).x, 30.0) && close(part_middle(doc, b).x, 30.0), "both on the middle")
+end a_turned_group_mirrored_swaps_its_parts_along_the_ground_axis
+
+@test
+a_mirrored_shape_keeps_its_reflection_inside_a_group_and_out_again()
+    val (doc, a, b) = two_boxes()
+
+    doc.select(Some(a))
+    doc.mirror_selected(0).unwrap()
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val g = doc.group_selected().unwrap()
+
+    assert(doc.find(a).unwrap().mirror == NO_MIRROR.flipped(0), "a part remembers it")
+    assert(doc.mesh_of(doc.find(g).unwrap()).volume() > 0.0, "the group faces outward")
+
+    doc.ungroup_selected().unwrap()
+    assert(doc.find(a).unwrap().mirror == NO_MIRROR.flipped(0), "and keeps it when freed")
+    assert(doc.find(b).unwrap().mirror == NO_MIRROR, "the other part was never reflected")
+end a_mirrored_shape_keeps_its_reflection_inside_a_group_and_out_again
+
+@test
+two_shapes_mirrored_together_swap_about_their_common_middle()
+    val (doc, a, b) = two_boxes()
+
+    doc.mirror_selected(0).unwrap()
+    assert(close(part_middle(doc, a).x, 60.0), "the left one goes right")
+    assert(close(part_middle(doc, b).x, 0.0), "the right one goes left")
+end two_shapes_mirrored_together_swap_about_their_common_middle
+
+@test
+a_mirror_is_one_step_that_undo_and_redo_take_back_and_put_back()
+    val (doc, _, _) = two_boxes()
+    val before = doc.describe()
+    val steps = doc.undos.len()
+
+    doc.mirror_selected(2).unwrap()
+
+    val after = doc.describe()
+
+    assert_eq(doc.undos.len(), steps + 1, "one step for both")
+    assert(doc.undo(), "undone")
+    assert_eq(doc.describe(), before, "as it was")
+    assert(doc.redo(), "redone")
+    assert_eq(doc.describe(), after, "as it was made")
+end a_mirror_is_one_step_that_undo_and_redo_take_back_and_put_back
+
+// ## Align
+
+// A small box at the origin and a big one off to the side and up, both selected.
+private unequal_boxes() -> (&Document, int, int)
+    val doc = new_document()
+    val small = doc.add_shape(Primitive.Box)
+    val big = doc.add_shape(Primitive.Box)
+
+    place(doc, small, Vec3(0.0, 0.0, 0.0))
+    doc.resize_to(big, Vec3(40.0, 60.0, 80.0)).unwrap()
+    place(doc, big, Vec3(100.0, 50.0, 30.0))
+    doc.select(Some(small))
+    doc.toggle_selected(big)
+    (doc, small, big)
+end unequal_boxes
+
+@test
+align_lines_up_each_side_of_shapes_of_different_sizes()
+    for axis in 0..<3
+        for edge in [Edge.Min, Edge.Centre, Edge.Max]
+            val (doc, small, big) = unequal_boxes()
+            val all_before = box_of(doc, small)
+            val big_before = box_of(doc, big)
+            val low = min(all_before.min.axis(axis), big_before.min.axis(axis))
+            val high = max(all_before.max.axis(axis), big_before.max.axis(axis))
+            val want = edge match
+                Min -> low
+                Centre -> (low + high) / 2.0
+                Max -> high
+
+            doc.align_selected(axis, edge).unwrap()
+
+            for id in [small, big]
+                val b = box_of(doc, id)
+                val got = edge match
+                    Min -> b.min.axis(axis)
+                    Centre -> b.center().axis(axis)
+                    Max -> b.max.axis(axis)
+
+                assert(close(got, want), s"axis ${axis} lined up")
+
+            val small_after = box_of(doc, small)
+            val big_after = box_of(doc, big)
+
+            for other in 0..<3
+                if other != axis
+                    assert(close(small_after.min.axis(other), all_before.min.axis(other)), "the small one moves on one axis")
+                    assert(close(big_after.min.axis(other), big_before.min.axis(other)), "and the big one")
+end align_lines_up_each_side_of_shapes_of_different_sizes
+
+@test
+align_is_one_step_and_one_already_lined_up_is_none()
+    val (doc, _, _) = unequal_boxes()
+    val before = doc.describe()
+    val steps = doc.undos.len()
+
+    doc.align_selected(0, Edge.Max).unwrap()
+
+    val after = doc.describe()
+
+    assert_eq(doc.undos.len(), steps + 1, "one step")
+    doc.align_selected(0, Edge.Max).unwrap()
+    assert_eq(doc.undos.len(), steps + 1, "lined up already: no step")
+    assert(doc.undo(), "undone")
+    assert_eq(doc.describe(), before, "as it was")
+    assert(doc.redo(), "redone")
+    assert_eq(doc.describe(), after, "as it was made")
+end align_is_one_step_and_one_already_lined_up_is_none
+
+@test
+align_needs_two_or_more()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+
+    val before = doc.describe()
+
+    assert(!doc.can_align, "one is not enough")
+    assert(doc.align_selected(0, Edge.Min).is_err(), "refused")
+    assert_eq(doc.describe(), before, "and nothing moved")
+end align_needs_two_or_more
+
+// ## Drop to bed
+
+@test
+drop_to_bed_brings_a_shape_down_from_above_and_up_from_below()
+    for height in [35.0, -12.5]
+        val doc = new_document()
+        val id = doc.add_shape(Primitive.Box)
+
+        place(doc, id, Vec3(5.0, 7.0, height))
+        doc.drop_selected().unwrap()
+
+        val b = box_of(doc, id)
+
+        assert(close(b.min.z, 0.0), "on the ground")
+        assert(close(b.min.x, -5.0) && close(b.min.y, -3.0), "straight down or up")
+end drop_to_bed_brings_a_shape_down_from_above_and_up_from_below
+
+@test
+drop_to_bed_brings_a_turned_shape_down_by_its_lowest_point()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+
+    place(doc, id, Vec3(0.0, 0.0, 50.0))
+    doc.rotate_to(id, Quaternion.from_axis_angle([1.0, 0.0, 0.0], pi/ 4.0)).unwrap()
+    doc.drop_selected().unwrap()
+    assert(close(box_of(doc, id).min.z, 0.0), "its lowest edge on the ground")
+end drop_to_bed_brings_a_turned_shape_down_by_its_lowest_point
+
+@test
+drop_to_bed_moves_a_selection_as_one()
+    val (doc, a, b) = two_boxes()
+
+    place(doc, a, Vec3(0.0, 0.0, 30.0))
+    place(doc, b, Vec3(60.0, 0.0, 45.0))
+    doc.drop_selected().unwrap()
+    assert(close(box_of(doc, a).min.z, 0.0), "the lower one lands")
+    assert(close(box_of(doc, b).min.z, 15.0), "the other keeps its height above it")
+end drop_to_bed_moves_a_selection_as_one
+
+@test
+drop_to_bed_is_one_step_and_one_on_the_ground_is_none()
+    val (doc, a, b) = two_boxes()
+
+    place(doc, a, Vec3(0.0, 0.0, 30.0))
+    place(doc, b, Vec3(60.0, 0.0, 40.0))
+
+    val before = doc.describe()
+    val steps = doc.undos.len()
+
+    doc.drop_selected().unwrap()
+
+    val after = doc.describe()
+
+    assert_eq(doc.undos.len(), steps + 1, "one step")
+    doc.drop_selected().unwrap()
+    assert_eq(doc.undos.len(), steps + 1, "on the ground already: no step")
+    assert(doc.undo(), "undone")
+    assert_eq(doc.describe(), before, "as it was")
+    assert(doc.redo(), "redone")
+    assert_eq(doc.describe(), after, "as it was made")
+end drop_to_bed_is_one_step_and_one_on_the_ground_is_none
+
+@test
+with_nothing_selected_mirror_and_drop_are_refused_and_change_nothing()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc.select(None)
+
+    val before = doc.describe()
+    val steps = doc.undos.len()
+
+    assert(!doc.can_arrange && !doc.can_align, "nothing to arrange")
+    assert(doc.mirror_selected(0).is_err(), "mirror refused")
+    assert(doc.drop_selected().is_err(), "drop refused")
+    assert(doc.align_selected(0, Edge.Min).is_err(), "align refused")
+    assert_eq(doc.describe(), before, "nothing changed")
+    assert_eq(doc.undos.len(), steps, "and nothing to undo")
+end with_nothing_selected_mirror_and_drop_are_refused_and_change_nothing

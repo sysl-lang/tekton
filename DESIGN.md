@@ -153,4 +153,9 @@ their own tests, so most changes never need the whole application linked or a wi
    `outside_volume` when a solid reaches past it.
    - **Facets are done**: every round shape (cylinder, sphere, cone, torus) has its own `segments`, 64 unless
      set, edited in the panel, held to 3–512, one undo step, saved in the file and used by the STL export.
+   - Mirror and align, in an Arrange menu: Mirror X/Y/Z reflects the selection along a ground axis through the
+     middle of its box, stored as a node's reflection along its own nearest axis (`mirror` in a file) so a
+     transform's scale stays positive and exported triangles face outward; Align lines up the low side, middle
+     or high side of two or more boxes on one axis; Drop to Bed (Cmd+B) lowers or raises the selection onto z = 0.
+     Each is one undo step.
 7. nex scripting.
