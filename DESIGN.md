@@ -47,18 +47,21 @@ join. A document that would be refused is not written either.
 old file whole, and the panel says why.
 
 **Unsaved means different from what the file holds**, compared by value, so undoing back to what was saved is
-clean. The panel's heading reads `Tekton *` while there is anything unsaved, with the file's name under it once
-it has one. New, Open, Quit and closing the window ask first, in a question over the window: Save, Don't Save or
-Cancel, with Escape as Cancel. Save with no file yet goes through Save As, and if that is cancelled or fails,
-what was going to happen does not.
+clean. The window's title is the file's name, or `Untitled` before it has one, then `— Tekton`, with `• ` in
+front while anything is unsaved (`window_title`); the panel shows the file's name under its heading. New, Open,
+Quit and closing the window ask first, in the system's own message box attached to the window: Save, Don't Save
+or Cancel, with Return as Save and Escape as Cancel. What an answer means is a pure function (`unsaved_answer`):
+a box closed without a choice is Cancel, and a box that could not be shown is Cancel too, with the reason in the
+panel. The box holds the whole application until it is answered, the control socket included. Closing the window
+sends two events, and only the first in a frame asks. Save with no file yet goes through Save As, and if that is
+cancelled or fails, what was going to happen does not.
 
 Open has no undo to offer: it clears the history and frames the camera on what it loaded. `tekton <file>` opens a
 file at startup; a bad one is reported and it starts empty, with no file, so Save cannot overwrite it.
 
 File dialogs are SDL's. What an answer means is a pure function (`open_answer`, `save_answer`), and while a dialog
-is up nothing behind it takes input, because what it answers was asked about this document. The dialogs are
-given no window, since `syslui-sdl` keeps its own, and on a Mac that makes them modal to the application rather
-than sheets on the window.
+is up nothing behind it takes input, because what it answers was asked about this document. The dialogs and the
+question are given the window `syslui-sdl` opened (`window()`), so they belong to it.
 
 ## Export
 
@@ -100,14 +103,17 @@ Everything runs without a window, so a test or an agent can use the application 
 - **The document is a library.** Every edit is a command with no interface attached, so model
   behaviour is tested directly, and undo is tested against every command.
 - **A running application can be controlled live, the way a browser is through its developer tools.**
-  Started with `--control <socket>`, in a window or offscreen, it serves HTTP on a private Unix socket, so
-  `curl --unix-socket <socket> http://tekton/snapshot` is a complete client. Its commands are: `snapshot` (the controls on screen, each with a reference), `click`, `drag`, `key`, `type`,
-  `shot <file>`, `wait` and `state`, which prints the document, selection and camera as text. Input
-  feeds the same event path a real window does, so a click that misses a handle misses here too. A
-  script is a file of the same commands. Without the flag, nothing listens.
-  **A person can watch it happen.** Control runs in a real window by default, and offscreen only when
-  asked. Controlled input draws a visible pointer and press marker, and a drag moves across the screen
-  at a watchable pace rather than jumping to its end.
+  Started with `--control <socket>`, it serves HTTP on a private Unix socket through `syslui-sdl`, so
+  `curl --unix-socket <socket> http://tekton/snapshot` is a complete client. The routes are `GET /snapshot`
+  (the controls on screen, each with a reference; the palette's are `palette.box` and so on),
+  `POST /click?ref=<name>`, and sdl3's `/click`, `/drag`, `/key`, `/type`, `/wait`, `/state` and `/shot`.
+  Input feeds the same event path a real window does, so a click that misses a handle misses here too, and
+  `/shot` is the real frame, the 3D viewport included. Without the flag, nothing listens.
+  **A person can watch it happen.** Control runs in the real window, and the controlled pointer is drawn
+  over the frame with a mark while a button is held; a drag moves at a watchable pace.
+  **Not yet**: a `GET /tekton/state` answering the document, selection, camera, file and unsaved mark, since
+  `syslui-sdl` gives an application no way to add a route; and offscreen running, since it has no hidden
+  window.
 - **Screenshots are real frames**: the same GPU pass and interface, read back into a PNG. Pixel
   assertions run against a fixed camera and size. `--menu <title>` takes one with that menu open.
 
