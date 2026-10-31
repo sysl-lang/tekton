@@ -3,11 +3,11 @@ module sh.sysl.tekton.interface
 
 import sh.sysl.sdl3.{DialogResult, KMOD_GUI, KMOD_SHIFT}
 import sh.sysl.tekton.camera.new_camera
-import sh.sysl.tekton.document.Primitive
+import sh.sysl.tekton.document.{Node, Primitive, identity_transform, restored_document, restored_group, restored_shape}
 import sh.sysl.tekton.files.document_text
 import sh.sysl.ui.*
 import sysl.buf.{Buf, buf}
-import sysl.fs.{make_temp_dir, read_text, remove_dir_all, set_permissions, write_text}
+import sysl.fs.{make_temp_dir, read_bytes, read_text, remove_dir_all, set_permissions, write_text}
 
 // The File menu and the question about unsaved changes, in the whole window, with file dialogs that answer at
 // once as a test tells them to.
@@ -51,6 +51,7 @@ private struct Dialogs
     answer: DialogResult
     opens: int
     saves: int
+    exports: int
 
 private chosen(file: string) -> DialogResult
     var paths: Buf[string] = buf()
@@ -62,7 +63,7 @@ end chosen
 // A workspace whose dialogs answer from what is returned with it, and whose Quit is counted by the third.
 private workspace() -> (&Workspace, &Dialogs, &Signal[int])
     val w = new_workspace()
-    val d: &Dialogs = Dialogs(DialogResult.Cancelled, 0, 0)
+    val d: &Dialogs = Dialogs(DialogResult.Cancelled, 0, 0, 0)
     val quits = signal(0)
 
     w.ask_open = answer ->
@@ -70,6 +71,9 @@ private workspace() -> (&Workspace, &Dialogs, &Signal[int])
         answer(d.answer)
     w.ask_save = answer ->
         d.saves += 1
+        answer(d.answer)
+    w.ask_export_stl = answer ->
+        d.exports += 1
         answer(d.answer)
     w.quit = () -> quits.set(quits.read() + 1)
     (w, d, quits)
@@ -94,9 +98,76 @@ the_file_menu_lists_its_commands_with_their_shortcuts()
 
     tap(w, &c, "menu.File")
 
-    for label in ["New", "Open", "Save", "Save As", "Quit"]
+    for label in ["New", "Open", "Save", "Save As", "Export STL…", "Quit"]
         assert(shows(w, &c, s"menu.File.${label}"), label)
 end the_file_menu_lists_its_commands_with_their_shortcuts
+
+@test
+export_stl_writes_the_solid_and_leaves_the_document_its_file_and_mark()
+    val (w, d, _) = workspace()
+    var c = recorder()
+    val at = dir()
+    val doc_file = box_file(at)
+
+    assert(w.open_path(doc_file), "opened")
+    w.add(Primitive.Sphere)
+    d.answer = chosen(s"${at}/part")
+    choose(w, &c, "Export STL…")
+    assert_eq(d.exports, 1, "asked where")
+    assert_eq(read_bytes(s"${at}/part.stl").unwrap().len, 84 + 50 * w.doc.final_mesh().unwrap().triangle_count(),
+              "written, with its extension, box and sphere")
+    assert_eq(w.file, doc_file, "the document's own file")
+    assert(w.doc.is_dirty(), "still unsaved")
+    assert_eq(w.problem.read(), "", "nothing wrong")
+    assert(!w.in_dialog.read(), "the dialog is gone")
+    remove_dir_all(at).unwrap()
+end export_stl_writes_the_solid_and_leaves_the_document_its_file_and_mark
+
+@test
+export_stl_of_an_empty_document_says_why_and_asks_nothing()
+    val (w, d, _) = workspace()
+    var c = recorder()
+
+    choose(w, &c, "Export STL…")
+    assert_eq(d.exports, 0, "no dialog")
+    assert_eq(w.problem.read(), "Could not export: There is nothing solid to export", "the panel says why")
+end export_stl_of_an_empty_document_says_why_and_asks_nothing
+
+@test
+export_stl_of_a_refused_group_says_why_and_asks_nothing()
+    val (w, d, _) = workspace()
+    var c = recorder()
+
+    // No command makes one, so the tree is made directly: a group whose only part is a hole.
+    var parts: Buf[&Node] = buf()
+
+    parts.push(restored_shape(2, Primitive.Box, identity_transform(), 0, true))
+
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_group(1, identity_transform(), 0, false, parts))
+    w.doc = restored_document(items, 3, None, 1)
+
+    choose(w, &c, "Export STL…")
+    assert_eq(d.exports, 0, "no dialog")
+    assert_eq(w.problem.read(), "Could not export: A group needs a solid part (shape 1)", "the panel says why")
+end export_stl_of_a_refused_group_says_why_and_asks_nothing
+
+@test
+export_stl_to_where_no_file_can_be_says_so_and_cancel_says_nothing()
+    val (w, d, _) = workspace()
+    var c = recorder()
+
+    w.add(Primitive.Box)
+    d.answer = chosen("/no/such/directory/part.stl")
+    choose(w, &c, "Export STL…")
+    assert(w.problem.read().starts_with("Could not export part.stl: "), s"named: ${w.problem.read()}")
+
+    d.answer = DialogResult.Cancelled
+    choose(w, &c, "Export STL…")
+    assert_eq(d.exports, 2, "asked again")
+    assert(w.problem.read().starts_with("Could not export part.stl: "), "a cancel leaves the panel as it was")
+end export_stl_to_where_no_file_can_be_says_so_and_cancel_says_nothing
 
 @test
 new_on_a_clean_document_asks_nothing()

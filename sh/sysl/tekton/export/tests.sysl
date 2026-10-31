@@ -1,0 +1,436 @@
+module sh.sysl.tekton.export
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.document.{Document, Mesh, Node, Primitive, Transform, identity_transform, new_document, restored_document,
+                                restored_group, restored_shape}
+import sh.sysl.tekton.space.{Aabb, Vec3}
+import sysl.buf.{Buf, buf}
+import sysl.encoding.{get_u16_le, get_u32_le}
+import sysl.fs.{make_temp_dir, read_bytes, read_text, remove_dir_all, set_permissions, walk, write_text}
+
+// -- STL --------------------------------------------------------------------------------------------------------
+
+// A mesh made by hand, three positions to a vertex. Its normals are not what an export writes, so they are zero.
+private hand_mesh(points: []const real, indices: []const u32) -> &Mesh
+    var vertices: Buf[f32] = buf()
+    var kept: Buf[u32] = buf()
+
+    for i in 0..<points.len / 3
+        vertices.extend([f32(points[i * 3]), f32(points[i * 3 + 1]), f32(points[i * 3 + 2]), 0.0, 0.0, 0.0])
+
+    kept.extend(indices)
+    Mesh(vertices, kept, Aabb(Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0)), 1)
+end hand_mesh
+
+private le(bits: u32) -> [4]u8 = [u8(bits & 0xff), u8(bits >> 8 & 0xff), u8(bits >> 16 & 0xff), u8(bits >> 24)]
+
+@test
+one_triangle_is_laid_out_byte_for_byte()
+    val bytes = stl_bytes(hand_mesh([0.0, 0.0, -1.0, 2.5, 0.0, -1.0, 0.0, 2.5, -1.0], [0u32, 1, 2]))
+    var want: Buf[u8] = buf()
+
+    want.extend("Tekton binary STL".bytes)
+
+    for i in 17..<80 do want.push(0)
+
+    want.extend([1, 0, 0, 0])
+
+    // The normal, then the corners in the order the triangle gives them.
+    for x in [0.0f32, 0.0, 1.0, 0.0, 0.0, -1.0, 2.5, 0.0, -1.0, 0.0, 2.5, -1.0] do want.extend(le(x.bits()))
+
+    want.extend([0, 0])
+    assert_eq(bytes.len(), 134, "84 + 50")
+    assert_eq(bytes.len(), want.len(), "length")
+
+    for i in 0..<want.len() do assert_eq(bytes[i], want[i], s"byte ${i}")
+end one_triangle_is_laid_out_byte_for_byte
+
+@test
+the_header_does_not_say_solid_so_no_reader_takes_it_for_text()
+    val bytes = stl_bytes(hand_mesh([], []))
+
+    assert_eq(bytes.len(), 84, "a header and a count of nothing")
+    assert(bytes[0] != u8('s'), "not `solid`")
+    assert_eq(get_u32_le(bytes.view()[80..<84]), Some(0u32), "no triangles")
+end the_header_does_not_say_solid_so_no_reader_takes_it_for_text
+
+@test
+a_normal_follows_the_winding_and_has_length_one()
+    val n = facet_normal(Vec3(0.0, 0.0, 0.0), Vec3(0.0, 3.0, 0.0), Vec3(3.0, 0.0, 0.0))
+
+    assert_eq(n, Vec3(0.0, 0.0, -1.0), "clockwise from above faces down")
+    assert_eq(facet_normal(Vec3(1.0, 1.0, 1.0), Vec3(2.0, 2.0, 2.0), Vec3(3.0, 3.0, 3.0)), Vec3(0.0, 0.0, 0.0),
+              "a triangle with no area has no direction")
+
+    val slanted = facet_normal(Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 1.0), Vec3(0.0, 1.0, 0.0))
+
+    assert((slanted.length() - 1.0).abs() < 1.0e-12, "unit length")
+end a_normal_follows_the_winding_and_has_length_one
+
+// One facet of an STL file, read back.
+private struct Facet
+    normal: Vec3
+    corners: [3]Vec3
+    attribute: u16
+
+private f32_at(b: []const u8, at: usize) -> real = real(f32.from_bits(get_u32_le(b[at..<at + 4]).unwrap()))
+
+private vec_at(b: []const u8, at: usize) -> Vec3 = Vec3(f32_at(b, at), f32_at(b, at + 4), f32_at(b, at + 8))
+
+private facets_of(bytes: Buf[u8]) -> Buf[Facet]
+    val b = bytes.view()
+    val count = usize(get_u32_le(b[80..<84]).unwrap())
+    var all: Buf[Facet] = buf()
+
+    assert_eq(b.len, 84 + 50 * count, "the count says how long the file is")
+
+    for i in 0..<count
+        val at = 84 + 50 * i
+
+        all.push(Facet(vec_at(b, at), [vec_at(b, at + 12), vec_at(b, at + 24), vec_at(b, at + 36)],
+                       get_u16_le(b[at + 48..<at + 50]).unwrap()))
+
+    all
+end facets_of
+
+// The volume the triangles of a file enclose, as a slicer would find it.
+private volume_of(facets: Buf[Facet]) -> real
+    var sum = 0.0
+
+    for f in facets.view() do sum += f.corners[0].dot(f.corners[1].cross(f.corners[2])) / 6.0
+
+    sum
+end volume_of
+
+private box_document() -> &Document
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc
+end box_document
+
+// The palette's box stands on the ground, 20 mm a side: each face is two triangles whose corners are the box's own
+// corners exactly, whose normal is that face's axis exactly, and whose winding agrees with the normal.
+@test
+a_box_is_twelve_facets_on_its_six_faces()
+    val facets = facets_of(stl_bytes(box_document().final_mesh().unwrap()))
+    var per_face = [0, 0, 0, 0, 0, 0]
+
+    assert_eq(facets.len(), 12, "twelve triangles")
+
+    for f in facets.view()
+        assert_eq(f.attribute, 0u16, "the attribute is nothing")
+
+        var axis = -1
+        var side = 0
+
+        for k in 0..<3
+            val c = f.normal.axis(k)
+
+            if c == 1.0 || c == -1.0
+                axis = k
+                side = if c > 0.0 then 1 else 0
+            else
+                assert_eq(c, 0.0, "the other components of an axis are zero")
+
+        assert(axis >= 0, "the normal is an axis")
+
+        val plane = if axis == 2 then (if side == 1 then 20.0 else 0.0) else (if side == 1 then 10.0 else -10.0)
+
+        for p in f.corners
+            assert(p.x == 10.0 || p.x == -10.0, "x is a corner's")
+            assert(p.y == 10.0 || p.y == -10.0, "y is a corner's")
+            assert(p.z == 0.0 || p.z == 20.0, "z is a corner's")
+            assert_eq(p.axis(axis), plane, "on the face the normal names")
+
+        assert_eq(facet_normal(f.corners[0], f.corners[1], f.corners[2]), f.normal, "wound the way the normal faces")
+        per_face[axis * 2 + side] += 1
+
+    for n in per_face do assert_eq(n, 2, "two triangles a face")
+end a_box_is_twelve_facets_on_its_six_faces
+
+@test
+a_box_read_back_holds_the_volume_the_kernel_made()
+    val doc = box_document()
+    val facets = facets_of(stl_bytes(doc.final_mesh().unwrap()))
+
+    assert_eq(volume_of(facets), 8000.0, "20 mm cubed")
+    assert_eq(volume_of(facets), doc.final_solid().unwrap().volume(), "the kernel's volume")
+end a_box_read_back_holds_the_volume_the_kernel_made
+
+// A box with a round hole through it, the hole made by grouping, which is how a person makes one.
+private drilled_box() -> &Document
+    var parts: Buf[&Node] = buf()
+
+    parts.push(restored_shape(2, Primitive.Box, identity_transform(), 0, false))
+    parts.push(restored_shape(3, Primitive.Cylinder, Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(0.5, 0.5, 1.5)), 1, true))
+
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_group(1, identity_transform(), 0, false, parts))
+    restored_document(items, 4, None, 1)
+end drilled_box
+
+@test
+a_hole_cut_out_of_a_box_exports_the_cut_solid()
+    val doc = drilled_box()
+    val facets = facets_of(stl_bytes(doc.final_mesh().unwrap()))
+    val kernel = doc.final_solid().unwrap().volume()
+    val read = volume_of(facets)
+
+    assert(facets.len() > 12, "the hole has walls")
+    assert((read - kernel).abs() <= kernel * 1.0e-6, s"the kernel's volume: ${read} against ${kernel}")
+    assert(read < 8000.0 - 1500.0 && read > 8000.0 - 1600.0, s"a 5 mm hole 20 mm deep is gone: ${read}")
+
+    for f in facets.view()
+        val wound = facet_normal(f.corners[0], f.corners[1], f.corners[2])
+
+        assert((wound - f.normal).length() < 1.0e-6, "every normal agrees with its winding")
+end a_hole_cut_out_of_a_box_exports_the_cut_solid
+
+@test
+a_hole_left_on_the_ground_cuts_what_it_overlaps()
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_shape(1, Primitive.Box, identity_transform(), 0, false))
+    items.push(restored_shape(2, Primitive.Cylinder, Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(0.5, 0.5, 1.5)), 1, true))
+
+    val loose = restored_document(items, 3, None, 1)
+    val grouped = drilled_box()
+
+    assert_eq(loose.final_solid().unwrap().volume(), grouped.final_solid().unwrap().volume(), "the same as grouped")
+end a_hole_left_on_the_ground_cuts_what_it_overlaps
+
+@test
+two_solids_apart_are_both_exported()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc.add_shape(Primitive.Box)
+
+    val read = volume_of(facets_of(stl_bytes(doc.final_mesh().unwrap())))
+
+    // Summing tetrahedra from the origin rounds once the boxes stand away from it.
+    assert((read - 16000.0).abs() < 1.0e-9, s"two boxes: ${read}")
+end two_solids_apart_are_both_exported
+
+// -- exporting a document to a file -------------------------------------------------------------------------------
+
+private entries_in(dir: string) -> int
+    var n = 0
+
+    for e in walk(dir) do n += 1
+
+    n - 1
+end entries_in
+
+@test
+an_exported_file_holds_the_bytes_and_nothing_is_left_beside_it()
+    val dir = make_temp_dir("tekton-export").unwrap()
+    val file = s"${dir}/box.stl"
+    val doc = box_document()
+
+    write_text(file, "old\n").unwrap()
+    export_stl(doc, file).unwrap()
+
+    val bytes = read_bytes(file).unwrap()
+    val want = stl_bytes(doc.final_mesh().unwrap())
+
+    assert_eq(bytes.len, want.len(), "the whole file")
+
+    for i in 0..<bytes.len do assert_eq(bytes[i], want[i], s"byte ${i}")
+
+    assert_eq(entries_in(dir), 1, "nothing beside it")
+    remove_dir_all(dir).unwrap()
+end an_exported_file_holds_the_bytes_and_nothing_is_left_beside_it
+
+@test
+an_export_leaves_the_document_as_saved_or_unsaved_as_it_was()
+    val dir = make_temp_dir("tekton-export").unwrap()
+    val doc = box_document()
+
+    assert(doc.is_dirty(), "a new shape is unsaved")
+    export_stl(doc, s"${dir}/a.stl").unwrap()
+    assert(doc.is_dirty(), "and still is")
+
+    doc.mark_saved()
+    export_stl(doc, s"${dir}/b.stl").unwrap()
+    assert(!doc.is_dirty(), "a saved document stays saved")
+    remove_dir_all(dir).unwrap()
+end an_export_leaves_the_document_as_saved_or_unsaved_as_it_was
+
+// Why an export would write nothing, and that it then leaves the old file alone.
+private assert_refused(doc: &Document, why: string)
+    val dir = make_temp_dir("tekton-export").unwrap()
+    val file = s"${dir}/a.stl"
+
+    write_text(file, "old\n").unwrap()
+    assert_eq(export_stl(doc, file), Err(why), "the reason")
+    assert_eq(read_text(file).unwrap(), "old\n", "the old file")
+    assert_eq(entries_in(dir), 1, "nothing beside it")
+    remove_dir_all(dir).unwrap()
+end assert_refused
+
+@test
+an_empty_document_exports_nothing()
+    assert_refused(new_document(), "There is nothing solid to export")
+end an_empty_document_exports_nothing
+
+@test
+a_document_of_holes_alone_exports_nothing()
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_shape(1, Primitive.Box, identity_transform(), 0, true))
+    assert_refused(restored_document(items, 2, None, 1), "There is nothing solid to export")
+end a_document_of_holes_alone_exports_nothing
+
+@test
+holes_that_cut_away_everything_export_nothing()
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_shape(1, Primitive.Box, identity_transform(), 0, false))
+    items.push(restored_shape(2, Primitive.Box, Transform(Vec3(0.0, 0.0, -1.0), Quaternion.identity(), Vec3(1.5, 1.5, 1.5)), 1, true))
+    assert_refused(restored_document(items, 3, None, 1), "The holes cut away all of the solid")
+end holes_that_cut_away_everything_export_nothing
+
+@test
+a_refused_group_exports_nothing()
+    var parts: Buf[&Node] = buf()
+
+    parts.push(restored_shape(2, Primitive.Box, identity_transform(), 0, true))
+
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_group(1, identity_transform(), 0, false, parts))
+    assert_refused(restored_document(items, 3, None, 1), "A group needs a solid part (shape 1)")
+end a_refused_group_exports_nothing
+
+// The directory cannot be written though the file can, which only a write in place would get past.
+@test
+a_failed_export_leaves_the_old_file_and_no_debris()
+    val dir = make_temp_dir("tekton-export").unwrap()
+    val file = s"${dir}/a.stl"
+
+    write_text(file, "old\n").unwrap()
+    set_permissions(dir, 0o555u32).unwrap()
+
+    val answer = export_stl(box_document(), file)
+
+    set_permissions(dir, 0o755u32).unwrap()
+    assert(answer.is_err(), "refused")
+    assert_eq(read_text(file).unwrap(), "old\n", "the old file")
+    assert_eq(entries_in(dir), 1, "nothing beside it")
+    remove_dir_all(dir).unwrap()
+end a_failed_export_leaves_the_old_file_and_no_debris
+
+@test
+an_export_to_where_no_file_can_be_is_reported()
+    assert(export_stl(box_document(), "/no/such/directory/a.stl").is_err(), "no directory")
+end an_export_to_where_no_file_can_be_is_reported
+
+// -- 3MF ----------------------------------------------------------------------------------------------------------
+
+@test
+positions_that_are_the_same_number_are_one_vertex()
+    // Two triangles sharing an edge, each with its own copies of the corners, and one corner at negative zero.
+    val shared = shared_mesh(hand_mesh([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                                        1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, -0.0], [0u32, 1, 2, 3, 4, 5]))
+
+    assert_eq(shared.vertex_count(), 4, "four corners")
+    assert_eq(shared.triangle_count(), 2, "both triangles")
+
+    for i in 0..<6 do assert_eq(shared.triangles[i], [0u32, 1, 2, 1, 3, 2][i], s"index ${i}")
+
+    for x in shared.positions.view() do assert_eq(x.bits(), (x + 0.0).bits(), "no negative zero is written")
+end positions_that_are_the_same_number_are_one_vertex
+
+@test
+a_triangle_that_names_one_position_twice_is_left_out()
+    val shared = shared_mesh(hand_mesh([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0], [0u32, 1, 2, 0, 1, 3]))
+
+    assert_eq(shared.vertex_count(), 3, "the fourth vertex is the second")
+    assert_eq(shared.triangle_count(), 1, "the flat one is gone")
+end a_triangle_that_names_one_position_twice_is_left_out
+
+@test
+a_box_is_eight_shared_corners_wound_outward()
+    val shared = shared_mesh(box_document().final_mesh().unwrap())
+    val p = shared.positions
+    var volume = 0.0
+
+    assert_eq(shared.vertex_count(), 8, "a box's corners, each once")
+    assert_eq(shared.triangle_count(), 12, "twelve triangles")
+
+    for t in 0..<shared.triangle_count()
+        var c: [3]Vec3
+
+        for k in 0..<3
+            val at = usize(shared.triangles[t * 3 + k]) * 3
+
+            c[k] = Vec3(real(p[at]), real(p[at + 1]), real(p[at + 2]))
+
+        volume += c[0].dot(c[1].cross(c[2])) / 6.0
+
+    assert_eq(volume, 8000.0, "positive: every triangle faces out")
+end a_box_is_eight_shared_corners_wound_outward
+
+@test
+a_tiny_model_part_is_exactly_this_text()
+    val shared = shared_mesh(hand_mesh([0.0, 0.0, 0.0, 2.5, 0.0, 0.0, 0.0, 0.1, -1.0], [0u32, 1, 2]))
+
+    assert_eq(model_part(shared, "wedge"),
+              "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+              "<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n" +
+              "  <metadata name=\"Application\">Tekton</metadata>\n" +
+              "  <metadata name=\"Title\">wedge</metadata>\n" +
+              "  <resources>\n" +
+              "    <object id=\"1\" type=\"model\" name=\"wedge\">\n" +
+              "      <mesh>\n" +
+              "        <vertices>\n" +
+              "          <vertex x=\"0\" y=\"0\" z=\"0\"/>\n" +
+              "          <vertex x=\"2.5\" y=\"0\" z=\"0\"/>\n" +
+              "          <vertex x=\"0\" y=\"0.1\" z=\"-1\"/>\n" +
+              "        </vertices>\n" +
+              "        <triangles>\n" +
+              "          <triangle v1=\"0\" v2=\"1\" v3=\"2\"/>\n" +
+              "        </triangles>\n" +
+              "      </mesh>\n" +
+              "    </object>\n" +
+              "  </resources>\n" +
+              "  <build>\n" +
+              "    <item objectid=\"1\"/>\n" +
+              "  </build>\n" +
+              "</model>\n", "the model part")
+end a_tiny_model_part_is_exactly_this_text
+
+@test
+the_package_parts_are_exactly_this_text()
+    assert_eq(content_types_part(),
+              "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+              "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n" +
+              "  <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n" +
+              "  <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n" +
+              "</Types>\n", "[Content_Types].xml")
+    assert_eq(relationships_part(),
+              "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+              "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n" +
+              "  <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel0\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n" +
+              "</Relationships>\n", "_rels/.rels")
+end the_package_parts_are_exactly_this_text
+
+@test
+a_name_is_escaped_wherever_it_is_written()
+    assert_eq(xml_escaped("R&D <\"bracket\"> 'v2'"), "R&amp;D &lt;&quot;bracket&quot;&gt; &apos;v2&apos;", "all five")
+    assert_eq(xml_escaped("plain"), "plain", "nothing to do")
+    assert_eq(xml_escaped(""), "", "empty")
+    assert_eq(xml_escaped("a\tb\nc"), "abc", "control characters XML cannot hold are left out")
+    assert_eq(xml_escaped("&&"), "&amp;&amp;", "side by side")
+    assert_eq(xml_escaped("café"), "café", "other text is itself")
+
+    val part = model_part(shared_mesh(hand_mesh([], [])), "a<b")
+
+    assert(part.contains("<metadata name=\"Title\">a&lt;b</metadata>"), "in the title")
+    assert(part.contains("name=\"a&lt;b\">"), "in the object's name")
+    assert(!part.contains("a<b"), "nowhere raw")
+end a_name_is_escaped_wherever_it_is_written

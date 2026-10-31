@@ -433,3 +433,16 @@ save_answer(r: DialogResult) -> Answer =
 
 // This path, with `.tekton` on the end if its last part has no extension of its own.
 with_extension(file: string) -> string = if extension(file).is_some() then file else file + ".tekton"
+
+// What an export dialog's answer asks for: a file that ends in this extension, in any case, since a slicer goes by
+// the extension and `part.v2` is not an STL file to it.
+export_answer(r: DialogResult, wanted: string) -> Answer =
+    open_answer(r) match
+        Use(file) -> Answer.Use(ending_in(file, wanted))
+        other -> other
+
+// This path, with `.<wanted>` on the end unless it already ends that way.
+ending_in(file: string, wanted: string) -> string =
+    extension(file) match
+        Some(e) -> if to_lower(e) == wanted then file else s"${file}.${wanted}"
+        None -> s"${file}.${wanted}"

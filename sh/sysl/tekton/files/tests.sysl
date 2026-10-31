@@ -483,6 +483,20 @@ a_save_answer_gets_the_extension_only_where_it_has_none()
     assert_eq(used(save_answer(chosen(["/a.d/b"]))), "/a.d/b.tekton", "a dot in the directory is not an extension")
 end a_save_answer_gets_the_extension_only_where_it_has_none
 
+@test
+an_export_answer_always_ends_in_its_extension()
+    assert_eq(used(export_answer(chosen(["/a/b"]), "stl")), "/a/b.stl", "none")
+    assert_eq(used(export_answer(chosen(["/a/b.stl"]), "stl")), "/a/b.stl", "already")
+    assert_eq(used(export_answer(chosen(["/a/b.STL"]), "stl")), "/a/b.STL", "already, in capitals")
+    assert_eq(used(export_answer(chosen(["/a/b.v2"]), "stl")), "/a/b.v2.stl", "another extension is part of the name")
+    assert_eq(used(export_answer(chosen(["/a/b.tekton"]), "3mf")), "/a/b.tekton.3mf", "not the document's own")
+    assert_eq(used(export_answer(chosen(["/a.d/b"]), "stl")), "/a.d/b.stl", "a dot in the directory is not an extension")
+    assert_eq(used(export_answer(DialogResult.Cancelled, "stl")), "<stay>", "cancelled")
+    assert_eq(used(export_answer(chosen([]), "stl")), "<stay>", "nothing chosen")
+    assert_eq(used(export_answer(DialogResult.Failed("no portal"), "stl")), "<report The file dialog failed: no portal>",
+              "failed")
+end an_export_answer_always_ends_in_its_extension
+
 // Files themselves.
 
 private entries_in(dir: string) -> int

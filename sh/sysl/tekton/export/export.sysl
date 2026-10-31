@@ -1,0 +1,201 @@
+module sh.sysl.tekton.export
+
+import sh.sysl.tekton.document.{Document, Mesh}
+import sh.sysl.tekton.space.Vec3
+import sysl.buf.{Buf, buf}
+import sysl.container.{Map, map}
+import sysl.encoding.{push_u16_le, push_u32_le}
+import sysl.fs.write_bytes_atomic
+import sysl.text.{StrBuilder, str_builder}
+
+// The document as a slicer reads it: the one solid `Document.final_solid` makes, in millimetres.
+//
+// **STL** is binary STL: an 80-byte header, the count of triangles, and fifty bytes a triangle — its normal,
+// its three corners counter-clockwise seen from outside, and two bytes nobody reads. Every number is a
+// little-endian `f32`, which is what the kernel's triangles already are, so nothing is rounded on the way out.
+//
+// **3MF** is a zip of three XML parts. The parts are made here (`content_types_part`, `relationships_part`,
+// `model_part`); the zip that holds them is not, since no package in the org writes one yet.
+//
+// A failed write leaves the old file exactly as it was: the bytes go to a name beside it and are renamed into
+// place.
+
+// What the header of every STL file says. It must not begin with `solid`, which marks a text STL.
+const STL_HEADER: string = "Tekton binary STL"
+
+const STL_HEADER_BYTES: usize = 80
+
+// The document's solid as binary STL.
+stl_bytes(mesh: &Mesh) -> Buf[u8]
+    var out: Buf[u8] = buf()
+
+    out.extend(STL_HEADER.bytes)
+
+    for i in STL_HEADER.len..<STL_HEADER_BYTES do out.push(0)
+
+    push_u32_le(out, u32(mesh.triangle_count()))
+
+    var t = 0usize
+
+    while t < mesh.indices.len()
+        val a = mesh.position(mesh.indices[t])
+        val b = mesh.position(mesh.indices[t + 1])
+        val c = mesh.position(mesh.indices[t + 2])
+
+        for p in [facet_normal(a, b, c), a, b, c]
+            push_f32(out, f32(p.x))
+            push_f32(out, f32(p.y))
+            push_f32(out, f32(p.z))
+
+        push_u16_le(out, 0)
+        t += 3
+
+    out
+end stl_bytes
+
+// The outward unit normal of a triangle wound counter-clockwise, or zero for one with no area.
+facet_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3
+    val n = (b - a).cross(c - a)
+    val length = n.length()
+
+    if length == 0.0 then Vec3(0.0, 0.0, 0.0) else n * (1.0 / length)
+end facet_normal
+
+private push_f32(out: Buf[u8], x: f32) = push_u32_le(out, x.bits())
+
+// Write the document's solid to a file as binary STL, or say why not. The document is not told, since an export
+// is not a save.
+export_stl(doc: &Document, file: string) -> Result[unit, string]
+    val mesh = doc.final_mesh() match
+        Ok(m) -> m
+        Err(why) -> return Err(why)
+
+    write_bytes_atomic(file, stl_bytes(mesh).view()) match
+        Ok(_) -> Ok(())
+        Err(e) -> Err(s"${e}")
+end export_stl
+
+// A mesh as a 3MF file holds it: each distinct position once, and every triangle as three indices into them.
+struct SharedMesh
+    // Three numbers a vertex.
+    positions: Buf[f32]
+    triangles: Buf[u32]
+
+    vertex_count(&self) -> usize = self.positions.len() / 3
+
+    triangle_count(&self) -> usize = self.triangles.len() / 3
+
+// The mesh with positions that are the same number shared, whatever vertex they came from. Negative zero is the
+// same position as zero. A triangle two of whose corners land on one position has no area and is left out, since
+// 3MF refuses a triangle that names a vertex twice.
+shared_mesh(mesh: &Mesh) -> &SharedMesh
+    var positions: Buf[f32] = buf()
+    var triangles: Buf[u32] = buf()
+    var seen: Map[u96, u32] = map()
+    var index: Buf[u32] = buf()
+
+    for i in 0..<mesh.vertex_count()
+        val p = mesh.position(u32(i))
+        val x = f32(p.x) + 0.0
+        val y = f32(p.y) + 0.0
+        val z = f32(p.z) + 0.0
+        val key = u96(x.bits()) << 64 | u96(y.bits()) << 32 | u96(z.bits())
+
+        seen.get(key) match
+            Some(at) -> index.push(at)
+            None ->
+                val at = u32(positions.len() / 3)
+
+                seen.put(key, at)
+                positions.extend([x, y, z])
+                index.push(at)
+
+    var t = 0usize
+
+    while t < mesh.indices.len()
+        val a = index[usize(mesh.indices[t])]
+        val b = index[usize(mesh.indices[t + 1])]
+        val c = index[usize(mesh.indices[t + 2])]
+
+        if a != b && b != c && a != c then triangles.extend([a, b, c])
+
+        t += 3
+
+    SharedMesh(positions, triangles)
+end shared_mesh
+
+// `[Content_Types].xml`: what each part of the package is.
+content_types_part() -> string =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+    "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n" +
+    "  <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n" +
+    "  <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n" +
+    "</Types>\n"
+
+// `_rels/.rels`: which part is the model.
+relationships_part() -> string =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n" +
+    "  <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel0\" " +
+    "Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n" +
+    "</Relationships>\n"
+
+// `3D/3dmodel.model`: one object, the solid, in millimetres, placed once on the plate. `name` is what a slicer
+// lists it as.
+model_part(mesh: &SharedMesh, name: string) -> string
+    val title = xml_escaped(name)
+    var b: &StrBuilder = str_builder()
+
+    b.push("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+    b.push("<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n")
+    b.push("  <metadata name=\"Application\">Tekton</metadata>\n")
+    b.push(s"  <metadata name=\"Title\">${title}</metadata>\n")
+    b.push("  <resources>\n")
+    b.push(s"    <object id=\"1\" type=\"model\" name=\"${title}\">\n")
+    b.push("      <mesh>\n        <vertices>\n")
+
+    for i in 0..<mesh.vertex_count()
+        val p = mesh.positions
+
+        b.push(s"          <vertex x=\"${p[i * 3]}\" y=\"${p[i * 3 + 1]}\" z=\"${p[i * 3 + 2]}\"/>\n")
+
+    b.push("        </vertices>\n        <triangles>\n")
+
+    for i in 0..<mesh.triangle_count()
+        val t = mesh.triangles
+
+        b.push(s"          <triangle v1=\"${t[i * 3]}\" v2=\"${t[i * 3 + 1]}\" v3=\"${t[i * 3 + 2]}\"/>\n")
+
+    b.push("        </triangles>\n      </mesh>\n    </object>\n  </resources>\n")
+    b.push("  <build>\n    <item objectid=\"1\"/>\n  </build>\n</model>\n")
+    b.finish()
+end model_part
+
+// Text that stands for itself inside an XML attribute or element. A control character, which XML 1.0 cannot hold
+// at all, is left out.
+xml_escaped(s: string) -> string
+    var b: &StrBuilder = str_builder()
+    var from = 0usize
+    val bytes = s.bytes
+
+    for i in 0..<bytes.len
+        escape_of(bytes[i]) match
+            Some(replacement) ->
+                b.push(s[from..<i])
+                b.push(replacement)
+                from = i + 1
+            None -> ()
+
+    b.push(s[from..<bytes.len])
+    b.finish()
+end xml_escaped
+
+// What a byte becomes in XML text, if it cannot stand for itself.
+private escape_of(c: u8) -> Option[string] =
+    if c == u8('&') then Some("&amp;")
+    elif c == u8('<') then Some("&lt;")
+    elif c == u8('>') then Some("&gt;")
+    elif c == u8('"') then Some("&quot;")
+    elif c == u8('\'') then Some("&apos;")
+    elif c < 0x20 then Some("")
+    else None

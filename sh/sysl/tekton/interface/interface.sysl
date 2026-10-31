@@ -4,7 +4,8 @@ import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
 import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, ask_open_file, ask_save_file}
 import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform, new_document, primitive_name}
-import sh.sysl.tekton.files.{load_file, open_answer, save_answer, save_file}
+import sh.sysl.tekton.export.export_stl
+import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
 import sh.sysl.tekton.picking.{pick, pick_hit}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
@@ -53,6 +54,7 @@ enum Intent
 enum Asked
     Opening
     SavingAs(after: Option[Intent])
+    ExportingStl
 
 // What the primary button is doing.
 enum Gesture
@@ -119,6 +121,7 @@ struct Workspace
     // How a file dialog is shown, which a test answers for itself.
     ask_open: &Fn(&Fn(DialogResult) -> unit) -> unit
     ask_save: &Fn(&Fn(DialogResult) -> unit) -> unit
+    ask_export_stl: &Fn(&Fn(DialogResult) -> unit) -> unit
 
     // What the last dialog answers to, which has to outlive the frame that showed it.
     answering: Option[&Fn(DialogResult) -> unit]
@@ -181,6 +184,11 @@ struct Workspace
                     Stay -> ()
                     Report(why) -> self.problem.set(why)
                     Use(file) -> if self.write_to(file) then self.go_on(after)
+            ExportingStl ->
+                export_answer(r, "stl") match
+                    Stay -> ()
+                    Report(why) -> self.problem.set(why)
+                    Use(file) -> self.export_to(file)
 
         self.changed()
     end dialog_answered
@@ -236,6 +244,26 @@ struct Workspace
         self.changed()
         done.is_ok()
     end write_to
+
+    // Ask where to write the document's solid as STL. A document with no solid to send says why at once, rather
+    // than after a dialog. An export is not a save: the document keeps its file and its mark.
+    export_stl_file(&self)
+        if self.is_editing() || self.in_dialog.read() || self.asking.read() then return
+
+        self.open_menu.set(NO_MENU)
+
+        self.doc.final_solid() match
+            Ok(_) -> self.show_dialog(self.ask_export_stl, Asked.ExportingStl)
+            Err(why) ->
+                self.problem.set(s"Could not export: ${why}")
+                self.changed()
+    end export_stl_file
+
+    private export_to(&self, file: string)
+        export_stl(self.doc, file) match
+            Ok(_) -> self.problem.set("")
+            Err(why) -> self.problem.set(s"Could not export ${name_of(file)}: ${why}")
+    end export_to
 
     // Replace the document with this file's, or say why not and leave everything as it is.
     open_path(&self, file: string) -> bool
@@ -593,6 +621,8 @@ struct Workspace
                                item("Save", () -> self.save(), "Cmd+S"),
                                item("Save As", () -> self.save_as(), "Cmd+Shift+S"),
                                separator(),
+                               item("Export STL…", () -> self.export_stl_file()),
+                               separator(),
                                item("Quit", () -> self.request_quit())]))
         all.push(menu("Edit", [item("Undo", () -> self.undo(), "Cmd+Z", enabled = doc.can_undo),
                                item("Redo", () -> self.redo(), "Cmd+Shift+Z", enabled = doc.can_redo),
@@ -904,9 +934,17 @@ private document_filters() -> Buf[FileFilter]
     all
 end document_filters
 
+private stl_filters() -> Buf[FileFilter]
+    var all: Buf[FileFilter] = buf()
+
+    all.push(FileFilter("STL", "stl"))
+    all
+end stl_filters
+
 new_workspace() -> &Workspace =
     Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
               layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), false, signal(NO_MENU), false,
               () -> stop(), "", signal(false), None, signal(false),
               answer -> ask_open_file(answer, None, document_filters().view(), title = "Open"),
-              answer -> ask_save_file(answer, None, document_filters().view(), title = "Save As"), None, false)
+              answer -> ask_save_file(answer, None, document_filters().view(), title = "Save As"),
+              answer -> ask_save_file(answer, None, stl_filters().view(), title = "Export STL"), None, false)
