@@ -1,0 +1,54 @@
+module sh.sysl.tekton.scenes
+
+// The documents `--demo` and `--holes` start with, for a first look, a screenshot or an export.
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform}
+import sh.sysl.tekton.space.Vec3
+import sysl.buf.{Buf, buf}
+
+// One of each shape in a row, in the palette's order, the row centred on the bed so every shape stands on it,
+// and the second selected.
+add_demo_scene(doc: &Document)
+    var ids: Buf[int] = buf()
+
+    for p in PRIMITIVES do ids.push(doc.add_shape(p))
+
+    var row = doc.bounds_of(doc.find(ids[0]).unwrap())
+
+    for id in ids do row = row.joined(doc.bounds_of(doc.find(id).unwrap()))
+
+    val shift = -(row.min.x + row.max.x) * 0.5
+
+    doc.begin_step()
+
+    for id in ids
+        val at = doc.find(id).unwrap().transform.translation
+
+        doc.move_to(id, Vec3(at.x + shift, at.y, at.z)).expect("a position on the bed")
+
+    doc.end_step()
+    doc.select(Some(ids[1]))
+end add_demo_scene
+
+// A box with a round hole cut through it, in a group, and beside it a block with a hole not yet grouped.
+add_hole_scene(doc: &Document)
+    val box = doc.add_shape(Primitive.Box)
+    val cut = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_transform(box, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(2.0, 2.0, 1.0)))
+    doc.set_transform(cut, Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(1.0, 1.0, 2.0)))
+    doc.select(Some(cut))
+    doc.set_hole(true).expect("a hole")
+    doc.select(Some(box))
+    doc.toggle_selected(cut)
+    doc.group_selected().expect("a group")
+
+    val block = doc.add_shape(Primitive.Box)
+    val hole = doc.add_shape(Primitive.Sphere)
+
+    doc.set_transform(block, Transform(Vec3(70.0, 0.0, 0.0), Quaternion.identity(), Vec3(2.0, 2.0, 1.0)))
+    doc.set_transform(hole, Transform(Vec3(80.0, -14.0, 5.0), Quaternion.identity(), Vec3(1.2, 1.2, 1.2)))
+    doc.select(Some(hole))
+    doc.set_hole(true).expect("a hole")
+end add_hole_scene

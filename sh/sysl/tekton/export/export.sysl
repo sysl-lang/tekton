@@ -7,8 +7,8 @@ import sysl.container.{Map, map}
 import sysl.encoding.{push_u16_le, push_u32_le}
 import sh.sysl.zip.{ZipError, writer}
 import sysl.fs.write_bytes_atomic
-import sysl.path.stem
-import sysl.text.{StrBuilder, str_builder}
+import sysl.path.{extension, stem}
+import sysl.text.{StrBuilder, str_builder, to_lower}
 
 // The document as a slicer reads it: the one solid `Document.final_solid` makes, in millimetres.
 //
@@ -92,6 +92,18 @@ export_3mf(doc: &Document, file: string) -> Result[unit, string]
         Ok(_) -> Ok(())
         Err(e) -> Err(s"${e}")
 end export_3mf
+
+// The format a file's extension names, in any case, as `stl` or `3mf`; or why it names none, since a slicer goes
+// by the extension.
+export_format(file: string) -> Result[string, string]
+    val e = to_lower(extension(file).unwrap_or(""))
+
+    if e == "stl" || e == "3mf" then Ok(e) else Err(s"Not an export format: ${file} (Tekton writes .stl and .3mf)")
+end export_format
+
+// Write the document's solid to a file in the format its extension names, or say why not.
+export_file(doc: &Document, file: string) -> Result[unit, string] =
+    if export_format(file)? == "stl" then export_stl(doc, file) else export_3mf(doc, file)
 
 // Where each part of a 3MF package lives in its zip.
 val CONTENT_TYPES_NAME = "[Content_Types].xml"

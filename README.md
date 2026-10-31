@@ -36,10 +36,14 @@ sysl build . && ./tekton
 - **Delete** or Backspace removes the selection. **Undo** (Cmd+Z) and **Redo** (Cmd+Shift+Z) reach every edit, with
   one drag or one typed number a step, and put the selection back with it. History holds 200 steps, or fewer once
   the meshes only it holds pass 256 MB. While a field has the keyboard, these keys belong to the field.
-- `./tekton --demo` opens with one of each shape. `--select 3` chooses what is selected (`--select 3,4` for several)
+- `./tekton --demo` opens with one of each shape, in a row on the bed. `--select 3` chooses what is selected (`--select 3,4` for several)
   and `--view 0.3,0.5` sets the camera's turn and tilt in radians. `./tekton --holes` opens with a part with a hole
   cut in it, beside a hole not yet grouped.
 - `./tekton --demo --shot frame.png --size 1400x900` writes a frame to a PNG and closes its window.
+- `./tekton --export part.stl part.tekton` opens no window: it writes the file's solid as STL, or as 3MF when the
+  name ends in `.3mf`, and exits. `--demo` or `--holes` in place of the file exports that scene. A failure is one
+  line on standard error and exit status 1: a name that ends in neither `.stl` nor `.3mf`, a file that cannot be
+  read, or nothing solid to export.
 
 ## Tests
 
@@ -63,3 +67,5 @@ Under `sh/sysl/tekton/`, and `main.sysl` only wires them:
 | `handles` | where the selection's handles land on the screen, which one a point is on, and what a drag does | quaternion |
 | `renderer` | draws a document and a handle layout into any targets it is handed | SDL_GPU |
 | `interface` | the palette, viewport, selection panel and number fields, the pointer and the shortcuts | syslUI, syslui-sdl |
+| `scenes` | the documents `--demo` and `--holes` start with | quaternion |
+| `batch` | `--export`: the document the command line names, written for a slicer with no window | |

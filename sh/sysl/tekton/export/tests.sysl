@@ -623,3 +623,49 @@ a_mirrored_shape_exports_reflected_and_facing_outward()
 
     assert(widest_low < 1.0e-4, "the point is on the ground")
 end a_mirrored_shape_exports_reflected_and_facing_outward
+
+// -- by extension ------------------------------------------------------------------------------------------------
+
+@test
+the_extension_names_the_export_format_in_any_case()
+    assert_eq(export_format("part.stl").unwrap(), "stl")
+    assert_eq(export_format("/a/b/Part.STL").unwrap(), "stl")
+    assert_eq(export_format("part.3mf").unwrap(), "3mf")
+    assert_eq(export_format("part.3MF").unwrap(), "3mf")
+end the_extension_names_the_export_format_in_any_case
+
+@test
+an_extension_that_is_not_an_export_format_is_refused_by_name()
+    for file in ["part.obj", "part", "part.stl.txt", "stl", "/a/b.3mf/part"]
+        export_format(file) match
+            Ok(e) -> panic(s"${file} is not an export, but read as ${e}")
+            Err(why) -> assert_eq(why, s"Not an export format: ${file} (Tekton writes .stl and .3mf)")
+end an_extension_that_is_not_an_export_format_is_refused_by_name
+
+@test
+exporting_by_extension_writes_what_the_exporter_itself_writes()
+    // A 3MF names its object after the file, so the two files share a name in two directories.
+    for e in ["stl", "3mf", "STL"]
+        val one = make_temp_dir("tekton-direct").unwrap()
+        val two = make_temp_dir("tekton-chosen").unwrap()
+        val direct = s"${one}/part.${e}"
+        val chosen = s"${two}/part.${e}"
+
+        if e == "3mf" then export_3mf(drilled_box(), direct).unwrap() else export_stl(drilled_box(), direct).unwrap()
+
+        export_file(drilled_box(), chosen).unwrap()
+        assert(read_bytes(chosen).unwrap().view() == read_bytes(direct).unwrap().view(), s"the same bytes for .${e}")
+        remove_dir_all(one).unwrap()
+        remove_dir_all(two).unwrap()
+end exporting_by_extension_writes_what_the_exporter_itself_writes
+
+@test
+exporting_by_extension_refuses_before_writing_anything()
+    val dir = make_temp_dir("tekton-by-extension").unwrap()
+    val file = s"${dir}/part.obj"
+
+    assert_eq(export_file(drilled_box(), file).unwrap_err(), s"Not an export format: ${file} (Tekton writes .stl and .3mf)")
+    assert_eq(export_file(new_document(), s"${dir}/part.stl").unwrap_err(), "There is nothing solid to export")
+    assert_eq(entries_in(dir), 0)
+    remove_dir_all(dir).unwrap()
+end exporting_by_extension_refuses_before_writing_anything

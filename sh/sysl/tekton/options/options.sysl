@@ -18,6 +18,9 @@ struct Options
 
     // Whether the window is not shown, for a session driven over `control` that should not appear on screen.
     hidden: bool
+
+    // Where to write the document as STL or 3MF, chosen by the extension, instead of opening a window.
+    export: string
 end Options
 
 // `WxH`, if it is that.
@@ -40,7 +43,7 @@ end parse_view
 
 // The options in `args`, whose first is the program's own name; or what is wrong with them.
 parse_options(args: []string) -> Result[Options, string]
-    var o = Options("", 1280, 800, false, false, "", None, "", "", "", false)
+    var o = Options("", 1280, 800, false, false, "", None, "", "", "", false, "")
     var i = 1
 
     while i < args.len
@@ -78,6 +81,11 @@ parse_options(args: []string) -> Result[Options, string]
                 if i >= args.len then return Err("--control takes a socket")
 
                 o.control = args[i]
+            "--export" ->
+                i += 1
+                if i >= args.len then return Err("--export takes a file")
+
+                o.export = args[i]
             other ->
                 if other.starts_with("--") then return Err(s"unknown option: ${other}")
 

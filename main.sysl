@@ -2,24 +2,28 @@
 //
 //     tekton                                          a window, until it is closed
 //     tekton part.tekton                              with that file open; a bad one is reported, and it starts empty
-//     tekton --demo                                   with one of each shape, the second selected
+//     tekton --demo                                   with one of each shape on the bed, the second selected
 //     tekton --demo --shot frame.png --size 1400x900  a few frames, the last written to a PNG
 //     tekton --demo --select 3 --view 0.3,0.5         which demo shape is selected; the camera's turn and tilt
 //     tekton --demo --menu Edit                       with that menu of the bar open
 //     tekton --holes                                a part with a hole cut in it, and a hole not yet grouped
 //     tekton --demo --control /tmp/tekton.sock        driven over HTTP on that socket, in the window as usual
 //     tekton --demo --control /tmp/tekton.sock --hidden   the same with no window on the screen
+//     tekton --export part.stl part.tekton            no window: the file written as STL, or 3MF for `.3mf`
+//     tekton --export demo.3mf --demo                 the same for the demo scene
 //
-// The shaders are Metal Shading Language, so this runs on a Mac, in a shell inside the desktop session.
+// An export that fails says why in one line and exits 1: an extension that is neither `.stl` nor `.3mf`, a file
+// that cannot be read, or a document with nothing solid to print.
+//
+// The shaders are Metal Shading Language, so a window runs on a Mac, in a shell inside the desktop session.
 
 import sh.sysl.sdl3.{GPU_SHADERFORMAT_MSL, deliver_dialogs}
 import sh.sysl.sdl3.control.{Request, Routed}
+import sh.sysl.tekton.batch.export_command
 import sh.sysl.tekton.interface.new_workspace
 import sh.sysl.tekton.live.{routes as live_routes}
 import sh.sysl.tekton.options.parse_options
-import sh.sysl.quaternion.Quaternion
-import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform}
-import sh.sysl.tekton.space.Vec3
+import sh.sysl.tekton.scenes.{add_demo_scene, add_hole_scene}
 import sh.sysl.ui.signal
 import sh.sysl.ui_sdl.{app, run, save_frame, stop}
 import sysl.text.{parse_int, split}
@@ -27,30 +31,17 @@ import sysl.text.{parse_int, split}
 // How many frames a shot lets pass first, for the window and the shaders to settle.
 const SHOT_SETTLE: int = 5
 
-// A box with a round hole cut through it, in a group, and beside it a block with a hole not yet grouped.
-private add_hole_scene(doc: &Document)
-    val box = doc.add_shape(Primitive.Box)
-    val cut = doc.add_shape(Primitive.Cylinder)
-
-    doc.set_transform(box, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(2.0, 2.0, 1.0)))
-    doc.set_transform(cut, Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(1.0, 1.0, 2.0)))
-    doc.select(Some(cut))
-    doc.set_hole(true).expect("a hole")
-    doc.select(Some(box))
-    doc.toggle_selected(cut)
-    doc.group_selected().expect("a group")
-
-    val block = doc.add_shape(Primitive.Box)
-    val hole = doc.add_shape(Primitive.Sphere)
-
-    doc.set_transform(block, Transform(Vec3(70.0, 0.0, 0.0), Quaternion.identity(), Vec3(2.0, 2.0, 1.0)))
-    doc.set_transform(hole, Transform(Vec3(80.0, -14.0, 5.0), Quaternion.identity(), Vec3(1.2, 1.2, 1.2)))
-    doc.select(Some(hole))
-    doc.set_hole(true).expect("a hole")
-end add_hole_scene
-
 main(args: []string) -> Result[unit, string]
     val o = parse_options(args)?
+
+    // A script reads the one line, so a failed export does not add the trace of where it failed.
+    if o.export != ""
+        export_command(o) match
+            Ok(_) -> return Ok(())
+            Err(why) ->
+                eprints(s"error: ${why}\n")
+                exit(1)
+
     val shot = o.shot
     val demo = o.demo
     val holes = o.holes
@@ -64,10 +55,7 @@ main(args: []string) -> Result[unit, string]
 
     if holes then add_hole_scene(w.doc)
 
-    if demo
-        for p in PRIMITIVES do w.doc.add_shape(p)
-
-        w.doc.select(Some(2))
+    if demo then add_demo_scene(w.doc)
 
     if selected != ""
         w.doc.select(None)

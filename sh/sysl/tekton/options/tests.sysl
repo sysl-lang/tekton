@@ -32,6 +32,22 @@ private hidden_is_a_flag_of_its_own_and_goes_with_control()
 end hidden_is_a_flag_of_its_own_and_goes_with_control
 
 @test
+private export_takes_its_file_and_leaves_the_document_to_the_rest()
+    assert_eq(parsed(["tekton"]).export, "")
+
+    val o = parsed(["tekton", "--export", "out.3mf", "--demo"])
+
+    assert_eq(o.export, "out.3mf")
+    assert(o.demo, "demo")
+    assert_eq(o.file, "")
+
+    val p = parsed(["tekton", "part.tekton", "--export", "part.stl"])
+
+    assert_eq(p.export, "part.stl")
+    assert_eq(p.file, "part.tekton")
+end export_takes_its_file_and_leaves_the_document_to_the_rest
+
+@test
 private every_option_with_its_value()
     val o = parsed(["tekton", "--shot", "f.png", "--size", "1400x900", "--select", "1,3", "--view", "0.3,0.5", "--menu",
                     "Edit", "--holes", "part.tekton"])
@@ -61,4 +77,5 @@ private an_option_missing_its_value_is_refused_not_read_past_the_end()
     assert_eq(why(["tekton", "--select"]), "--select takes shape numbers")
     assert_eq(why(["tekton", "--view"]), "--view takes TURN,TILT")
     assert_eq(why(["tekton", "--menu"]), "--menu takes a menu's title")
+    assert_eq(why(["tekton", "--export"]), "--export takes a file")
 end an_option_missing_its_value_is_refused_not_read_past_the_end

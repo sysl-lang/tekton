@@ -1,0 +1,199 @@
+module sh.sysl.tekton.batch
+
+import sh.sysl.tekton.document.{Document, Primitive, new_document}
+import sh.sysl.tekton.export.{export_3mf, export_stl}
+import sh.sysl.tekton.files.{load_file, save_file}
+import sh.sysl.tekton.options.parse_options
+import sh.sysl.tekton.scenes.add_demo_scene
+import sh.sysl.tekton.space.Vec3
+import sysl.buf.{Buf, buf}
+import sysl.fs.{exists, make_temp_dir, read_bytes, remove_dir_all}
+import sysl.process.{Status, capture}
+import sysl.testing.skip
+import sysl.text.{Search, parse_real, split}
+
+private demo() -> &Document
+    val doc = new_document()
+
+    add_demo_scene(doc)
+    doc
+end demo
+
+// What `tekton` with these arguments after its name exports, or why not.
+private exported(args: []string) -> Result[unit, string]
+    var all: Buf[string] = buf()
+
+    all.push("tekton")
+
+    for a in args do all.push(a)
+
+    export_command(parse_options(all.view()).unwrap())
+end exported
+
+private same_bytes(a: string, b: string) -> bool = read_bytes(a).unwrap().view() == read_bytes(b).unwrap().view()
+
+// A saved part of two shapes, one of them turned into a hole, for an export to read back.
+private saved_part(dir: string) -> string
+    val doc = new_document()
+    val file = s"${dir}/part.tekton"
+
+    doc.add_shape(Primitive.Box)
+    doc.add_shape(Primitive.Cylinder)
+    doc.move_to(2, Vec3(5.0, 0.0, 0.0)).unwrap()
+    save_file(doc, file).unwrap()
+    file
+end saved_part
+
+@test
+private exporting_the_demo_writes_what_the_exporters_write_for_it()
+    val one = make_temp_dir("tekton-batch").unwrap()
+    val two = make_temp_dir("tekton-batch").unwrap()
+
+    exported(["--export", s"${one}/demo.3mf", "--demo"]).unwrap()
+    export_3mf(demo(), s"${two}/demo.3mf").unwrap()
+    assert(same_bytes(s"${one}/demo.3mf", s"${two}/demo.3mf"), "3MF")
+
+    exported(["--demo", "--export", s"${one}/demo.stl"]).unwrap()
+    export_stl(demo(), s"${two}/demo.stl").unwrap()
+    assert(same_bytes(s"${one}/demo.stl", s"${two}/demo.stl"), "STL")
+
+    remove_dir_all(one).unwrap()
+    remove_dir_all(two).unwrap()
+end exporting_the_demo_writes_what_the_exporters_write_for_it
+
+@test
+private exporting_a_file_writes_what_the_exporters_write_for_it()
+    val one = make_temp_dir("tekton-batch").unwrap()
+    val two = make_temp_dir("tekton-batch").unwrap()
+    val file = saved_part(one)
+
+    exported([file, "--export", s"${one}/part.stl"]).unwrap()
+    export_stl(load_file(file).unwrap(), s"${two}/part.stl").unwrap()
+    assert(same_bytes(s"${one}/part.stl", s"${two}/part.stl"), "STL")
+
+    exported(["--export", s"${one}/part.3mf", file]).unwrap()
+    export_3mf(load_file(file).unwrap(), s"${two}/part.3mf").unwrap()
+    assert(same_bytes(s"${one}/part.3mf", s"${two}/part.3mf"), "3MF")
+
+    remove_dir_all(one).unwrap()
+    remove_dir_all(two).unwrap()
+end exporting_a_file_writes_what_the_exporters_write_for_it
+
+@test
+private a_failed_export_says_why_in_one_line_and_writes_nothing()
+    val dir = make_temp_dir("tekton-batch").unwrap()
+    val missing = s"${dir}/missing.tekton"
+
+    assert_eq(exported(["--export", s"${dir}/demo.obj", "--demo"]).unwrap_err(),
+              s"Not an export format: ${dir}/demo.obj (Tekton writes .stl and .3mf)")
+    assert_eq(exported(["--export", s"${dir}/x.obj", missing]).unwrap_err(),
+              s"Not an export format: ${dir}/x.obj (Tekton writes .stl and .3mf)")
+    assert_eq(exported(["--export", s"${dir}/x.stl", missing]).unwrap_err(),
+              s"Could not open ${missing}: no such file or directory")
+    assert_eq(exported(["--export", s"${dir}/x.3mf"]).unwrap_err(), "There is nothing solid to export")
+
+    for file in ["demo.obj", "x.obj", "x.stl", "x.3mf"] do assert(!exists(s"${dir}/${file}"), s"no ${file}")
+
+    remove_dir_all(dir).unwrap()
+end a_failed_export_says_why_in_one_line_and_writes_nothing
+
+// -- the program itself -----------------------------------------------------------------------------------------
+
+// `tekton` as a person runs it: its exit status, and what it wrote to each stream.
+private run_tekton(binary: string, args: []string) -> (Status, string, string)
+    val out = capture(binary, args, stderr = true).unwrap()
+
+    (out.status, out.text, out.err.unwrap_or(""))
+end run_tekton
+
+@test
+private the_program_exports_without_a_window_and_fails_with_one_line_and_status_1()
+    val dir = make_temp_dir("tekton-cli").unwrap()
+    val binary = s"${dir}/tekton"
+    val built = capture("sysl", ["build", ".", "-o", binary], stderr = true).unwrap()
+
+    assert(built.status.ok(), s"${built.text}${built.err.unwrap_or("")}")
+
+    val direct = make_temp_dir("tekton-cli").unwrap()
+    val file = saved_part(direct)
+
+    export_3mf(demo(), s"${direct}/demo.3mf").unwrap()
+    export_stl(demo(), s"${direct}/demo.stl").unwrap()
+    export_stl(load_file(file).unwrap(), s"${direct}/part.stl").unwrap()
+
+    for (args, name) in [(["--export", s"${dir}/demo.3mf", "--demo"], "demo.3mf"),
+                         (["--export", s"${dir}/demo.stl", "--demo"], "demo.stl"),
+                         (["--export", s"${dir}/part.stl", file], "part.stl")]
+        assert_eq(run_tekton(binary, args), (Status.Exited(0), "", ""))
+        assert(same_bytes(s"${dir}/${name}", s"${direct}/${name}"), name)
+
+    val missing = s"${dir}/missing.tekton"
+
+    val refused = (args: []string, why: string) -> assert_eq(run_tekton(binary, args), (Status.Exited(1), "", s"error: ${why}\n"))
+
+    refused(["--export", s"${dir}/x.obj", "--demo"], s"Not an export format: ${dir}/x.obj (Tekton writes .stl and .3mf)")
+    refused(["--export", s"${dir}/x.stl", missing], s"Could not open ${missing}: no such file or directory")
+    refused(["--export", s"${dir}/x.3mf"], "There is nothing solid to export")
+
+    val (status, text, err) = run_tekton(binary, ["--export"])
+
+    assert_eq((status, text), (Status.Exited(1), ""))
+    assert(err.starts_with("error: --export takes a file\n"), err)
+
+    remove_dir_all(dir).unwrap()
+    remove_dir_all(direct).unwrap()
+end the_program_exports_without_a_window_and_fails_with_one_line_and_status_1
+
+// -- PrusaSlicer ----------------------------------------------------------------------------------------------------
+
+const PRUSA_SLICER: string = "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer"
+
+// One `key = value` line of what `PrusaSlicer --info` printed, as a number.
+private info(text: string, key: string) -> real
+    for line in split(text, "\n")
+        val at = line.index_of(" = ") match
+            Some(i) -> i
+            None -> continue
+
+        if line[0..<at] == key then return parse_real(line[at + 3..<line.len].trim()).unwrap()
+
+    panic(s"PrusaSlicer printed no ${key}:\n${text}")
+end info
+
+// The slicer the part is printed with reads both exports of the demo as the five shapes Tekton made: the same
+// triangles, the same size, the same volume, and closed. A 3MF object is reported about its own centre, so only
+// the STL's place on the bed is compared.
+@test
+private prusa_slicer_reads_both_exports_of_the_demo_as_tekton_made_them()
+    // A skip, not a failure: a machine without the slicer can still build Tekton, and the run names the skip.
+    if !exists(PRUSA_SLICER) then skip(s"PrusaSlicer is not installed at ${PRUSA_SLICER}, so no slicer read the exports")
+
+    val dir = make_temp_dir("tekton-prusa").unwrap()
+    val doc = demo()
+    val mesh = doc.final_mesh().unwrap()
+    val bounds = doc.solid_bounds().unwrap()
+
+    for e in ["3mf", "stl"]
+        val file = s"${dir}/demo.${e}"
+
+        exported(["--export", file, "--demo"]).unwrap()
+
+        val out = capture(PRUSA_SLICER, ["--info", file]).unwrap()
+        val text = out.text
+
+        assert(out.status.ok(), text)
+        assert(text.contains("manifold = yes"), text)
+        assert_eq(info(text, "number_of_facets"), real(mesh.triangle_count()))
+        assert_eq(info(text, "number_of_parts"), 5.0)
+        assert((info(text, "size_x") - (bounds.max.x - bounds.min.x)).abs() < 1.0e-3, text)
+        assert((info(text, "size_y") - (bounds.max.y - bounds.min.y)).abs() < 1.0e-3, text)
+        assert((info(text, "size_z") - (bounds.max.z - bounds.min.z)).abs() < 1.0e-3, text)
+        assert((info(text, "volume") - mesh.volume()).abs() < mesh.volume() * 1.0e-4, text)
+
+        if e == "stl"
+            assert((info(text, "min_x") - bounds.min.x).abs() < 1.0e-3, text)
+            assert((info(text, "max_x") - bounds.max.x).abs() < 1.0e-3, text)
+            assert(info(text, "min_z").abs() < 1.0e-3, text)
+
+    remove_dir_all(dir).unwrap()
+end prusa_slicer_reads_both_exports_of_the_demo_as_tekton_made_them
