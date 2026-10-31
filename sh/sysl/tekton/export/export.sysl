@@ -5,7 +5,9 @@ import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf}
 import sysl.container.{Map, map}
 import sysl.encoding.{push_u16_le, push_u32_le}
+import sh.sysl.zip.{ZipError, writer}
 import sysl.fs.write_bytes_atomic
+import sysl.path.stem
 import sysl.text.{StrBuilder, str_builder}
 
 // The document as a slicer reads it: the one solid `Document.final_solid` makes, in millimetres.
@@ -74,6 +76,38 @@ export_stl(doc: &Document, file: string) -> Result[unit, string]
         Ok(_) -> Ok(())
         Err(e) -> Err(s"${e}")
 end export_stl
+
+// Write the document's solid to a file as 3MF, or say why not, exactly as `export_stl` does. The object is named
+// after the file.
+export_3mf(doc: &Document, file: string) -> Result[unit, string]
+    val mesh = doc.final_mesh() match
+        Ok(m) -> m
+        Err(why) -> return Err(why)
+
+    val bytes = three_mf_bytes(mesh, stem(file).unwrap_or("Tekton")) match
+        Ok(b) -> b
+        Err(e) -> return Err(s"${e}")
+
+    write_bytes_atomic(file, bytes.view()) match
+        Ok(_) -> Ok(())
+        Err(e) -> Err(s"${e}")
+end export_3mf
+
+// Where each part of a 3MF package lives in its zip.
+val CONTENT_TYPES_NAME = "[Content_Types].xml"
+val RELATIONSHIPS_NAME = "_rels/.rels"
+val MODEL_NAME = "3D/3dmodel.model"
+
+// A mesh as a 3MF file: the three parts, deflated, in a zip stamped with the earliest DOS time, so the same mesh
+// and name always make the same bytes.
+three_mf_bytes(mesh: &Mesh, name: string) -> Result[Buf[u8], ZipError]
+    var w = writer()
+
+    w.add(CONTENT_TYPES_NAME, content_types_part().bytes)?
+    w.add(RELATIONSHIPS_NAME, relationships_part().bytes)?
+    w.add(MODEL_NAME, model_part(shared_mesh(mesh), name).bytes)?
+    Ok(w.finish())
+end three_mf_bytes
 
 // A mesh as a 3MF file holds it: each distinct position once, and every triangle as three indices into them.
 struct SharedMesh

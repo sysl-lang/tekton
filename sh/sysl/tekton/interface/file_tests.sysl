@@ -5,6 +5,7 @@ import sh.sysl.sdl3.{DialogResult, HINT_VIDEO_DRIVER, INIT_VIDEO, KMOD_GUI, KMOD
                      set_hint}
 import sh.sysl.tekton.camera.new_camera
 import sh.sysl.tekton.document.{Node, Primitive, identity_transform, restored_document, restored_group, restored_shape}
+import sh.sysl.tekton.export.three_mf_bytes
 import sh.sysl.tekton.files.document_text
 import sh.sysl.ui.*
 import sysl.buf.{Buf, buf}
@@ -54,6 +55,7 @@ private struct Dialogs
     opens: int
     saves: int
     exports: int
+    three_mf_exports: int
     reply: Result[Option[i32], string]
     questions: int
     asked: string
@@ -69,7 +71,7 @@ end chosen
 // third. The question says Cancel until told otherwise.
 private workspace() -> (&Workspace, &Dialogs, &Signal[int])
     val w = new_workspace()
-    val d: &Dialogs = Dialogs(DialogResult.Cancelled, 0, 0, 0, Ok(Some(CANCEL_ANSWER)), 0, "")
+    val d: &Dialogs = Dialogs(DialogResult.Cancelled, 0, 0, 0, 0, Ok(Some(CANCEL_ANSWER)), 0, "")
     val quits = signal(0)
 
     w.ask_open = (answer, parent) ->
@@ -80,6 +82,9 @@ private workspace() -> (&Workspace, &Dialogs, &Signal[int])
         answer(d.answer)
     w.ask_export_stl = (answer, parent) ->
         d.exports += 1
+        answer(d.answer)
+    w.ask_export_3mf = (answer, parent) ->
+        d.three_mf_exports += 1
         answer(d.answer)
     w.ask_changes = (title, parent) ->
         d.questions += 1
@@ -111,9 +116,52 @@ the_file_menu_lists_its_commands_with_their_shortcuts()
 
     tap(w, &c, "menu.File")
 
-    for label in ["New", "Open", "Save", "Save As", "Export STL…", "Quit"]
+    for label in ["New", "Open", "Save", "Save As", "Export STL…", "Export 3MF…", "Quit"]
         assert(shows(w, &c, s"menu.File.${label}"), label)
 end the_file_menu_lists_its_commands_with_their_shortcuts
+
+@test
+export_3mf_writes_the_solid_and_leaves_the_document_its_file_and_mark()
+    val (w, d, _) = workspace()
+    var c = recorder()
+    val at = dir()
+    val doc_file = box_file(at)
+
+    assert(w.open_path(doc_file), "opened")
+    w.add(Primitive.Sphere)
+    d.answer = chosen(s"${at}/part")
+    choose(w, &c, "Export 3MF…")
+    assert_eq(d.three_mf_exports, 1, "asked where")
+    assert_eq(d.exports, 0, "not the STL dialog")
+    assert_eq(read_bytes(s"${at}/part.3mf").unwrap(), three_mf_bytes(w.doc.final_mesh().unwrap(), "part").unwrap().view(),
+              "written, with its extension, box and sphere, named after the file")
+    assert_eq(w.file, doc_file, "the document's own file")
+    assert(w.doc.is_dirty(), "still unsaved")
+    assert_eq(w.problem.read(), "", "nothing wrong")
+    assert(!w.in_dialog.read(), "the dialog is gone")
+    remove_dir_all(at).unwrap()
+end export_3mf_writes_the_solid_and_leaves_the_document_its_file_and_mark
+
+@test
+export_3mf_of_an_empty_document_says_why_and_asks_nothing()
+    val (w, d, _) = workspace()
+    var c = recorder()
+
+    choose(w, &c, "Export 3MF…")
+    assert_eq(d.three_mf_exports, 0, "no dialog")
+    assert_eq(w.problem.read(), "Could not export: There is nothing solid to export", "the panel says why")
+end export_3mf_of_an_empty_document_says_why_and_asks_nothing
+
+@test
+export_3mf_to_where_no_file_can_be_says_so()
+    val (w, d, _) = workspace()
+    var c = recorder()
+
+    w.add(Primitive.Box)
+    d.answer = chosen("/no/such/directory/part")
+    choose(w, &c, "Export 3MF…")
+    assert(w.problem.read().starts_with("Could not export part.3mf: "), s"named: ${w.problem.read()}")
+end export_3mf_to_where_no_file_can_be_says_so
 
 @test
 export_stl_writes_the_solid_and_leaves_the_document_its_file_and_mark()
@@ -869,6 +917,9 @@ every_dialog_and_the_question_belong_to_the_window()
     w.ask_export_stl = (answer, parent) ->
         p.seen.push(parent.is_some() && parent.unwrap() === p.window)
         answer(DialogResult.Cancelled)
+    w.ask_export_3mf = (answer, parent) ->
+        p.seen.push(parent.is_some() && parent.unwrap() === p.window)
+        answer(DialogResult.Cancelled)
     w.ask_changes = (title, parent) ->
         p.seen.push(parent.is_some() && parent.unwrap() === p.window)
         Ok(Some(CANCEL_ANSWER))
@@ -877,15 +928,16 @@ every_dialog_and_the_question_belong_to_the_window()
     w.save_as()
     w.add(Primitive.Box)
     w.export_stl_file()
+    w.export_3mf_file()
     w.new_file()
-    assert_eq(p.seen.len(), 4, "open, save as, export and the question")
+    assert_eq(p.seen.len(), 5, "open, save as, both exports and the question")
 
     for one in p.seen.view() do assert(one, "each given the window")
 
     w.parent = () -> None
     w.open_file()
-    assert_eq(p.seen.len(), 5, "asked again")
-    assert(!p.seen[4], "and with no window, none")
+    assert_eq(p.seen.len(), 6, "asked again")
+    assert(!p.seen[5], "and with no window, none")
     assert_eq(d.opens, 0, "the test's own dialogs answered, not the helper's")
 end every_dialog_and_the_question_belong_to_the_window
 

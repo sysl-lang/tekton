@@ -78,10 +78,12 @@ dialog filters for `.stl`, and the answer gets `.stl` added unless it already en
 (`export_answer`), since a slicer goes by the extension. **An export is not a save**: the document keeps its file
 and its unsaved mark.
 
-3MF's three parts are made and tested (`content_types_part`, `relationships_part`, `model_part`): the model in
-millimetres, each distinct position once with indexed triangles, any name XML-escaped. **There is no Export 3MF
-yet**, because 3MF is a zip and no package in the org writes one: `sysl-lang/miniz` binds deflate and CRC-32 with
-miniz's archive API compiled out.
+**File > Export 3MF…**, right after it, sends the same solid as 3MF, with the same refusals, the same atomic
+write, a `.3mf` filter and `.3mf` added the same way. A 3MF file is a zip (packed by `sysl-lang/zip`) of three
+parts, each deflated: `[Content_Types].xml` (`content_types_part`), `_rels/.rels` (`relationships_part`) and
+`3D/3dmodel.model` (`model_part`), the model in millimetres, each distinct position once with indexed triangles,
+and one object named after the file, XML-escaped (`three_mf_bytes`). Every entry carries the earliest DOS time
+and nothing from the clock, so one document exported twice is the same bytes.
 
 ## The layers
 
