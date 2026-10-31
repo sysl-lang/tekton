@@ -19,8 +19,8 @@ The window is a menu bar across the top and, below it, one viewport, a short sha
 panel for the selection. Undo reaches everything. There are no modes: no edit mode, no modifier stack, no
 vertex editing.
 
-The bar holds File, Edit and View. File has New, Open, Save, Save As and Quit, with Cmd+N, Cmd+O, Cmd+S and
-Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All. A
+The bar holds File, Edit and View. File has New, Open, Save, Save As, Export STL… and Quit, with Cmd+N, Cmd+O,
+Cmd+S and Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All. A
 row is dimmed where its command would do nothing now, and its shortcut is shown only where that key works.
 While a menu is open the viewport takes no input at all, so a press, a drag or the wheel over a menu or
 beside it never reaches the model or the camera.
@@ -60,6 +60,26 @@ is up nothing behind it takes input, because what it answers was asked about thi
 given no window, since `syslui-sdl` keeps its own, and on a Mac that makes them modal to the application rather
 than sheets on the window.
 
+## Export
+
+**File > Export STL…** writes what a slicer is sent, in `sh.sysl.tekton.export`: the document's one final solid
+(`Document.final_solid`), every part joined and every hole cut as if the whole document were one group, so a hole
+standing on the ground cuts whatever it overlaps. It is binary STL in millimetres: an 80-byte header that says
+Tekton (and so never begins with `solid`, which marks a text STL), the triangle count, and each triangle's unit
+normal and three corners, counter-clockwise from outside, as the kernel's own little-endian `f32`s.
+
+A document with nothing to send says why in the panel before any dialog, and nothing is written: one a file
+would refuse (a group with no solid part, one the kernel cannot join), one with no solid at all, or one whose
+holes cut everything away. The file is written atomically like a save, so a failure leaves the old one whole. The
+dialog filters for `.stl`, and the answer gets `.stl` added unless it already ends that way in any case
+(`export_answer`), since a slicer goes by the extension. **An export is not a save**: the document keeps its file
+and its unsaved mark.
+
+3MF's three parts are made and tested (`content_types_part`, `relationships_part`, `model_part`): the model in
+millimetres, each distinct position once with indexed triangles, any name XML-escaped. **There is no Export 3MF
+yet**, because 3MF is a zip and no package in the org writes one: `sysl-lang/miniz` binds deflate and CRC-32 with
+miniz's archive API compiled out.
+
 ## The layers
 
 | layer | what |
@@ -67,7 +87,7 @@ than sheets on the window.
 | kernel | `sysl-lang/manifold`: watertight booleans and primitives |
 | viewport | SDL_GPU through `sysl-lang/sdl3`, with a depth buffer |
 | interface | `sysl-lang/syslui` on `sysl-lang/syslui-sdl`, drawn over the viewport |
-| files | a text document format through `sysl-lang/hocon`; STL and 3MF export to come |
+| files | a text document format through `sysl-lang/hocon`; binary STL export |
 | scripting | interpreted nex, through its embedding API |
 
 SDL's `SDL_CreateGPURenderer` lets one GPU device drive both the 2D renderer syslui-sdl already uses

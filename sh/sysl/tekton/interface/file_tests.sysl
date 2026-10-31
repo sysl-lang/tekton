@@ -167,6 +167,13 @@ export_stl_to_where_no_file_can_be_says_so_and_cancel_says_nothing()
     choose(w, &c, "Export STL…")
     assert_eq(d.exports, 2, "asked again")
     assert(w.problem.read().starts_with("Could not export part.stl: "), "a cancel leaves the panel as it was")
+
+    val at = dir()
+
+    d.answer = chosen(s"${at}/part.stl")
+    choose(w, &c, "Export STL…")
+    assert_eq(w.problem.read(), "", "an export that works clears it")
+    remove_dir_all(at).unwrap()
 end export_stl_to_where_no_file_can_be_says_so_and_cancel_says_nothing
 
 @test
