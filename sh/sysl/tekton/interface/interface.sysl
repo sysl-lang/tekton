@@ -13,6 +13,7 @@ import sh.sysl.tekton.renderer.{Renderer, new_renderer}
 import sh.sysl.ui.*
 import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, set_title, stop, viewport, viewport_depth_format, window}
 import sysl.buf.{Buf, buf}
+import sysl.math.{max, min}
 import sysl.path.file_name
 import sysl.text.{parse_real, split, to_lower}
 
@@ -78,6 +79,7 @@ enum Quantity
     Position
     Size
     Rotation
+    Segments
 
 // A click selected or cleared the selection, or the palette added a shape. What a document's panel
 // shows follows this.
@@ -683,7 +685,7 @@ struct Workspace
              spacer().frame(1, 0).background(0xCBD2DCu32)])
     end panel
 
-    // The nine number fields, made once, because each remembers what is being typed in it.
+    // The nine number fields and the segments field, made once, because each remembers what is being typed in it.
     number_fields(&self) -> []&NumberField
         if self.fields.len() == 0
             for q in [Quantity.Position, Quantity.Size, Quantity.Rotation]
@@ -691,6 +693,8 @@ struct Workspace
                     val id = FIRST_FIELD_ID + int(self.fields.len())
 
                     self.fields.push(new_number_field(self, q, axis, id))
+
+            self.fields.push(new_number_field(self, Quantity.Segments, 0, FIRST_FIELD_ID + int(self.fields.len())))
 
         self.fields.view()
     end number_fields
@@ -726,7 +730,7 @@ struct Workspace
         self.doc.selected.and_then(id -> self.doc.find(id)) match
             Some(node) ->
                 val name = node.operation match
-                    Shape(p) -> primitive_name(p)
+                    Shape(p, _) -> primitive_name(p)
                     Group -> "Group"
                 val fields = self.number_fields()
 
@@ -736,6 +740,10 @@ struct Workspace
                 for (i, label) in [(0, "Position, mm"), (3, "Size, mm"), (6, "Rotation, degrees")]
                     parts.push(text(label).font_size(11.0))
                     parts.push(row([fields[i].view(), fields[i + 1].view(), fields[i + 2].view()], 3))
+
+                if node.segments.is_some()
+                    parts.push(text("Segments").font_size(11.0))
+                    parts.push(row([fields[9].view().named("panel.segments")], 3))
 
                 if node.is_group
                     parts.push(row([self.small_button("Ungroup", () -> self.ungroup(), "panel.ungroup", true).flex(),
@@ -758,7 +766,8 @@ struct Workspace
         Some(q match
             Position -> node.transform.translation.axis(axis)
             Size -> self.doc.size_of(node).axis(axis)
-            Rotation -> euler_degrees(node.transform.rotation)[axis])
+            Rotation -> euler_degrees(node.transform.rotation)[axis]
+            Segments -> real(node.segments?))
     end number
 
     // The command behind a number typed into a field.
@@ -769,6 +778,12 @@ struct Workspace
         val done = q match
             Position -> self.doc.move_to(id, node.transform.translation.with_axis(axis, value))
             Size -> self.doc.resize_to(id, self.doc.size_of(node).with_axis(axis, value))
+            Segments ->
+                if !value.is_finite() || value != value.round()
+                    Err("Segments must be a whole number")
+                else
+                    // Held to what an int holds; the document holds it to what a shape may have.
+                    self.doc.set_segments(id, int(max(-1.0e6, min(1.0e6, value))))
             Rotation ->
                 if !value.is_finite()
                     Err("Rotation must be a number of degrees")

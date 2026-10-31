@@ -70,9 +70,15 @@ primitive_name(p: Primitive) -> string =
         Cone -> "Cone"
         Torus -> "Torus"
 
+// Whether a primitive is faceted around an axis, so that how many sides it has is its own to choose.
+is_round(p: Primitive) -> bool =
+    p match
+        Box -> false
+        _ -> true
+
 // What a node computes. A group's solid is its solid children joined, with its hole children cut out.
 enum Operation
-    Shape(primitive: Primitive)
+    Shape(primitive: Primitive, segments: int)
     Group
 
 // Where a node's solid goes in its parent's space: scaled, then rotated, then moved.
@@ -243,6 +249,12 @@ struct Node
 
     mesh = self.derived.mesh
 
+    // How many sides a round shape has around its axis, or nothing for a shape that is not round or a group.
+    segments -> Option[int] =
+        self.operation match
+            Shape(p, n) -> if is_round(p) then Some(n) else None
+            Group -> None
+
     is_group -> bool =
         self.operation match
             Group -> true
@@ -256,6 +268,14 @@ struct Node
     private with_hole(&self, hole: bool) -> &Node =
         Node(self.id, self.operation, self.transform, self.tint, hole, self.children, self.derived, self.solid,
              self.bounds)
+
+    // This shape with another number of sides, so nothing derived from the old one holds.
+    private with_segments(&self, segments: int) -> &Node =
+        self.operation match
+            Shape(p, _) ->
+                Node(self.id, Operation.Shape(p, segments), self.transform, self.tint, self.hole, self.children,
+                     Derived(None, None), None, None)
+            Group -> self
 
     // This node made of other children, so nothing derived from the old ones holds.
     private with_children(&self, children: Buf[&Node]) -> &Node =
@@ -286,7 +306,7 @@ struct Node
         val t = self.transform
         val q = t.rotation
         val name = self.operation match
-            Shape(p) -> primitive_name(p)
+            Shape(p, n) -> s"${primitive_name(p)}/${n}"
             Group -> "Group"
         var parts = ""
 
@@ -554,7 +574,7 @@ struct Document
 
         for item in self.items() do items.push(item)
 
-        items.push(Node(id, Operation.Shape(p), moved_to(at), id - 1, false, buf(), Derived(None, None), None, None))
+        items.push(Node(id, Operation.Shape(p, ROUND_SEGMENTS), moved_to(at), id - 1, false, buf(), Derived(None, None), None, None))
         self.put_items(items)
         self.next_id += 1
         self.last_placed = Some(id)
@@ -576,6 +596,20 @@ struct Document
                 self.put_node(node.with_transform(t))
             None -> ()
     end set_transform
+
+    // The command behind the segments field: how many sides a round shape has, held to what prints and draws.
+    // A shape that is not round is refused, and a number that changes nothing is not a step.
+    set_segments(&self, id: int, segments: int) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+        val now = node.segments.ok_or("Only a round shape has segments")?
+        val wanted = clamped_segments(segments)
+
+        if wanted == now then return Ok(())
+
+        self.record()
+        self.put_node(node.with_segments(wanted))
+        Ok(())
+    end set_segments
 
     // The command behind the solid and hole buttons, on everything selected.
     set_hole(&self, hole: bool) -> Result[unit, string]
@@ -890,7 +924,7 @@ struct Document
         self.builds += 1
 
         val s = node.operation match
-            Shape(p) -> primitive_solid(p)
+            Shape(p, n) -> primitive_solid(p, n)
             Group ->
                 var solids: Buf[&Manifold] = buf()
                 var holes: Buf[&Manifold] = buf()
@@ -1003,8 +1037,8 @@ restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], nex
 end restored_document
 
 // A shape as a file says it.
-restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool) -> &Node =
-    Node(id, Operation.Shape(p), t, tint, hole, buf(), Derived(None, None), None, None)
+restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool, segments: int = ROUND_SEGMENTS) -> &Node =
+    Node(id, Operation.Shape(p, segments), t, tint, hole, buf(), Derived(None, None), None, None)
 
 // A group as a file says it.
 restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node]) -> &Node =
@@ -1045,16 +1079,29 @@ private snapped(v: real) -> real = (v / 5.0).ceil() * 5.0
 
 // The solid of a primitive as a palette makes it: 20 mm across, centred on the z axis, standing on the
 // ground.
-primitive_solid(p: Primitive) -> &Manifold =
+primitive_solid(p: Primitive, segments: int = ROUND_SEGMENTS) -> &Manifold =
     p match
         Box -> cube(20.0, 20.0, 20.0, center = true).translate(0.0, 0.0, 10.0)
-        Cylinder -> cylinder(20.0, 10.0, 10.0, ROUND_SEGMENTS)
-        Sphere -> sphere(10.0, ROUND_SEGMENTS).translate(0.0, 0.0, 10.0)
-        Cone -> cylinder(20.0, 10.0, 0.0, ROUND_SEGMENTS)
-        Torus -> circle(TORUS_TUBE, 24).translate(TORUS_RING, 0.0).revolve(ROUND_SEGMENTS).translate(0.0, 0.0, TORUS_TUBE)
+        Cylinder -> cylinder(20.0, 10.0, 10.0, segments)
+        Sphere -> sphere(10.0, segments).translate(0.0, 0.0, 10.0)
+        Cone -> cylinder(20.0, 10.0, 0.0, segments)
+        Torus -> circle(TORUS_TUBE, torus_tube_segments(segments)).translate(TORUS_RING, 0.0).revolve(segments)
+                 .translate(0.0, 0.0, TORUS_TUBE)
 
-// How many sides a round primitive has around its axis.
+// How many sides a round primitive has around its axis unless it says otherwise. At 64 a circle 100 mm across
+// strays at most 0.06 mm from true, well under a 0.2 mm layer, so a print of it reads as round.
 const ROUND_SEGMENTS: int = 64
+
+// The fewest sides a round shape may have, which is a triangle, and the most, past which a print shows no
+// difference and the triangles only slow the kernel.
+const MIN_SEGMENTS: int = 3
+const MAX_SEGMENTS: int = 512
+
+// A number of sides held to the range a round shape may have.
+clamped_segments(n: int) -> int = max(MIN_SEGMENTS, min(MAX_SEGMENTS, n))
+
+// How many sides a torus's tube has: three eighths of its ring's, as many as a ring of 64 always gave it.
+torus_tube_segments(segments: int) -> int = max(MIN_SEGMENTS, segments * 3 / 8)
 
 // The ring and tube radii of the palette's torus, in millimetres.
 const TORUS_RING: real = 7.0

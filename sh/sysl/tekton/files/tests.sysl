@@ -42,9 +42,12 @@ private assert_same_node(a: &Node, b: &Node)
     assert_same_transform(a.transform, b.transform)
 
     a.operation match
-        Shape(p) ->
+        Shape(p, n) ->
             b.operation match
-                Shape(q) -> assert_eq(p, q, "primitive")
+                Shape(q, m) ->
+                    assert_eq(p, q, "primitive")
+                    assert_eq(a.segments, b.segments, "segments")
+                    assert_eq(n, m, "the number the kernel is given")
                 Group -> assert(false, "a shape came back a group")
         Group -> ()
 
@@ -144,7 +147,7 @@ end an_empty_document_comes_back_empty_and_a_gone_last_is_not_written
 the_first_line_is_the_version()
     val text = document_text(new_document())
 
-    assert(text.starts_with("tekton = 1\n"), text)
+    assert(text.starts_with("tekton = 2\n"), text)
 end the_first_line_is_the_version
 
 @test
@@ -174,7 +177,7 @@ end a_loaded_documents_meshes_go_on_from_the_revision_asked_for
 // Each way a first line can be wrong, each on line 1.
 @test
 a_wrong_first_line_is_refused_on_line_1()
-    val not_ours = "line 1: not a Tekton document: the first line must be `tekton = 1`"
+    val not_ours = "line 1: not a Tekton document: the first line must be `tekton = 2`"
 
     assert_eq(refusal(""), "line 1: the file is empty", "empty")
     assert_eq(refusal("hello there"), not_ours, "prose")
@@ -184,10 +187,10 @@ a_wrong_first_line_is_refused_on_line_1()
     assert_eq(refusal("tekton = -1\n"), not_ours, "negative")
     assert_eq(refusal("tekton = one\n"), not_ours, "a word")
     assert_eq(refusal("tekton = 1 next = 2\n"), not_ours, "more on the line")
-    assert_eq(refusal("tekton = 2\nnext = \"anything {[\n"),
-              "line 1: this file is format 2, from a newer Tekton; this one reads up to format 1", "too new")
+    assert_eq(refusal("tekton = 3\nnext = \"anything {[\n"),
+              "line 1: this file is format 3, from a newer Tekton; this one reads up to format 2", "too new")
     assert_eq(refusal("tekton = 99999999999999999999999\n"),
-              "line 1: this file is format 99999999999999999999999, from a newer Tekton; this one reads up to format 1",
+              "line 1: this file is format 99999999999999999999999, from a newer Tekton; this one reads up to format 2",
               "too new to count")
 end a_wrong_first_line_is_refused_on_line_1
 
@@ -599,3 +602,59 @@ a_file_that_is_not_text_is_refused_with_a_line()
     assert_eq(why, "line 2: this is not text", "binary")
     remove_dir_all(dir).unwrap()
 end a_file_that_is_not_text_is_refused_with_a_line
+
+// ## Segments
+
+private val ROUND_FILE: string = "tekton = 2\nnext = 2\nnodes = [\n  {\n    id = 1\n    kind = cylinder\n    tint = 0\n    hole = false\n    at = [0.0, 0.0, 0.0]\n    turn = [1.0, 0.0, 0.0, 0.0]\n    scale = [1.0, 1.0, 1.0]\n    segments = 12\n  }\n]\n"
+
+@test
+segments_come_back_and_only_round_shapes_write_them()
+    val doc = new_document()
+    val box = doc.add_shape(Primitive.Box)
+    val sphere = doc.add_shape(Primitive.Sphere)
+    val torus = doc.add_shape(Primitive.Torus)
+
+    doc.set_segments(sphere, 7).unwrap()
+    doc.set_segments(torus, 512).unwrap()
+
+    val text = document_text(doc)
+    val back = round_trip(doc)
+
+    assert_same_document(doc, back)
+    assert_eq(back.find(sphere).unwrap().segments, Some(7), "the sphere's")
+    assert_eq(back.find(torus).unwrap().segments, Some(512), "the torus's")
+    assert(back.find(box).unwrap().segments.is_none(), "and the box has none")
+    assert(text.contains("    segments = 7\n"), text)
+    assert_eq(replace_all(text, "segments", "").len, text.len - 2 * "segments".len,
+              "written for the two round shapes and not the box")
+    assert_eq(document_text(back), text, "and the text is stable")
+
+@test
+an_old_format_file_opens_with_the_default_segments()
+    val doc = document_from_text(GROUP_FILE).unwrap()
+    val cylinder = doc.find(2).unwrap()
+
+    assert(GROUP_FILE.starts_with("tekton = 1\n"), "a format 1 file")
+    assert_eq(cylinder.segments, Some(64), "the sides a round shape always had")
+    assert(document_text(doc).starts_with("tekton = 2\n"), "and saved again it is format 2")
+    assert(document_text(doc).contains("segments = 64"), "saying so")
+
+@test
+a_file_says_its_segments()
+    val doc = document_from_text(ROUND_FILE).unwrap()
+
+    assert_eq(doc.items()[0].segments, Some(12), "twelve")
+
+@test
+bad_segments_are_refused_on_their_line()
+    for (put, why) in [("segments = 2", "`segments` must be from 3 to 512"), ("segments = 513", "`segments` must be from 3 to 512"),
+                       ("segments = -1", "`segments` must be from 3 to 512"), ("segments = 1.5", "`segments` must be a whole number"),
+                       ("segments = many", "`segments` must be a whole number")]
+        assert_eq(refusal(replace_all(ROUND_FILE, "segments = 12", put)), s"line 12: ${why}", put)
+
+    for (put, kept) in [("segments = 3", 3), ("segments = 512", 512)]
+        assert_eq(document_from_text(replace_all(ROUND_FILE, "segments = 12", put)).unwrap().items()[0].segments,
+                  Some(kept), put)
+
+    assert_eq(refusal(with("scale = [1.0, 1.0, 1.0]", "scale = [1.0, 1.0, 1.0]\n    segments = 12")),
+              "line 13: a box has no `segments`", "a box")

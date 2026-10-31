@@ -1457,3 +1457,66 @@ an_unknown_menu_is_not_opened()
     assert(!w.show_menu("Window"), "no such menu")
     assert_eq(w.open_menu.read(), NO_MENU, "and nothing opened")
 end an_unknown_menu_is_not_opened
+
+// ## Segments
+
+private const SEGMENTS: int = 3
+
+@test
+the_segments_field_shows_only_for_a_round_shape()
+    val w = new_workspace()
+    val box = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    assert(!shows(w, &c, "panel.segments"), "not for a box")
+
+    for p in [Primitive.Cylinder, Primitive.Sphere, Primitive.Cone, Primitive.Torus]
+        w.doc.select(Some(w.doc.add_shape(p)))
+        assert(shows(w, &c, "panel.segments"), "for a round shape")
+
+    w.doc.toggle_selected(box)
+    assert(!shows(w, &c, "panel.segments"), "not for several")
+
+    val group = w.doc.group_selected().unwrap()
+
+    w.doc.select(Some(group))
+    assert(!shows(w, &c, "panel.segments"), "nor for a group")
+    w.doc.select(None)
+    assert(!shows(w, &c, "panel.segments"), "nor for nothing")
+
+@test
+typing_segments_sets_them_held_to_the_range_as_one_step()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Cylinder)
+    var c = recorder()
+    val f = field_of(w, SEGMENTS, 0)
+
+    paint_field(f, &c)
+    assert_eq(f.text.read(), "64", "the default")
+
+    val steps = w.doc.undos.len()
+
+    type_into(f, &c, "12", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().segments, Some(12), "set")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+
+    type_into(f, &c, "1000", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().segments, Some(512), "held to the most")
+    paint_field(f, &c)
+    assert_eq(f.text.read(), "512", "and the field says so")
+
+    type_into(f, &c, "1", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().segments, Some(3), "held to the fewest")
+    type_into(f, &c, "-1e300", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().segments, Some(3), "however few")
+    type_into(f, &c, "1e300", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().segments, Some(512), "however many")
+
+    for bad in ["", "abc", "12.5", "nan", "inf"]
+        type_into(f, &c, bad, Key.Enter)
+        assert_eq(w.doc.find(a).unwrap().segments, Some(512), s"kept, for '${bad}'")
+        assert(f.wrong, s"marked, for '${bad}'")
+        assert(w.problem.read() != "", s"and explained, for '${bad}'")
+
+    assert(w.doc.undo(), "undone")
+    assert_eq(w.doc.find(a).unwrap().segments, Some(3), "one edit back")

@@ -4,7 +4,7 @@ import sh.sysl.hocon.{Value, parse}
 import sh.sysl.parsing.{Source, Span, source_of}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.DialogResult
-import sh.sysl.tekton.document.{Document, Node, Operation, PRIMITIVES, Primitive, Transform, primitive_name, restored_document, restored_group, restored_shape}
+import sh.sysl.tekton.document.{Document, MAX_SEGMENTS, MIN_SEGMENTS, Node, Operation, PRIMITIVES, Primitive, ROUND_SEGMENTS, Transform, is_round, primitive_name, restored_document, restored_group, restored_shape}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf, byte_sink}
 import sysl.container.{Set, set}
@@ -15,7 +15,7 @@ import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
 
 // A document in a file, as text a person can read and a diff can show.
 //
-//     tekton = 1
+//     tekton = 2
 //     next = 4
 //     last = 3
 //     nodes = [
@@ -44,8 +44,12 @@ import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
 // **Every number is written as the shortest text that reads back as the same value**, so a transform comes back
 // bit for bit.
 
-// The format this writes, and the newest it reads.
-const FORMAT_VERSION: long = 1
+// A round shape also says how many sides it has, as `segments`. Format 2 added it, so a format 1 file, which
+// never says, gives every round shape the number it was always drawn with.
+
+// The format this writes, and the newest it reads. A key an older reader would refuse is a new format, so that
+// reader says "too new" rather than "unknown key".
+const FORMAT_VERSION: long = 2
 
 // The largest id or tint a file may hold, far past what any model reaches, so that counting on from one is safe.
 const NUMBER_LIMIT: long = 1 << 30
@@ -87,7 +91,7 @@ private write_node(b: &StrBuilder, node: &Node, indent: string)
     val t = node.transform
     val q = t.rotation
     val kind = node.operation match
-        Shape(p) -> to_lower(primitive_name(p))
+        Shape(p, _) -> to_lower(primitive_name(p))
         Group -> "group"
 
     b.push(s"${indent}{\n${inner}id = ${node.id}\n${inner}kind = ${kind}\n${inner}tint = ${node.tint}\n")
@@ -95,6 +99,10 @@ private write_node(b: &StrBuilder, node: &Node, indent: string)
     b.push(s"${inner}at = ${numbers_text([t.translation.x, t.translation.y, t.translation.z])}\n")
     b.push(s"${inner}turn = ${numbers_text([q.w, q.x, q.y, q.z])}\n")
     b.push(s"${inner}scale = ${numbers_text([t.scale.x, t.scale.y, t.scale.z])}\n")
+
+    node.segments match
+        Some(n) -> b.push(s"${inner}segments = ${n}\n")
+        None -> ()
 
     if node.is_group
         b.push(s"${inner}parts = [\n")
@@ -223,7 +231,19 @@ private struct Reading
 
         if parts.is_some() then return Err(self.refusal(v.span, s"a ${kind} has no `parts`"))
 
-        Ok(restored_shape(id, primitive, t, tint, hole))
+        val segments = v.get("segments") match
+            Some(given) ->
+                if !is_round(primitive) then return Err(self.refusal(given.span, s"a ${kind} has no `segments`"))
+
+                val n = given.as_long().ok_or(self.refusal(given.span, "`segments` must be a whole number"))?
+
+                if n < long(MIN_SEGMENTS) || n > long(MAX_SEGMENTS)
+                    return Err(self.refusal(given.span, s"`segments` must be from ${MIN_SEGMENTS} to ${MAX_SEGMENTS}"))
+
+                int(n)
+            None -> ROUND_SEGMENTS
+
+        Ok(restored_shape(id, primitive, t, tint, hole, segments))
     end node
 
     line_of_id(&self, id: int) -> usize
@@ -235,7 +255,7 @@ private struct Reading
 end Reading
 
 private is_node_key(key: string) -> bool
-    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "parts"]
+    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "segments", "parts"]
         if k == key then return true
 
     false
