@@ -8,11 +8,11 @@ import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_gri
 import sh.sysl.tekton.picking.{pick, pick_hit}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
 import sh.sysl.ui.*
-import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, viewport, viewport_depth_format}
+import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, stop, viewport, viewport_depth_format}
 import sysl.buf.{Buf, buf}
 import sysl.text.{parse_real, split, to_lower}
 
-// The window: a palette beside one viewport.
+// The window: a menu bar over a palette beside one viewport.
 //
 // Everything the pointer can do arrives here and leaves as a command on the document or a move of the
 // camera. **The slop is what tells a click from a drag**: a press that travels further than this over the
@@ -77,6 +77,15 @@ struct Workspace
     // what is half typed into a field was written against the document as it stands.
     typing: bool
 
+    // Which menu of the bar is open.
+    open_menu: &Signal[int]
+
+    // A press that began while a menu was open, until it is let go: it was the menu's, whatever became of the menu.
+    menu_press: bool
+
+    // What the File menu's Quit does.
+    quit: &Fn() -> unit
+
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
     // The palette's command, and what the view does about it.
@@ -116,6 +125,12 @@ struct Workspace
             self.doc.redo()
             self.answer(Ok(()))
     end redo
+
+    // Bring everything in the document into view.
+    frame_all(&self)
+        self.camera.frame(self.doc)
+        self.changed()
+    end frame_all
 
     // A key the toolkit does not see, as the window reports it: `code` is the layout's own, so the letters are
     // where the keyboard has them. Says whether it was a shortcut, and so whether anyone else should see it.
@@ -233,9 +248,22 @@ struct Workspace
             _ -> false
 
     // What the pointer did over the viewport this frame.
+    //
+    // **While a menu is open the viewport hears none of it.** What is raised over the viewport takes taps from
+    // it, but a drag and the wheel are read here by position, so a wobble on a row of a menu would turn the view
+    // and the wheel over a menu would zoom it.
     private input(&self, c: *Canvas, r: Rect)
         self.width = r.w
         self.height = r.h
+
+        if self.open_menu.read() != NO_MENU && c.held(PointerButton.Primary) then self.menu_press = true
+        if !c.held(PointerButton.Primary) then self.menu_press = false
+
+        if self.open_menu.read() != NO_MENU || self.menu_press
+            self.typing = c.focus() != NOBODY
+            self.overlay = layout(self.doc, self.camera, real(r.w), real(r.h))
+
+            return
 
         val (ox, oy) = c.drag_by(r, 1, PointerButton.Primary, CLICK_SLOP, CLICK_SLOP)
 
@@ -326,8 +354,42 @@ struct Workspace
     tree(&self) -> &View
         self.changes.read()
 
-        row([self.panel(), self.viewport().flex()])
+        column([menu_bar(self.menus().view(), self.open_menu).restyle(t -> light()),
+                row([self.panel(), self.viewport().flex()]).flex()], 0)
     end tree
+
+    // The menus, each row live only where its command would do something now.
+    private menus(&self) -> Buf[Menu]
+        val doc = self.doc
+        var all: Buf[Menu] = buf()
+
+        all.push(menu("File", [item("Quit", self.quit)]))
+        all.push(menu("Edit", [item("Undo", () -> self.undo(), "Cmd+Z", enabled = doc.can_undo),
+                               item("Redo", () -> self.redo(), "Cmd+Shift+Z", enabled = doc.can_redo),
+                               separator(),
+                               item("Delete", () -> self.delete(), "Delete", enabled = doc.can_delete),
+                               separator(),
+                               item("Group", () -> self.group(), "Cmd+G", enabled = doc.can_group()),
+                               item("Ungroup", () -> self.ungroup(), "Cmd+Shift+G", enabled = doc.can_ungroup()),
+                               separator(),
+                               item("Solid", () -> self.set_hole(false), enabled = doc.can_set_hole(false)),
+                               item("Hole", () -> self.set_hole(true), enabled = doc.can_set_hole(true))]))
+        all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0)]))
+        all
+    end menus
+
+    // Open the menu of this title. Says whether there is one.
+    show_menu(&self, title: string) -> bool
+        val all = self.menus().view()
+
+        for i in 0..<all.len
+            if all[i].title == title
+                self.open_menu.set(int(i))
+
+                return true
+
+        false
+    end show_menu
 
     private panel(&self) -> &View
         var parts: Buf[&View] = buf()
@@ -568,4 +630,5 @@ private new_number_field(owner: &Workspace, q: Quantity, axis: int, id: int) -> 
 
 new_workspace() -> &Workspace =
     Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
-              layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), false)
+              layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), false, signal(NO_MENU), false,
+              () -> stop())

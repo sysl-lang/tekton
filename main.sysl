@@ -4,7 +4,8 @@
 //     tekton --demo                                   with one of each shape, the second selected
 //     tekton --demo --shot frame.png --size 1400x900  a few frames, the last written to a PNG
 //     tekton --demo --select 3 --view 0.3,0.5         which demo shape is selected; the camera's turn and tilt
-//     tekton --holes                                  a part with a hole cut in it, and a hole not yet grouped
+//     tekton --demo --menu Edit                       with that menu of the bar open
+//     tekton --holes                                a part with a hole cut in it, and a hole not yet grouped
 //
 // The shaders are Metal Shading Language, so this runs on a Mac, in a shell inside the desktop session.
 
@@ -68,6 +69,7 @@ main(args: []string) -> Result[unit, string]
     var holes = false
     var selected = ""
     var view: Option[(real, real)] = None
+    var opened = ""
     var i = 1
 
     while i < args.len
@@ -86,6 +88,9 @@ main(args: []string) -> Result[unit, string]
             "--view" ->
                 i += 1
                 view = Some(parse_view(args[i]).ok_or(s"not a view: ${args[i]}")?)
+            "--menu" ->
+                i += 1
+                opened = args[i]
             other -> return Err(s"unknown option: ${other}")
 
         i += 1
@@ -113,6 +118,8 @@ main(args: []string) -> Result[unit, string]
                 w.camera.turn = turn
                 w.camera.tilt = tilt
             None -> ()
+
+    if opened != "" && !w.show_menu(opened) then return Err(s"not a menu: ${opened}")
 
     val frames = signal(0)
 

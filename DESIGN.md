@@ -15,8 +15,15 @@ A model is made from a few ideas:
   holes out of them.
 - **Group and ungroup.** A group stays editable, because it remembers its parts.
 
-The window is one viewport, a short shape palette and a small panel for the selection. Undo reaches
-everything. There are no modes: no edit mode, no modifier stack, no vertex editing.
+The window is a menu bar across the top and, below it, one viewport, a short shape palette and a small
+panel for the selection. Undo reaches everything. There are no modes: no edit mode, no modifier stack, no
+vertex editing.
+
+The bar holds File, Edit and View, and every row is a command the palette, the panel or a key already
+reaches. File has Quit. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All. A
+row is dimmed where its command would do nothing now, and its shortcut is shown only where that key works.
+While a menu is open the viewport takes no input at all, so a press, a drag or the wheel over a menu or
+beside it never reaches the model or the camera.
 
 ## The document
 
@@ -53,7 +60,7 @@ Everything runs without a window, so a test or an agent can use the application 
   asked. Controlled input draws a visible pointer and press marker, and a drag moves across the screen
   at a watchable pace rather than jumping to its end.
 - **Screenshots are real frames**: the same GPU pass and interface, read back into a PNG. Pixel
-  assertions run against a fixed camera and size.
+  assertions run against a fixed camera and size. `--menu <title>` takes one with that menu open.
 
 Most of this belongs below Tekton, so every application gets it. sdl3 owns the socket, input
 by coordinates through `SDL_PushEvent` (the real event path), and reading a frame back into a PNG, so any

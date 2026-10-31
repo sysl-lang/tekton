@@ -1107,3 +1107,352 @@ a_panel_message_with_nothing_selected_is_still_shown()
     assert(w.problem.read() != "", "says why")
     render(w.tree(), &c, WINDOW)
 end a_panel_message_with_nothing_selected_is_still_shown
+
+// Whether a row of this menu is live, reading the window with the menu open and leaving it closed.
+private live(w: &Workspace, c: *Recorder, title: string, label: string) -> bool
+    assert(w.show_menu(title), "a menu of that title")
+
+    val v = w.tree()
+
+    render(v, c, WINDOW)
+
+    val row = snapshot(v, c, WINDOW).find(s"menu.${title}.${label}").unwrap()
+
+    w.open_menu.set(NO_MENU)
+    row.marks.index_of("disabled").is_none()
+end live
+
+private edit_live(w: &Workspace, c: *Recorder, label: string) -> bool = live(w, c, "Edit", label)
+
+// Open a menu by its title and choose a row, where a person would.
+private choose(w: &Workspace, c: *Recorder, title: string, label: string)
+    tap(w, c, s"menu.${title}")
+    tap(w, c, s"menu.${title}.${label}")
+end choose
+
+// The rectangle the window gives the viewport, which is everything the bar and the palette leave.
+private viewport_rect(w: &Workspace, c: *Recorder) -> Rect
+    render(w.tree(), c, WINDOW)
+
+    Rect(WINDOW.w - w.width, WINDOW.h - w.height, w.width, w.height)
+end viewport_rect
+
+@test
+an_empty_document_has_only_quit_to_offer()
+    val w = new_workspace()
+    var c = recorder()
+
+    assert(live(w, &c, "File", "Quit"), "Quit")
+
+    for label in ["Undo", "Redo", "Delete", "Group", "Ungroup", "Solid", "Hole"]
+        assert(!edit_live(w, &c, label), label)
+
+    assert(!live(w, &c, "View", "Frame All"), "nothing to frame")
+end an_empty_document_has_only_quit_to_offer
+
+@test
+each_row_follows_the_selection()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+
+    assert(edit_live(w, &c, "Undo"), "two shapes were added")
+    assert(!edit_live(w, &c, "Redo"), "and nothing has been undone")
+    assert(live(w, &c, "View", "Frame All"), "something to frame")
+
+    w.doc.select(None)
+    assert(!edit_live(w, &c, "Delete"), "nothing selected")
+    assert(!edit_live(w, &c, "Hole"), "nothing selected to be a hole")
+    assert(!edit_live(w, &c, "Solid"), "nothing selected to be solid")
+
+    w.doc.select(Some(a))
+    assert(edit_live(w, &c, "Delete"), "one selected can go")
+    assert(!edit_live(w, &c, "Group"), "one is too few to group")
+    assert(!edit_live(w, &c, "Ungroup"), "a shape is not a group")
+    assert(edit_live(w, &c, "Hole"), "a solid can become a hole")
+    assert(!edit_live(w, &c, "Solid"), "and is already solid")
+
+    w.doc.toggle_selected(b)
+    assert(edit_live(w, &c, "Group"), "two can group")
+
+    w.group()
+    assert(edit_live(w, &c, "Ungroup"), "and a group can come apart")
+    assert(!edit_live(w, &c, "Group"), "and one group is too few")
+
+    w.undo()
+    assert(edit_live(w, &c, "Redo"), "something has been undone")
+end each_row_follows_the_selection
+
+@test
+a_mixed_selection_can_become_either_and_all_holes_cannot_group()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    w.set_hole(true)
+    w.doc.toggle_selected(b)
+    assert(edit_live(w, &c, "Solid"), "one is a hole")
+    assert(edit_live(w, &c, "Hole"), "one is solid")
+    assert(edit_live(w, &c, "Group"), "a solid and a hole can group")
+
+    w.set_hole(true)
+    assert(edit_live(w, &c, "Solid"), "all holes can become solid")
+    assert(!edit_live(w, &c, "Hole"), "and are already holes")
+    assert(!edit_live(w, &c, "Group"), "a group needs a solid part")
+end a_mixed_selection_can_become_either_and_all_holes_cannot_group
+
+// Each state asks the row and then the command itself, so a row can't be live over a command that refuses.
+@test
+a_row_is_live_exactly_where_its_command_is_not_refused()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+    val hole = w.doc.add_shape(Primitive.Sphere)
+    val parts = w.doc.add_shape(Primitive.Box)
+    val other = w.doc.add_shape(Primitive.Box)
+
+    w.doc.set_transform(b, Transform(Vec3(60.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    w.doc.select(Some(hole))
+    w.doc.set_hole(true).expect("a hole")
+    w.doc.select(Some(parts))
+    w.doc.toggle_selected(other)
+
+    val group = w.doc.group_selected().expect("a group")
+
+    rows_agree_with_commands(w, [a])
+    rows_agree_with_commands(w, [hole])
+    rows_agree_with_commands(w, [group])
+    rows_agree_with_commands(w, [a, b])
+    rows_agree_with_commands(w, [a, hole])
+    rows_agree_with_commands(w, [a, group])
+    w.doc.select(None)
+    assert(!w.doc.can_group() && !w.doc.can_ungroup() && !w.doc.can_delete, "nothing selected, nothing applies")
+end a_row_is_live_exactly_where_its_command_is_not_refused
+
+private rows_agree_with_commands(w: &Workspace, ids: []int)
+    w.doc.select(None)
+
+    for id in ids do w.doc.toggle_selected(id)
+
+    val can_group = w.doc.can_group()
+    val can_ungroup = w.doc.can_ungroup()
+    val can_delete = w.doc.can_delete
+
+    assert_eq(w.doc.group_selected().is_ok(), can_group, "group")
+
+    if can_group then w.doc.undo()
+
+    assert_eq(w.doc.ungroup_selected().is_ok(), can_ungroup, "ungroup")
+
+    if can_ungroup then w.doc.undo()
+
+    assert_eq(w.doc.delete_selected().is_ok(), can_delete, "delete")
+
+    if can_delete then w.doc.undo()
+end rows_agree_with_commands
+
+@test
+undo_and_redo_run_through_their_rows()
+    val (w, a, _) = two_apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+
+    val before = w.doc.describe()
+
+    choose(w, &c, "Edit", "Delete")
+    assert_eq(w.doc.items().len, 1, "deleted")
+    assert_eq(w.open_menu.read(), NO_MENU, "and choosing closed the menu")
+
+    choose(w, &c, "Edit", "Undo")
+    assert_eq(w.doc.items().len, 2, "back through the row")
+    assert(w.doc.selected == Some(a), "selection and all")
+
+    choose(w, &c, "Edit", "Redo")
+    assert_eq(w.doc.items().len, 1, "and gone again")
+
+    choose(w, &c, "Edit", "Undo")
+    assert_eq(w.doc.describe(), before, "exactly as it was")
+end undo_and_redo_run_through_their_rows
+
+@test
+group_ungroup_solid_and_hole_run_through_their_rows()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+    choose(w, &c, "Edit", "Group")
+    assert_eq(w.doc.items().len, 1, "grouped")
+
+    choose(w, &c, "Edit", "Ungroup")
+    assert_eq(w.doc.items().len, 2, "apart")
+
+    w.doc.select(Some(a))
+    choose(w, &c, "Edit", "Hole")
+    assert(w.doc.find(a).unwrap().hole, "a hole")
+
+    choose(w, &c, "Edit", "Solid")
+    assert(!w.doc.find(a).unwrap().hole, "solid again")
+end group_ungroup_solid_and_hole_run_through_their_rows
+
+@test
+frame_all_brings_the_document_into_view()
+    val (w, _, b) = two_apart()
+    var c = recorder()
+
+    w.camera.target = Vec3(5000.0, 5000.0, 5000.0)
+    choose(w, &c, "View", "Frame All")
+    assert(w.camera.target.x < 100.0, "the view came back")
+    assert(w.doc.selected == Some(b), "and the selection is as it was")
+end frame_all_brings_the_document_into_view
+
+@test
+quit_runs_what_the_workspace_was_given()
+    val w = new_workspace()
+    val asked = signal(0)
+    var c = recorder()
+
+    w.quit = () -> asked.set(asked.read() + 1)
+    choose(w, &c, "File", "Quit")
+    assert_eq(asked.read(), 1, "once")
+end quit_runs_what_the_workspace_was_given
+
+@test
+a_dimmed_row_does_nothing_and_leaves_the_menu_open()
+    val w = new_workspace()
+    var c = recorder()
+
+    choose(w, &c, "Edit", "Undo")
+    assert_eq(w.problem.read(), "", "no complaint")
+    assert(w.open_menu.read() != NO_MENU, "still open")
+end a_dimmed_row_does_nothing_and_leaves_the_menu_open
+
+@test
+a_click_beside_an_open_menu_closes_it_and_selects_nothing()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+    val r = viewport_rect(w, &c)
+    val (x, y) = w.camera.project(w.doc.bounds_of(w.doc.find(a).unwrap()).center(), real(r.w), real(r.h)).unwrap()
+
+    assert(w.doc.selected == Some(b), "the last placed")
+    assert(w.show_menu("Edit"), "open")
+
+    val at_x = r.x + int(x)
+    val at_y = r.y + int(y)
+
+    render(w.tree(), &c, WINDOW)
+    c.point(at_x, at_y, true)
+    render(w.tree(), &c, WINDOW)
+    c.release(at_x, at_y)
+    render(w.tree(), &c, WINDOW)
+    render(w.tree(), &c, WINDOW)
+
+    assert_eq(w.open_menu.read(), NO_MENU, "closed")
+    assert(w.doc.selected == Some(b), "and the shape under the click was not picked")
+end a_click_beside_an_open_menu_closes_it_and_selects_nothing
+
+@test
+a_drag_and_the_wheel_over_the_viewport_do_nothing_while_a_menu_is_open()
+    val (w, _, _) = two_apart()
+    var c = recorder()
+    val r = viewport_rect(w, &c)
+    val turn = w.camera.turn
+    val far = w.camera.distance
+    val x = r.x + r.w - 50
+    val y = r.y + r.h - 50
+
+    assert(w.show_menu("Edit"), "open")
+    render(w.tree(), &c, WINDOW)
+
+    c.point(x, y, false)
+    c.spin(0.0, 50.0)
+    render(w.tree(), &c, WINDOW)
+    assert(w.camera.distance == far, "the wheel does not zoom")
+
+    c.point(x, y, true)
+    render(w.tree(), &c, WINDOW)
+    c.point(x - 40, y - 40, true)
+    render(w.tree(), &c, WINDOW)
+    assert(w.camera.turn == turn, "the drag does not turn")
+
+    // Escape closes the menu with the button still down, and the press is still the menu's.
+    c.key(press(Key.Escape))
+    render(w.tree(), &c, WINDOW)
+    c.point(x - 80, y - 80, true)
+    render(w.tree(), &c, WINDOW)
+    assert_eq(w.open_menu.read(), NO_MENU, "closed by Escape")
+    assert(w.camera.turn == turn, "and the rest of that drag does not turn either")
+
+    c.release(x - 80, y - 80)
+    render(w.tree(), &c, WINDOW)
+    c.spin(0.0, 50.0)
+    c.point(x, y, false)
+    render(w.tree(), &c, WINDOW)
+    assert(w.camera.distance < far, "with the menu gone the wheel works")
+end a_drag_and_the_wheel_over_the_viewport_do_nothing_while_a_menu_is_open
+
+@test
+the_delete_key_leaves_the_model_alone_while_a_menu_is_open()
+    val (w, _, _) = two_apart()
+    var c = recorder()
+
+    assert(w.show_menu("Edit"), "open")
+    render(w.tree(), &c, WINDOW)
+    c.key(press(Key.Delete))
+    render(w.tree(), &c, WINDOW)
+    assert_eq(w.doc.items().len, 2, "both still there")
+end the_delete_key_leaves_the_model_alone_while_a_menu_is_open
+
+@test
+a_click_on_a_title_opens_it_and_a_second_closes_it_and_neither_picks()
+    val (w, _, b) = two_apart()
+    var c = recorder()
+
+    tap(w, &c, "menu.Edit")
+    assert_eq(w.open_menu.read(), 1, "Edit is the second menu")
+
+    tap(w, &c, "menu.Edit")
+    assert_eq(w.open_menu.read(), NO_MENU, "closed again")
+    assert(w.doc.selected == Some(b), "the selection did not change")
+end a_click_on_a_title_opens_it_and_a_second_closes_it_and_neither_picks
+
+// The viewport starts below the bar and right of the palette, so a click has to be measured from there.
+@test
+a_click_below_the_bar_picks_the_shape_drawn_there()
+    val (w, a, b) = two_apart()
+    var c = recorder()
+    val r = viewport_rect(w, &c)
+
+    assert(r.y > 0, "the bar takes the top of the window")
+    assert(r.x > 0, "the palette takes its left")
+    assert_eq(r.y + r.h, WINDOW.h, "and the viewport reaches the bottom")
+
+    val (x, y) = w.camera.project(w.doc.bounds_of(w.doc.find(a).unwrap()).center(), real(r.w), real(r.h)).unwrap()
+    val at_x = r.x + int(x)
+    val at_y = r.y + int(y)
+
+    assert(w.doc.selected == Some(b), "the last placed")
+    c.point(at_x, at_y, true)
+    render(w.tree(), &c, WINDOW)
+    c.release(at_x, at_y)
+    render(w.tree(), &c, WINDOW)
+    render(w.tree(), &c, WINDOW)
+    assert(w.doc.selected == Some(a), "the one under the pointer")
+end a_click_below_the_bar_picks_the_shape_drawn_there
+
+@test
+the_palette_still_works_below_the_bar()
+    val w = new_workspace()
+    var c = recorder()
+
+    tap(w, &c, "palette.box")
+    assert_eq(w.doc.items().len, 1, "added")
+end the_palette_still_works_below_the_bar
+
+@test
+an_unknown_menu_is_not_opened()
+    val w = new_workspace()
+
+    assert(!w.show_menu("Window"), "no such menu")
+    assert_eq(w.open_menu.read(), NO_MENU, "and nothing opened")
+end an_unknown_menu_is_not_opened

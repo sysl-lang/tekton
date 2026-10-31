@@ -507,6 +507,32 @@ struct Document
             None -> ()
     end set_part_hole
 
+    // Whether `set_hole` with this answer would change anything: some part of the selection is the other kind.
+    can_set_hole(&self, hole: bool) -> bool
+        for id in self.selection.view()
+            self.find(id) match
+                Some(node) -> if node.hole != hole then return true
+                None -> ()
+
+        false
+    end can_set_hole
+
+    // Whether `delete_selected` has anything to take.
+    can_delete -> bool = self.selection.len() > 0
+
+    // Whether `group_selected` has what it asks for: two or more things, one of them solid.
+    can_group(&self) -> bool
+        if self.selection.len() < 2 then return false
+
+        for item in self.items()
+            if self.is_selected(item.id) && !item.hole then return true
+
+        false
+    end can_group
+
+    // Whether `ungroup_selected` would take something apart.
+    can_ungroup(&self) -> bool = self.ungroup_refusal().is_none()
+
     // The command behind the delete key: everything selected goes.
     delete_selected(&self) -> Result[unit, string]
         if self.selection.len() == 0 then return Err("Nothing is selected")
@@ -588,6 +614,21 @@ struct Document
         Ok(group.id)
     end group_selected
 
+    // Why the selection cannot be ungrouped, if it cannot.
+    private ungroup_refusal(&self) -> Option[string]
+        var any_group = false
+
+        for item in self.items()
+            if self.is_selected(item.id) && item.is_group
+                any_group = true
+
+                if item.children.len() > 1 || composed(item.transform, item.children[0].transform).is_some()
+                    return None
+
+        if any_group then Some("This part was stretched at an\nangle: it stays as one piece")
+        else Some("Only a group can be ungrouped")
+    end ungroup_refusal
+
     // The command behind the ungroup button: each selected group gives way to its parts, each where it stood
     // and each as it was, and those parts are selected.
     //
@@ -595,18 +636,9 @@ struct Document
     // inside a group of its own that keeps the stretch. It is where it was, and it is still a part that can be
     // moved and resized as one thing; a group that is only that has nothing further to give up.
     ungroup_selected(&self) -> Result[unit, string]
-        var any_group = false
-        var any_change = false
-
-        for item in self.items()
-            if self.is_selected(item.id) && item.is_group
-                any_group = true
-
-                if item.children.len() > 1 || composed(item.transform, item.children[0].transform).is_some()
-                    any_change = true
-
-        if !any_group then return Err("Only a group can be ungrouped")
-        if !any_change then return Err("This part was stretched at an\nangle: it stays as one piece")
+        self.ungroup_refusal() match
+            Some(why) -> return Err(why)
+            None -> ()
 
         self.record()
 
