@@ -1076,7 +1076,7 @@ struct Document
                 else
                     batch(solids.view(), Op.Add).difference(batch(holes.view(), Op.Add))
 
-        val own =if node.mirror.any then mirrored(made, node.mirror) else made
+        val own = if node.mirror.any then mirrored(made, node.mirror) else made
 
         node.derived.local = Some(own)
         own
