@@ -960,7 +960,7 @@ struct Document
     end bounds_of
 end Document
 
-new_document() -> &Document = restored_document(buf(), 1, None, 1)
+new_document(next_revision: int = 1) -> &Document = restored_document(buf(), 1, None, next_revision)
 
 // A document holding these things on the ground, with no history, nothing selected, and nothing to save.
 //

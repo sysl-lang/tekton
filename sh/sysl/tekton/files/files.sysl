@@ -3,12 +3,14 @@ module sh.sysl.tekton.files
 import sh.sysl.hocon.{Value, parse}
 import sh.sysl.parsing.{Source, Span, source_of}
 import sh.sysl.quaternion.Quaternion
+import sh.sysl.sdl3.DialogResult
 import sh.sysl.tekton.document.{Document, Node, Operation, PRIMITIVES, Primitive, Transform, primitive_name, restored_document, restored_group, restored_shape}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf, byte_sink}
 import sysl.container.{Set, set}
-import sysl.fs.{read_text, write_text_atomic}
+import sysl.fs.{read_bytes, write_text_atomic}
 import sysl.math.Float
+import sysl.path.extension
 import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
 
 // A document in a file, as text a person can read and a diff can show.
@@ -306,15 +308,19 @@ end too_deep_at
 // file expand to a very large tree.
 private substitution_at(text: string) -> Option[usize]
     text.index_of("${") match
-        Some(at) ->
-            var line = 1usize
-
-            for b in text[0..<at].bytes
-                if b == u8('\n') then line += 1
-
-            Some(line)
+        Some(at) -> Some(line_at(text[0..<at].bytes))
         None -> None
 end substitution_at
+
+// The line that the end of these bytes is on.
+private line_at(before: []const u8) -> usize
+    var line = 1usize
+
+    for b in before
+        if b == u8('\n') then line += 1
+
+    line
+end line_at
 
 // The document a file's text says, or the line and the problem. Nothing is read twice and nothing outside the
 // answer changes, so a refusal leaves whatever is open untouched. `next_revision` goes on from the document this
@@ -382,11 +388,13 @@ end document_from_text
 
 // The document in a file, or why not.
 load_file(file: string, next_revision: int = 1) -> Result[&Document, string]
-    val text = read_text(file) match
-        Ok(t) -> t
+    val bytes = read_bytes(file) match
+        Ok(b) -> b
         Err(e) -> return Err(s"${e}")
 
-    document_from_text(text, next_revision)
+    from_utf8(bytes) match
+        Ok(text) -> document_from_text(text, next_revision)
+        Err(e) -> Err(s"line ${line_at(bytes[0..<e.offset])}: this is not text")
 end load_file
 
 // Put the document in a file, and say so to the document. **A failed write leaves the old file exactly as it was**:
@@ -402,3 +410,26 @@ save_file(doc: &Document, file: string) -> Result[unit, string]
             Ok(())
         Err(e) -> Err(s"${e}")
 end save_file
+
+// What a file dialog's answer asks for.
+enum Answer
+    // Nothing: the person changed their mind.
+    Stay
+    Use(file: string)
+    Report(why: string)
+
+// What an Open dialog's answer asks for.
+open_answer(r: DialogResult) -> Answer =
+    r match
+        Chosen(paths) -> if paths.len() == 0 then Answer.Stay else Answer.Use(paths[0])
+        Cancelled -> Answer.Stay
+        Failed(why) -> Answer.Report(s"The file dialog failed: ${why}")
+
+// What a Save dialog's answer asks for. A filter is only advice to the panel, so the extension is seen to here.
+save_answer(r: DialogResult) -> Answer =
+    open_answer(r) match
+        Use(file) -> Answer.Use(with_extension(file))
+        other -> other
+
+// This path, with `.tekton` on the end if its last part has no extension of its own.
+with_extension(file: string) -> string = if extension(file).is_some() then file else file + ".tekton"

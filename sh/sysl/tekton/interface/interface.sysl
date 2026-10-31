@@ -2,14 +2,16 @@ module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
-import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
+import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, ask_open_file, ask_save_file}
 import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform, new_document, primitive_name}
+import sh.sysl.tekton.files.{load_file, open_answer, save_answer, save_file}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
 import sh.sysl.tekton.picking.{pick, pick_hit}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
 import sh.sysl.ui.*
 import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, stop, viewport, viewport_depth_format}
 import sysl.buf.{Buf, buf}
+import sysl.path.file_name
 import sysl.text.{parse_real, split, to_lower}
 
 // The window: a menu bar over a palette beside one viewport.
@@ -33,6 +35,24 @@ const NUMBER_WIDTH: int = 52
 const FIRST_FIELD_ID: int = 100
 
 const WRONG_INK: u32 = 0xD92D20u32
+
+// The key that answers Cancel to a question, as the window reports it.
+const ESCAPE_CODE: u32 = 27
+
+// How many characters of a file's name the panel has room for, and how many of a problem on one line.
+const NAME_ROOM: usize = 28
+const PROBLEM_ROOM: usize = 34
+
+// What was asked for that would lose unsaved changes, while the question is up.
+enum Intent
+    NewDocument
+    OpenDocument
+    Quit
+
+// What a file dialog is up for.
+enum Asked
+    Opening
+    SavingAs(after: Option[Intent])
 
 // What the primary button is doing.
 enum Gesture
@@ -86,7 +106,186 @@ struct Workspace
     // What the File menu's Quit does.
     quit: &Fn() -> unit
 
+    // The file this document came from or went to, or nothing.
+    file: string
+
+    // Whether unsaved changes are being asked about, and what goes on once they are answered for.
+    asking: &Signal[bool]
+    waiting: Option[Intent]
+
+    // Whether a file dialog is up. Nothing may change under it: what it answers was asked about this document.
+    in_dialog: &Signal[bool]
+
+    // How a file dialog is shown, which a test answers for itself.
+    ask_open: &Fn(&Fn(DialogResult) -> unit) -> unit
+    ask_save: &Fn(&Fn(DialogResult) -> unit) -> unit
+
+    // What the last dialog answers to, which has to outlive the frame that showed it.
+    answering: Option[&Fn(DialogResult) -> unit]
+
+    // Whether the next frame takes the keyboard from whichever field has it.
+    release_keyboard: bool
+
     private changed(&self) = self.changes.set(self.changes.read() + 1)
+
+    // Whether something is over the viewport that the pointer belongs to instead.
+    private covered(&self) -> bool = self.open_menu.read() != NO_MENU || self.asking.read() || self.in_dialog.read()
+
+    // Ask first if this would lose anything, and otherwise do it. A drag or an open question finishes first.
+    private guarded(&self, intent: Intent)
+        if self.is_editing() || self.asking.read() || self.in_dialog.read() then return
+
+        self.open_menu.set(NO_MENU)
+
+        if self.doc.is_dirty()
+            self.waiting = Some(intent)
+            self.release_keyboard = true
+            self.asking.set(true)
+            self.changed()
+        else
+            self.carry_out(intent)
+    end guarded
+
+    private carry_out(&self, intent: Intent)
+        intent match
+            NewDocument -> self.take_document(new_document(self.doc.next_revision), "")
+            OpenDocument -> self.show_dialog(self.ask_open, Asked.Opening)
+            Quit -> (self.quit)()
+    end carry_out
+
+    private go_on(&self, after: Option[Intent])
+        after match
+            Some(intent) -> self.carry_out(intent)
+            None -> ()
+    end go_on
+
+    private show_dialog(&self, ask: &Fn(&Fn(DialogResult) -> unit) -> unit, asked: Asked)
+        val answer: &Fn(DialogResult) -> unit = r -> self.dialog_answered(asked, r)
+
+        self.in_dialog.set(true)
+        self.answering = Some(answer)
+        ask(answer)
+    end show_dialog
+
+    private dialog_answered(&self, asked: Asked, r: DialogResult)
+        self.in_dialog.set(false)
+
+        asked match
+            Opening ->
+                open_answer(r) match
+                    Stay -> ()
+                    Report(why) -> self.problem.set(why)
+                    Use(file) -> self.open_path(file)
+            SavingAs(after) ->
+                save_answer(r) match
+                    Stay -> ()
+                    Report(why) -> self.problem.set(why)
+                    Use(file) -> if self.write_to(file) then self.go_on(after)
+
+        self.changed()
+    end dialog_answered
+
+    // Everything about the old document goes with it: what it held, what was being typed about it.
+    private take_document(&self, doc: &Document, file: string)
+        self.doc = doc
+        self.file = file
+        self.camera.frame(doc)
+        self.gesture = Gesture.Idle
+        self.carried = buf()
+        self.problem.set("")
+
+        for field in self.fields.view() do field.forget()
+
+        self.release_keyboard = true
+        self.changed()
+    end take_document
+
+    // The file menu's commands.
+    new_file(&self) = self.guarded(Intent.NewDocument)
+
+    open_file(&self) = self.guarded(Intent.OpenDocument)
+
+    request_quit(&self) = self.guarded(Intent.Quit)
+
+    // Save to the file this document has, and without one ask where.
+    save(&self, after: Option[Intent] = None)
+        if self.is_editing() || self.in_dialog.read() then return
+
+        if self.file == ""
+            self.save_as(after)
+        elif self.write_to(self.file)
+            self.go_on(after)
+    end save
+
+    save_as(&self, after: Option[Intent] = None)
+        if self.is_editing() || self.in_dialog.read() then return
+
+        self.show_dialog(self.ask_save, Asked.SavingAs(after))
+    end save_as
+
+    // Says whether the document is now in that file, and if not the panel says why.
+    private write_to(&self, file: string) -> bool
+        val done = save_file(self.doc, file)
+
+        done match
+            Ok(_) ->
+                self.file = file
+                self.problem.set("")
+            Err(why) -> self.problem.set(s"Could not save ${name_of(file)}: ${why}")
+
+        self.changed()
+        done.is_ok()
+    end write_to
+
+    // Replace the document with this file's, or say why not and leave everything as it is.
+    open_path(&self, file: string) -> bool
+        load_file(file, self.doc.next_revision) match
+            Ok(doc) ->
+                self.take_document(doc, file)
+                true
+            Err(why) ->
+                self.problem.set(s"Could not open ${name_of(file)}: ${why}")
+                self.changed()
+                false
+    end open_path
+
+    // The question's three answers.
+    answer_save(&self)
+        val after = self.waiting
+
+        self.close_question()
+        self.save(after)
+    end answer_save
+
+    answer_discard(&self)
+        val after = self.waiting
+
+        self.close_question()
+        self.go_on(after)
+    end answer_discard
+
+    answer_cancel(&self) = self.close_question()
+
+    private close_question(&self)
+        self.waiting = None
+        self.asking.set(false)
+        self.changed()
+    end close_question
+
+    // The heading of the panel, marked while there is anything unsaved.
+    heading(&self) -> string = if self.doc.is_dirty() then "Tekton *" else "Tekton"
+
+    // The question, which has to be answered.
+    private question(&self) -> &View
+        val name = if self.file == "" then "this document" else name_of(self.file)
+
+        column([text(s"Save the changes to ${shortened(name)}?").font_size(15.0),
+                text("They are lost if you don't.").font_size(12.0),
+                row([button("Save", () -> self.answer_save(), Role.Primary, Variant.Filled).named("question.save"),
+                     button("Don't Save", () -> self.answer_discard(), Role.Primary, Variant.Outline).named("question.discard"),
+                     button("Cancel", () -> self.answer_cancel(), Role.Primary, Variant.Outline).named("question.cancel")], 8)], 12)
+            .padding(20).background(0xFFFFFFu32).padding(1).background(0xCBD2DCu32).restyle(t -> light())
+    end question
 
     // The palette's command, and what the view does about it.
     add(&self, p: Primitive)
@@ -135,9 +334,29 @@ struct Workspace
     // A key the toolkit does not see, as the window reports it: `code` is the layout's own, so the letters are
     // where the keyboard has them. Says whether it was a shortcut, and so whether anyone else should see it.
     shortcut(&self, code: u32, mods: u16, repeat: bool) -> bool
+        if self.in_dialog.read() then return true
+
+        if self.asking.read()
+            if code == ESCAPE_CODE then self.answer_cancel()
+
+            return true
+
         if (mods & KMOD_GUI) == 0u16 || self.typing then return false
 
         val shift = (mods & KMOD_SHIFT) != 0u16
+
+        if code == u32(u8('n')) || code == u32(u8('o')) || code == u32(u8('s'))
+            if !repeat
+                if code == u32(u8('n'))
+                    self.new_file()
+                elif code == u32(u8('o'))
+                    self.open_file()
+                elif shift
+                    self.save_as()
+                else
+                    self.save()
+
+            return true
 
         if code == u32(u8('z'))
             if shift then self.redo() else self.undo()
@@ -242,7 +461,7 @@ struct Workspace
             None -> ()
     end follow
 
-    private is_editing(&self) -> bool =
+    is_editing(&self) -> bool =
         self.gesture match
             Edit(_) -> true
             _ -> false
@@ -251,15 +470,19 @@ struct Workspace
     //
     // **While a menu is open the viewport hears none of it.** What is raised over the viewport takes taps from
     // it, but a drag and the wheel are read here by position, so a wobble on a row of a menu would turn the view
-    // and the wheel over a menu would zoom it.
+    // and the wheel over a menu would zoom it. A question and a file dialog are the same.
     private input(&self, c: *Canvas, r: Rect)
         self.width = r.w
         self.height = r.h
 
-        if self.open_menu.read() != NO_MENU && c.held(PointerButton.Primary) then self.menu_press = true
+        if self.release_keyboard
+            self.release_keyboard = false
+            c.take_focus(NOBODY)
+
+        if self.covered() && c.held(PointerButton.Primary) then self.menu_press = true
         if !c.held(PointerButton.Primary) then self.menu_press = false
 
-        if self.open_menu.read() != NO_MENU || self.menu_press
+        if self.covered() || self.menu_press
             self.typing = c.focus() != NOBODY
             self.overlay = layout(self.doc, self.camera, real(r.w), real(r.h))
 
@@ -356,6 +579,8 @@ struct Workspace
 
         column([menu_bar(self.menus().view(), self.open_menu).restyle(t -> light()),
                 row([self.panel(), self.viewport().flex()]).flex()], 0)
+            .modal(self.in_dialog, spacer().frame(0, 0))
+            .modal(self.asking, self.question())
     end tree
 
     // The menus, each row live only where its command would do something now.
@@ -363,7 +588,12 @@ struct Workspace
         val doc = self.doc
         var all: Buf[Menu] = buf()
 
-        all.push(menu("File", [item("Quit", self.quit)]))
+        all.push(menu("File", [item("New", () -> self.new_file(), "Cmd+N"),
+                               item("Open", () -> self.open_file(), "Cmd+O"),
+                               item("Save", () -> self.save(), "Cmd+S"),
+                               item("Save As", () -> self.save_as(), "Cmd+Shift+S"),
+                               separator(),
+                               item("Quit", () -> self.request_quit())]))
         all.push(menu("Edit", [item("Undo", () -> self.undo(), "Cmd+Z", enabled = doc.can_undo),
                                item("Redo", () -> self.redo(), "Cmd+Shift+Z", enabled = doc.can_redo),
                                separator(),
@@ -394,7 +624,10 @@ struct Workspace
     private panel(&self) -> &View
         var parts: Buf[&View] = buf()
 
-        parts.push(text("Tekton").font_size(22.0))
+        parts.push(text(self.heading()).font_size(22.0))
+
+        if self.file != "" then parts.push(text(shortened(name_of(self.file))).font_size(11.0))
+
         parts.push(text("Shapes"))
 
         for p in PRIMITIVES
@@ -406,7 +639,7 @@ struct Workspace
         parts.push(spacer().flex())
         parts.push(self.selection_panel())
 
-        for line in split(self.problem.read(), "\n")
+        for line in split(wrapped(self.problem.read(), PROBLEM_ROOM), "\n")
             if line != "" then parts.push(text(line).font_size(11.0).foreground(WRONG_INK))
 
         parts.push(column([text("Drag a shape to move it").font_size(11.0), text("Drag empty space to orbit").font_size(11.0),
@@ -558,8 +791,12 @@ struct NumberField
     field: &View
     was_mine: bool
     wrong: bool
+    forgetting: bool
 
     view(&self) -> &View = self
+
+    // What is being typed was about a document that has gone, so the next paint throws it away unsent.
+    forget(&self) = self.forgetting = true
 
     // The text says what is already there, so there is nothing to send. Otherwise, send it.
     private accept(&self, shown: string)
@@ -587,6 +824,13 @@ impl View for NumberField
     measure(&self, c: *Canvas, avail: Size) -> Size = self.field.measure(c, avail)
 
     paint(&self, c: *Canvas, r: Rect)
+        if self.forgetting
+            self.forgetting = false
+            self.was_mine = false
+            self.wrong = false
+
+            if c.focus() == self.id then c.take_focus(NOBODY)
+
         val mine = c.focus() == self.id
         val value = self.owner.number(self.quantity, self.axis)
         val shown = value match
@@ -626,9 +870,43 @@ end NumberField
 private new_number_field(owner: &Workspace, q: Quantity, axis: int, id: int) -> &NumberField
     val shown = signal("")
 
-    NumberField(owner, q, axis, id, shown, text_field(shown, id, NUMBER_WIDTH).font_size(11.0), false, false)
+    NumberField(owner, q, axis, id, shown, text_field(shown, id, NUMBER_WIDTH).font_size(11.0), false, false, false)
+
+private name_of(file: string) -> string = file_name(file).unwrap_or(file)
+
+// A name short enough for the panel, keeping its end, which is what tells one file from the next.
+private shortened(name: string) -> string =
+    if name.len <= NAME_ROOM then name else "..." + name[name.len - (NAME_ROOM - 3)..<name.len]
+
+// Text broken into lines between its words, each within this room where a word lets it be.
+private wrapped(s: string, room: usize) -> string
+    var out = ""
+    var line = 0usize
+
+    for word in split(s, " ")
+        if line > 0 && line + 1 + word.len > room
+            out += "\n"
+            line = 0
+        elif line > 0
+            out += " "
+            line += 1
+
+        out += word
+        line += word.len
+
+    out
+end wrapped
+
+private document_filters() -> Buf[FileFilter]
+    var all: Buf[FileFilter] = buf()
+
+    all.push(FileFilter("Tekton", "tekton"))
+    all
+end document_filters
 
 new_workspace() -> &Workspace =
     Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
               layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), false, signal(NO_MENU), false,
-              () -> stop())
+              () -> stop(), "", signal(false), None, signal(false),
+              answer -> ask_open_file(answer, None, document_filters().view(), title = "Open"),
+              answer -> ask_save_file(answer, None, document_filters().view(), title = "Save As"), None, false)

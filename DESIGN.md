@@ -19,8 +19,8 @@ The window is a menu bar across the top and, below it, one viewport, a short sha
 panel for the selection. Undo reaches everything. There are no modes: no edit mode, no modifier stack, no
 vertex editing.
 
-The bar holds File, Edit and View, and every row is a command the palette, the panel or a key already
-reaches. File has Quit. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All. A
+The bar holds File, Edit and View. File has New, Open, Save, Save As and Quit, with Cmd+N, Cmd+O, Cmd+S and
+Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All. A
 row is dimmed where its command would do nothing now, and its shortcut is shown only where that key works.
 While a menu is open the viewport takes no input at all, so a press, a drag or the wheel over a menu or
 beside it never reaches the model or the camera.
@@ -31,6 +31,35 @@ A document is a tree of operations, not a mesh: shapes and groups, each with a t
 solid-or-hole flag. Meshes are derived from it by the kernel and cached per node, so an edit recomputes
 only the path from that node to the root. This same tree is what a script will produce.
 
+## Files
+
+A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 1`, the format
+version, read by itself before anything else, so a newer format is told "too new" whatever else it holds. It
+holds the tree, `next` (the id the next node gets) and `last` (what the next shape is placed beside). Meshes are
+derived, and the selection and the history belong to a session. Every number is written as the shortest text
+that reads back as the same value, so a saved document comes back bit for bit.
+
+A bad file is refused with its line and the problem, and whatever is open stays as it was. That covers more than
+syntax: an id used twice, a transform no edit could make, groups nested past 128, a group the kernel cannot
+join. A document that would be refused is not written either.
+
+**Saving is atomic**: the text goes to a name beside the target and is renamed onto it, so a failure leaves the
+old file whole, and the panel says why.
+
+**Unsaved means different from what the file holds**, compared by value, so undoing back to what was saved is
+clean. The panel's heading reads `Tekton *` while there is anything unsaved, with the file's name under it once
+it has one. New, Open, Quit and closing the window ask first, in a question over the window: Save, Don't Save or
+Cancel, with Escape as Cancel. Save with no file yet goes through Save As, and if that is cancelled or fails,
+what was going to happen does not.
+
+Open has no undo to offer: it clears the history and frames the camera on what it loaded. `tekton <file>` opens a
+file at startup; a bad one is reported and it starts empty, with no file, so Save cannot overwrite it.
+
+File dialogs are SDL's. What an answer means is a pure function (`open_answer`, `save_answer`), and while a dialog
+is up nothing behind it takes input, because what it answers was asked about this document. The dialogs are
+given no window, since `syslui-sdl` keeps its own, and on a Mac that makes them modal to the application rather
+than sheets on the window.
+
 ## The layers
 
 | layer | what |
@@ -38,7 +67,7 @@ only the path from that node to the root. This same tree is what a script will p
 | kernel | `sysl-lang/manifold`: watertight booleans and primitives |
 | viewport | SDL_GPU through `sysl-lang/sdl3`, with a depth buffer |
 | interface | `sysl-lang/syslui` on `sysl-lang/syslui-sdl`, drawn over the viewport |
-| files | a text document format; STL and 3MF export |
+| files | a text document format through `sysl-lang/hocon`; STL and 3MF export to come |
 | scripting | interpreted nex, through its embedding API |
 
 SDL's `SDL_CreateGPURenderer` lets one GPU device drive both the 2D renderer syslui-sdl already uses
@@ -77,7 +106,7 @@ their own tests, so most changes never need the whole application linked or a wi
    offscreen driver.
 3. Shapes, orbit camera, picking, and handles.
 4. Solid or hole, groups, undo.
-5. Saving, STL and 3MF export.
+5. Saving and opening, then STL and 3MF export.
 6. Printing: the printer's bed in the viewport, control over facets on round shapes, measuring, align, mirror
    and array, hole clearances, chamfers, text.
 7. nex scripting.

@@ -1,6 +1,7 @@
 // Tekton, a modeller for building solid objects.
 //
 //     tekton                                          a window, until it is closed
+//     tekton part.tekton                              with that file open; a bad one is reported, and it starts empty
 //     tekton --demo                                   with one of each shape, the second selected
 //     tekton --demo --shot frame.png --size 1400x900  a few frames, the last written to a PNG
 //     tekton --demo --select 3 --view 0.3,0.5         which demo shape is selected; the camera's turn and tilt
@@ -9,7 +10,7 @@
 //
 // The shaders are Metal Shading Language, so this runs on a Mac, in a shell inside the desktop session.
 
-import sh.sysl.sdl3.{EventKind, GPU_SHADERFORMAT_MSL}
+import sh.sysl.sdl3.{GPU_SHADERFORMAT_MSL, deliver_dialogs}
 import sh.sysl.tekton.interface.new_workspace
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform}
@@ -70,6 +71,7 @@ main(args: []string) -> Result[unit, string]
     var selected = ""
     var view: Option[(real, real)] = None
     var opened = ""
+    var file = ""
     var i = 1
 
     while i < args.len
@@ -91,11 +93,16 @@ main(args: []string) -> Result[unit, string]
             "--menu" ->
                 i += 1
                 opened = args[i]
-            other -> return Err(s"unknown option: ${other}")
+            other ->
+                if other.starts_with("--") then return Err(s"unknown option: ${other}")
+
+                file = other
 
         i += 1
 
     val w = new_workspace()
+
+    if file != "" && !w.open_path(file) then eprints(s"${w.problem.read()}\n")
 
     if holes then add_hole_scene(w.doc)
 
@@ -124,8 +131,15 @@ main(args: []string) -> Result[unit, string]
     val frames = signal(0)
 
     run(app("Tekton", () -> w.tree(), () -> 0xDDE2E9u32, width, height, gpu = GPU_SHADERFORMAT_MSL, on_event = e ->
-        e.kind() == EventKind.KeyDown && w.shortcut(e.key_code(), e.key_mod(), e.key_repeat())
+        e.kind() match
+            Quit | WindowCloseRequested ->
+                w.request_quit()
+                true
+            KeyDown -> w.shortcut(e.key_code(), e.key_mod(), e.key_repeat())
+            _ -> false
     , on_frame = dt ->
+        deliver_dialogs()
+
         if shot != ""
             frames.set(frames.read() + 1)
 

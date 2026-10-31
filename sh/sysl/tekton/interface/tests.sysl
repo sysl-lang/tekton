@@ -1138,17 +1138,18 @@ private viewport_rect(w: &Workspace, c: *Recorder) -> Rect
 end viewport_rect
 
 @test
-an_empty_document_has_only_quit_to_offer()
+an_empty_document_has_only_the_file_menu_to_offer()
     val w = new_workspace()
     var c = recorder()
 
-    assert(live(w, &c, "File", "Quit"), "Quit")
+    for label in ["New", "Open", "Save", "Save As", "Quit"]
+        assert(live(w, &c, "File", label), label)
 
     for label in ["Undo", "Redo", "Delete", "Group", "Ungroup", "Solid", "Hole"]
         assert(!edit_live(w, &c, label), label)
 
     assert(!live(w, &c, "View", "Frame All"), "nothing to frame")
-end an_empty_document_has_only_quit_to_offer
+end an_empty_document_has_only_the_file_menu_to_offer
 
 @test
 each_row_follows_the_selection()

@@ -1,11 +1,587 @@
 module sh.sysl.tekton.files
 @tests
 
-import sh.sysl.tekton.document.new_document
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.sdl3.DialogResult
+import sh.sysl.tekton.document.{Document, Node, PRIMITIVES, Primitive, Transform, identity_transform, new_document, restored_document,
+                                restored_group, restored_shape}
+import sh.sysl.tekton.space.Vec3
+import sysl.buf.{Buf, buf}
+import sysl.fs.{make_temp_dir, read_text, remove_dir_all, set_permissions, walk, write_bytes, write_text}
+import sysl.math.min
+import sysl.text.replace_all
+
+// Files as a person might mangle them, deepest first where a test takes one apart. The line numbers asserted
+// below are lines of these.
+
+private val SHAPE_FILE: string = "tekton = 1\nnext = 2\nlast = 1\nnodes = [\n  {\n    id = 1\n    kind = box\n    tint = 0\n    hole = false\n    at = [0.0, 0.0, 0.0]\n    turn = [1.0, 0.0, 0.0, 0.0]\n    scale = [1.0, 1.0, 1.0]\n  }\n]\n"
+
+private val GROUP_FILE: string = "tekton = 1\nnext = 4\nlast = 3\nnodes = [\n  {\n    id = 3\n    kind = group\n    tint = 2\n    hole = false\n    at = [10.0, 0.0, 0.0]\n    turn = [1.0, 0.0, 0.0, 0.0]\n    scale = [1.0, 1.0, 1.0]\n    parts = [\n      {\n        id = 1\n        kind = box\n        tint = 0\n        hole = false\n        at = [0.0, 0.0, 0.0]\n        turn = [1.0, 0.0, 0.0, 0.0]\n        scale = [1.0, 1.0, 1.0]\n      }\n      {\n        id = 2\n        kind = cylinder\n        tint = 1\n        hole = true\n        at = [0.0, 0.0, -5.0]\n        turn = [1.0, 0.0, 0.0, 0.0]\n        scale = [0.5, 0.5, 2.0]\n      }\n    ]\n  }\n]\n"
+
+// The bits of a number, which is the only equality that tells -0.0 from 0.0.
+private same_number(a: real, b: real, what: string) = assert_eq(a.bits(), b.bits(), what)
+
+private assert_same_transform(a: Transform, b: Transform)
+    same_number(a.translation.x, b.translation.x, "at x")
+    same_number(a.translation.y, b.translation.y, "at y")
+    same_number(a.translation.z, b.translation.z, "at z")
+    same_number(a.rotation.w, b.rotation.w, "turn w")
+    same_number(a.rotation.x, b.rotation.x, "turn x")
+    same_number(a.rotation.y, b.rotation.y, "turn y")
+    same_number(a.rotation.z, b.rotation.z, "turn z")
+    same_number(a.scale.x, b.scale.x, "scale x")
+    same_number(a.scale.y, b.scale.y, "scale y")
+    same_number(a.scale.z, b.scale.z, "scale z")
+end assert_same_transform
+
+private assert_same_node(a: &Node, b: &Node)
+    assert_eq(a.id, b.id, "id")
+    assert_eq(a.tint, b.tint, "tint")
+    assert_eq(a.hole, b.hole, "hole")
+    assert_eq(a.is_group, b.is_group, "kind")
+    assert_same_transform(a.transform, b.transform)
+
+    a.operation match
+        Shape(p) ->
+            b.operation match
+                Shape(q) -> assert_eq(p, q, "primitive")
+                Group -> assert(false, "a shape came back a group")
+        Group -> ()
+
+    assert_eq(a.children.len(), b.children.len(), "parts")
+
+    for i in 0..<a.children.len() do assert_same_node(a.children[i], b.children[i])
+end assert_same_node
+
+private assert_same_document(a: &Document, b: &Document)
+    assert_eq(a.next_id, b.next_id, "next")
+    assert_eq(a.last_placed, b.last_placed, "last")
+    assert_eq(a.items().len, b.items().len, "items")
+
+    for i in 0..<a.items().len do assert_same_node(a.items()[i], b.items()[i])
+end assert_same_document
+
+private round_trip(doc: &Document) -> &Document = document_from_text(document_text(doc)).unwrap()
+
+private refusal(text: string) -> string
+    document_from_text(text) match
+        Ok(_) ->
+            assert(false, s"this should have been refused:\n${text}")
+            ""
+        Err(why) -> why
+end refusal
+
+// Numbers chosen to break anything short of shortest-exact: the two sides of a rounding, the smallest there are,
+// and negative zero.
+private hard_transform() -> Transform =
+    Transform(Vec3(0.1 + 0.2, -0.0, 5.0e-324), Quaternion(0.7071067811865476, 0.0, -0.7071067811865475, 0.0),
+              Vec3(1.0000000000000002, 0.9999999999999999, 1.0 / 3.0))
 
 @test
-an_empty_document_probe()
+hard_numbers_come_back_bit_for_bit()
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_shape(1, Primitive.Box, hard_transform(), 7, false))
+
+    val doc = restored_document(items, 2, Some(1), 1)
+    val back = round_trip(doc)
+
+    assert_same_document(doc, back)
+    same_number(back.items()[0].transform.translation.y, -0.0, "negative zero stays negative")
+    same_number(back.items()[0].transform.translation.z, 5.0e-324, "the smallest number")
+    assert_eq(document_text(back), document_text(doc), "and the text is stable")
+end hard_numbers_come_back_bit_for_bit
+
+@test
+every_primitive_comes_back_as_itself()
+    val doc = new_document()
+
+    for p in PRIMITIVES do doc.add_shape(p)
+
+    assert_same_document(doc, round_trip(doc))
+end every_primitive_comes_back_as_itself
+
+@test
+holes_and_nested_groups_made_by_commands_come_back()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Sphere)
+    val c = doc.add_shape(Primitive.Torus)
+
+    doc.select(Some(b))
+    doc.set_hole(true).unwrap()
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val inner = doc.group_selected().unwrap()
+
+    doc.select(Some(inner))
+    doc.toggle_selected(c)
+    doc.group_selected().unwrap()
+
+    assert_same_document(doc, round_trip(doc))
+end holes_and_nested_groups_made_by_commands_come_back
+
+@test
+an_empty_document_comes_back_empty_and_a_gone_last_is_not_written()
+    val doc = new_document()
+
+    assert_same_document(doc, round_trip(doc))
+
+    val id = doc.add_shape(Primitive.Box)
+
+    doc.select(Some(id))
+    doc.delete_selected().unwrap()
+
+    val back = round_trip(doc)
+
+    assert_eq(back.items().len, 0, "empty")
+    assert_eq(back.next_id, doc.next_id, "the ids go on from where they were")
+    assert(back.last_placed.is_none(), "and nothing to be beside")
+end an_empty_document_comes_back_empty_and_a_gone_last_is_not_written
+
+@test
+the_first_line_is_the_version()
     val text = document_text(new_document())
 
-    print(text)
-    assert(document_from_text(text).is_ok(), "reads")
+    assert(text.starts_with("tekton = 1\n"), text)
+end the_first_line_is_the_version
+
+@test
+a_loaded_document_has_no_history_and_nothing_to_save()
+    val doc = document_from_text(GROUP_FILE).unwrap()
+
+    assert(!doc.can_undo, "no undo")
+    assert(!doc.can_redo, "no redo")
+    assert(!doc.is_dirty(), "clean")
+    assert_eq(doc.selection.len(), 0, "nothing selected")
+end a_loaded_document_has_no_history_and_nothing_to_save
+
+@test
+a_loaded_document_can_be_built_on_without_reusing_an_id()
+    val doc = document_from_text(GROUP_FILE).unwrap()
+
+    assert_eq(doc.add_shape(Primitive.Box), 4, "the next id the file named")
+end a_loaded_document_can_be_built_on_without_reusing_an_id
+
+@test
+a_loaded_documents_meshes_go_on_from_the_revision_asked_for()
+    val doc = document_from_text(SHAPE_FILE, 500).unwrap()
+
+    assert(doc.mesh_of(doc.items()[0]).revision >= 500, "a renderer cannot confuse it with an old mesh")
+end a_loaded_documents_meshes_go_on_from_the_revision_asked_for
+
+// Each way a first line can be wrong, each on line 1.
+@test
+a_wrong_first_line_is_refused_on_line_1()
+    val not_ours = "line 1: not a Tekton document: the first line must be `tekton = 1`"
+
+    assert_eq(refusal(""), "line 1: the file is empty", "empty")
+    assert_eq(refusal("hello there"), not_ours, "prose")
+    assert_eq(refusal("next = 1\ntekton = 1\n"), not_ours, "second")
+    assert_eq(refusal("tekton = 0\n"), not_ours, "too old")
+    assert_eq(refusal("tekton = 1.0\n"), not_ours, "not whole")
+    assert_eq(refusal("tekton = -1\n"), not_ours, "negative")
+    assert_eq(refusal("tekton = one\n"), not_ours, "a word")
+    assert_eq(refusal("tekton = 1 next = 2\n"), not_ours, "more on the line")
+    assert_eq(refusal("tekton = 2\nnext = \"anything {[\n"),
+              "line 1: this file is format 2, from a newer Tekton; this one reads up to format 1", "too new")
+    assert_eq(refusal("tekton = 99999999999999999999999\n"),
+              "line 1: this file is format 99999999999999999999999, from a newer Tekton; this one reads up to format 1",
+              "too new to count")
+end a_wrong_first_line_is_refused_on_line_1
+
+private with(find: string, put: string) -> string
+    val out = replace_all(SHAPE_FILE, find, put)
+
+    assert(out != SHAPE_FILE, s"the fixture has ${find}")
+    out
+end with
+
+@test
+a_missing_key_is_named_at_its_node()
+    assert_eq(refusal("tekton = 1\nnodes = []\n"), "line 1: this document has no `next`", "next")
+    assert_eq(refusal("tekton = 1\nnext = 1\n"), "line 1: this document has no `nodes`", "nodes")
+
+    for key in ["id = 1", "kind = box", "tint = 0", "hole = false", "at = [0.0, 0.0, 0.0]",
+                "turn = [1.0, 0.0, 0.0, 0.0]", "scale = [1.0, 1.0, 1.0]"]
+        val name = key[0..<key.index_of(" ").unwrap()]
+
+        assert_eq(refusal(with(s"    ${key}\n", "")), s"line 5: this node has no `${name}`", name)
+end a_missing_key_is_named_at_its_node
+
+@test
+a_wrong_value_is_refused_on_its_own_line()
+    assert_eq(refusal(with("id = 1", "id = one")), "line 6: `id` must be a whole number", "id word")
+    assert_eq(refusal(with("id = 1", "id = 1.5")), "line 6: `id` must be a whole number", "id fraction")
+    assert_eq(refusal(with("id = 1", "id = -1")), "line 6: `id` is out of range", "id negative")
+    assert_eq(refusal(with("id = 1", "id = 0")), "line 5: `id` must be above zero", "id zero")
+    assert_eq(refusal(with("id = 1", "id = 2")), "line 5: `id` 2 is not below `next`", "id past next")
+    assert_eq(refusal(with("kind = box", "kind = blob")), "line 7: unknown kind `blob`", "kind")
+    assert_eq(refusal(with("kind = box", "kind = 3")), "line 7: `kind` must be the name of a kind", "kind number")
+    assert_eq(refusal(with("kind = box", "kind = [1]")), "line 7: `kind` must be the name of a kind", "kind list")
+    assert_eq(refusal(with("tint = 0", "tint = 2000000000")), "line 8: `tint` is out of range", "tint")
+    assert_eq(refusal(with("hole = false", "hole = 3")), "line 9: `hole` must be true or false", "hole")
+    assert_eq(refusal(with("at = [0.0, 0.0, 0.0]", "at = 3")), "line 10: `at` must be a list of 3 numbers", "at")
+    assert_eq(refusal(with("at = [0.0, 0.0, 0.0]", "at = [0.0, 0.0]")), "line 10: `at` must hold 3 numbers, not 2", "at short")
+    assert_eq(refusal(with("at = [0.0, 0.0, 0.0]", "at = [0.0, x, 0.0]")), "line 10: `at` must hold numbers", "at word")
+    assert_eq(refusal(with("at = [0.0, 0.0, 0.0]", "at = [0.0, 1e999, 0.0]")), "line 10: `at` holds a number too large to use", "infinite")
+    assert_eq(refusal(with("turn = [1.0, 0.0, 0.0, 0.0]", "turn = [1.0, 0.0, 0.0]")), "line 11: `turn` must hold 4 numbers, not 3", "turn short")
+    assert_eq(refusal(with("next = 2", "next = 0")), "line 2: `next` is out of range", "next zero")
+    assert_eq(refusal(with("next = 2", "next = x")), "line 2: `next` must be a whole number", "next word")
+    assert_eq(refusal(with("last = 1", "last = 9")), "line 3: `last` must be the id of a node", "last")
+    assert_eq(refusal(with("last = 1", "last = x")), "line 3: `last` must be a whole number", "last word")
+    assert_eq(refusal("tekton = 1\nnext = 1\nnodes = 3\n"), "line 3: `nodes` must be a list", "nodes")
+    assert_eq(refusal(with("kind = box", "kind = group")), "line 5: a group must have `parts`", "a group with no parts")
+    assert_eq(refusal("tekton = 1\nnext = 1\nnodes = [\n  3\n]\n"), "line 4: a node must be an object", "node")
+end a_wrong_value_is_refused_on_its_own_line
+
+@test
+what_this_format_does_not_have_is_refused_by_name()
+    assert_eq(refusal(with("next = 2", "next = 2\ncolour = red")), "line 3: unknown key `colour`", "top key")
+    assert_eq(refusal(with("id = 1", "id = 1\n    colour = red")), "line 7: unknown key `colour`", "node key")
+    assert_eq(refusal(with("next = 2", "next = 2\nnext = 2")), "line 3: `next` is written twice", "twice")
+    assert_eq(refusal(with("next = 2", "next = ${x}")), "line 2: a Tekton document has no substitutions", "substitution")
+    assert_eq(refusal(with("scale = [1.0, 1.0, 1.0]", "scale = [1.0, 1.0, 1.0]\n    parts = []")), "line 5: a box has no `parts`", "parts on a shape")
+end what_this_format_does_not_have_is_refused_by_name
+
+@test
+broken_syntax_is_refused_with_its_line()
+    assert(refusal(with("hole = false\n    at = [0.0, 0.0, 0.0]", "hole = false\n    at = [0.0, 0.0, 0.0")).starts_with("line 1"), "an unclosed list is found past it")
+    assert(refusal(with("kind = box", "kind = = box")).starts_with("line 7: "), "doubled equals")
+    assert(refusal(with("kind = box", "kind = \"box")).starts_with("line 7: "), "an unclosed string")
+
+    // Past the limit a file of brackets is refused before the reader recurses on them.
+    var deep = "tekton = 1\nnext = 1\n\nnodes = "
+
+    for i in 0..<100000 do deep += "["
+
+    assert_eq(refusal(deep), "line 4: nested too deeply", "deep")
+end broken_syntax_is_refused_with_its_line
+
+@test
+a_bad_tree_is_refused_at_the_node_at_fault()
+    assert_eq(refusal(with("scale = [1.0, 1.0, 1.0]", "scale = [0.0, 1.0, 1.0]")),
+              "line 5: A transform needs finite numbers and sides above zero", "zero scale")
+    assert_eq(refusal(with("scale = [1.0, 1.0, 1.0]", "scale = [1.0, -1.0, 1.0]")),
+              "line 5: A transform needs finite numbers and sides above zero", "negative scale")
+    assert_eq(refusal(with("turn = [1.0, 0.0, 0.0, 0.0]", "turn = [2.0, 0.0, 0.0, 0.0]")),
+              "line 5: A rotation must have a length of one", "turn")
+    assert(refusal(with("at = [0.0, 0.0, 0.0]", "at = [1e30, 0.0, 0.0]")).starts_with("line 5: Position is limited to "), "far")
+    assert(refusal(with("scale = [1.0, 1.0, 1.0]", "scale = [1e30, 1.0, 1.0]")).starts_with("line 5: Scale must be from "), "huge")
+
+    // The shape is inside a group here, so the line is the part's rather than the first node's.
+    assert_eq(refusal(replace_all(GROUP_FILE, "id = 2", "id = 1")), "line 23: `id` 1 is used twice", "twice")
+    assert_eq(refusal(replace_all(GROUP_FILE, "hole = false\n        at", "hole = true\n        at")),
+              "line 5: A group needs a solid part", "all holes")
+    assert_eq(refusal(replace_all(GROUP_FILE, "    parts = [", "    pieces = [")), "line 13: unknown key `pieces`", "no parts")
+    assert_eq(refusal(replace_all(GROUP_FILE, "kind = cylinder", "kind = wheel")), "line 25: unknown kind `wheel`", "a part's kind")
+    assert_eq(refusal(replace_all(GROUP_FILE, "scale = [0.5, 0.5, 2.0]", "scale = [0.0, 0.5, 2.0]")),
+              "line 23: A transform needs finite numbers and sides above zero", "a part's scale")
+end a_bad_tree_is_refused_at_the_node_at_fault
+
+@test
+groups_nested_past_the_limit_are_refused()
+    var inner = restored_shape(1, Primitive.Box, identity_transform(), 0, false)
+    var id = 2
+
+    for depth in 0..<200
+        var parts: Buf[&Node] = buf()
+
+        parts.push(inner)
+        inner = restored_group(id, identity_transform(), 0, false, parts)
+        id += 1
+
+    var items: Buf[&Node] = buf()
+
+    items.push(inner)
+
+    val doc = restored_document(items, id, None, 1)
+
+    assert(refusal(document_text(doc)).ends_with("Groups may nest only 128 deep"), "too deep")
+end groups_nested_past_the_limit_are_refused
+
+// A small generator, so that a failure is the same failure next time.
+private struct Fuzz
+    state: u64
+
+    next(&self) -> u64
+        self.state = self.state ^ (self.state << 13)
+        self.state = self.state ^ (self.state >> 7)
+        self.state = self.state ^ (self.state << 17)
+        self.state
+    end next
+
+    below(&self, n: usize) -> usize = usize(self.next() % u64(n))
+end Fuzz
+
+private val JUNK: []string = ["{", "}", "[", "]", "=", "\"", "\n", " ", ",", "0", "-", "1e999", "nan", "null", "group", "box",
+                              "${a}", "//", "#", "\\", "parts", "id", "true", ".", "e", "tekton = 1\n", "include \"x\"", "\r", "+=", "\0"]
+
+// One mangling of this text.
+private mangled(text: string, f: &Fuzz) -> string
+    val at = f.below(text.len + 1)
+    val to = min(at + f.below(40), text.len)
+
+    f.below(6) match
+        0 -> text[0..<at]
+        1 -> text[0..<at] + text[to..<text.len]
+        2 -> text[0..<at] + JUNK[f.below(JUNK.len)] + text[at..<text.len]
+        3 -> text[0..<at] + JUNK[f.below(JUNK.len)] + text[to..<text.len]
+        _ -> another_digit(text, at, f)
+end mangled
+
+// The first digit from here on made another, which reaches past the reader to the document's own checks.
+private another_digit(text: string, from: usize, f: &Fuzz) -> string
+    for i in from..<text.len
+        val b = text.bytes[i]
+
+        if b >= u8('0') && b <= u8('9')
+            val d = f.below(10)
+
+            return text[0..<i] + "0123456789"[d..<d + 1] + text[i + 1..<text.len]
+
+    text
+end another_digit
+
+@test
+mangled_files_are_refused_with_a_line_or_load_and_never_crash()
+    val f: &Fuzz = Fuzz(0x9E3779B97F4A7C15u64)
+    var refused = 0
+    var loaded = 0
+
+    for i in 0..<4000
+        var text = if i % 2 == 0 then SHAPE_FILE else GROUP_FILE
+
+        for times in 0..<(1 + f.below(3)) do text = mangled(text, f)
+
+        document_from_text(text) match
+            Ok(doc) ->
+                loaded += 1
+
+                // What loaded is a document, and survives another round.
+                assert_same_document(doc, round_trip(doc))
+            Err(why) ->
+                refused += 1
+                assert(why.starts_with("line "), why)
+
+    assert(refused > 1000, s"the fuzz reaches refusals: ${refused}")
+    assert(loaded > 100, s"and loads: ${loaded}")
+end mangled_files_are_refused_with_a_line_or_load_and_never_crash
+
+// Dirty tracking.
+
+@test
+dirty_follows_undo_and_redo_back_to_what_was_saved()
+    val dir = make_temp_dir("tekton-dirty").unwrap()
+    val file = s"${dir}/a.tekton"
+    val doc = new_document()
+
+    assert(!doc.is_dirty(), "a new document has nothing to save")
+
+    val id = doc.add_shape(Primitive.Box)
+
+    assert(doc.is_dirty(), "an edit")
+    save_file(doc, file).unwrap()
+    assert(!doc.is_dirty(), "saved")
+
+    doc.set_transform(id, Transform(Vec3(5.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    assert(doc.is_dirty(), "another edit")
+    doc.undo()
+    assert(!doc.is_dirty(), "undone back to what was saved")
+    doc.redo()
+    assert(doc.is_dirty(), "redone away from it")
+    doc.undo()
+    doc.undo()
+    assert(doc.is_dirty(), "undone past it")
+    doc.redo()
+    assert(!doc.is_dirty(), "and redone back to it")
+    remove_dir_all(dir).unwrap()
+end dirty_follows_undo_and_redo_back_to_what_was_saved
+
+@test
+saving_after_undoing_moves_what_counts_as_clean()
+    val dir = make_temp_dir("tekton-dirty").unwrap()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc.add_shape(Primitive.Sphere)
+    doc.undo()
+    save_file(doc, s"${dir}/a.tekton").unwrap()
+    assert(!doc.is_dirty(), "saved with one shape")
+    doc.redo()
+    assert(doc.is_dirty(), "the redone shape was never saved")
+    doc.undo()
+    assert(!doc.is_dirty(), "back")
+    doc.undo()
+    assert(doc.is_dirty(), "and the empty document is not what was saved")
+    remove_dir_all(dir).unwrap()
+end saving_after_undoing_moves_what_counts_as_clean
+
+@test
+the_smallest_change_of_a_number_is_dirty_and_selecting_is_not()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+
+    doc.mark_saved()
+    doc.select(None)
+    assert(!doc.is_dirty(), "selection is a session's")
+    doc.select(Some(id))
+    assert(!doc.is_dirty(), "both ways")
+
+    val t = doc.find(id).unwrap().transform
+
+    doc.set_transform(id, Transform(Vec3(t.translation.x + 1.0e-13, t.translation.y, t.translation.z), t.rotation, t.scale))
+    assert(doc.is_dirty(), "the last place of a number")
+
+    doc.set_transform(id, t)
+    assert(!doc.is_dirty(), "and an edit that puts every number back is no difference")
+end the_smallest_change_of_a_number_is_dirty_and_selecting_is_not
+
+// Answers from a dialog.
+
+private chosen(paths: []string) -> DialogResult
+    var all: Buf[string] = buf()
+
+    for p in paths do all.push(p)
+
+    DialogResult.Chosen(all)
+end chosen
+
+private used(a: Answer) -> string =
+    a match
+        Use(file) -> file
+        Stay -> "<stay>"
+        Report(why) -> s"<report ${why}>"
+
+@test
+an_open_answer_uses_the_first_path_and_leaves_it_as_it_is()
+    assert_eq(used(open_answer(chosen(["/a/b.tekton", "/a/c.tekton"]))), "/a/b.tekton", "first")
+    assert_eq(used(open_answer(chosen(["/a/b.txt"]))), "/a/b.txt", "a filter is only advice")
+    assert_eq(used(open_answer(chosen(["/a/b"]))), "/a/b", "no extension added to what exists")
+end an_open_answer_uses_the_first_path_and_leaves_it_as_it_is
+
+@test
+cancelling_or_nothing_chosen_does_nothing()
+    assert_eq(used(open_answer(DialogResult.Cancelled)), "<stay>", "open")
+    assert_eq(used(save_answer(DialogResult.Cancelled)), "<stay>", "save")
+    assert_eq(used(open_answer(chosen([]))), "<stay>", "nothing chosen")
+    assert_eq(used(save_answer(chosen([]))), "<stay>", "nothing chosen to save")
+end cancelling_or_nothing_chosen_does_nothing
+
+@test
+a_failed_dialog_is_reported()
+    assert_eq(used(open_answer(DialogResult.Failed("no portal"))), "<report The file dialog failed: no portal>", "open")
+    assert_eq(used(save_answer(DialogResult.Failed("no portal"))), "<report The file dialog failed: no portal>", "save")
+end a_failed_dialog_is_reported
+
+@test
+a_save_answer_gets_the_extension_only_where_it_has_none()
+    assert_eq(used(save_answer(chosen(["/a/b"]))), "/a/b.tekton", "none")
+    assert_eq(used(save_answer(chosen(["/a/b.tekton"]))), "/a/b.tekton", "already")
+    assert_eq(used(save_answer(chosen(["/a/b.backup"]))), "/a/b.backup", "the person's own")
+    assert_eq(used(save_answer(chosen(["/a.d/b"]))), "/a.d/b.tekton", "a dot in the directory is not an extension")
+end a_save_answer_gets_the_extension_only_where_it_has_none
+
+// Files themselves.
+
+private entries_in(dir: string) -> int
+    var n = 0
+
+    for e in walk(dir) do n += 1
+
+    // The walk's first answer is the directory itself.
+    n - 1
+end entries_in
+
+@test
+a_saved_file_loads_back_bit_equal()
+    val dir = make_temp_dir("tekton-save").unwrap()
+    val file = s"${dir}/a.tekton"
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_shape(1, Primitive.Cone, hard_transform(), 3, false))
+
+    val doc = restored_document(items, 2, Some(1), 1)
+
+    save_file(doc, file).unwrap()
+    assert_same_document(doc, load_file(file).unwrap())
+    assert_eq(entries_in(dir), 1, "and nothing beside it")
+    remove_dir_all(dir).unwrap()
+end a_saved_file_loads_back_bit_equal
+
+@test
+a_save_replaces_the_old_file_whole()
+    val dir = make_temp_dir("tekton-save").unwrap()
+    val file = s"${dir}/a.tekton"
+
+    write_text(file, GROUP_FILE + GROUP_FILE).unwrap()
+    save_file(new_document(), file).unwrap()
+    assert_eq(read_text(file).unwrap(), document_text(new_document()), "only the new text")
+    remove_dir_all(dir).unwrap()
+end a_save_replaces_the_old_file_whole
+
+// The directory cannot be written though the file can, which only a write in place would get past.
+@test
+a_failed_save_leaves_the_old_file_and_the_document_dirty_and_no_debris()
+    val dir = make_temp_dir("tekton-save").unwrap()
+    val file = s"${dir}/a.tekton"
+
+    write_text(file, "old\n").unwrap()
+
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    set_permissions(dir, 0o555u32).unwrap()
+
+    val answer = save_file(doc, file)
+
+    set_permissions(dir, 0o755u32).unwrap()
+    assert(answer.is_err(), "refused")
+    assert_eq(read_text(file).unwrap(), "old\n", "the old file")
+    assert(doc.is_dirty(), "the document still has something to save")
+    assert_eq(entries_in(dir), 1, "nothing beside it")
+    remove_dir_all(dir).unwrap()
+end a_failed_save_leaves_the_old_file_and_the_document_dirty_and_no_debris
+
+@test
+a_save_to_where_no_file_can_be_is_reported()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+
+    assert(save_file(doc, "/no/such/directory/a.tekton").is_err(), "no directory")
+    assert(doc.is_dirty(), "still dirty")
+end a_save_to_where_no_file_can_be_is_reported
+
+@test
+a_document_no_file_could_bring_back_is_not_written()
+    val dir = make_temp_dir("tekton-save").unwrap()
+    val file = s"${dir}/a.tekton"
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_shape(1, Primitive.Box, Transform(Vec3(1.0e30, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)), 0, false))
+    write_text(file, "old\n").unwrap()
+
+    assert(save_file(restored_document(items, 2, None, 1), file).is_err(), "refused")
+    assert_eq(read_text(file).unwrap(), "old\n", "not written")
+    remove_dir_all(dir).unwrap()
+end a_document_no_file_could_bring_back_is_not_written
+
+@test
+a_file_that_cannot_be_read_is_reported()
+    assert(load_file("/no/such/file.tekton").is_err(), "missing")
+end a_file_that_cannot_be_read_is_reported
+
+@test
+a_file_that_is_not_text_is_refused_with_a_line()
+    val dir = make_temp_dir("tekton-load").unwrap()
+    val file = s"${dir}/a.tekton"
+
+    write_bytes(file, [u8('t'), u8('e'), u8('k'), 10u8, 0xFFu8, 0xFEu8, 0u8]).unwrap()
+
+    val why = load_file(file).unwrap_err()
+
+    assert_eq(why, "line 2: this is not text", "binary")
+    remove_dir_all(dir).unwrap()
+end a_file_that_is_not_text_is_refused_with_a_line
