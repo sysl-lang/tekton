@@ -4,10 +4,11 @@ import sh.sysl.tekton.document.{Document, Primitive, new_document}
 import sh.sysl.tekton.export.{export_3mf, export_stl}
 import sh.sysl.tekton.files.{load_file, save_file}
 import sh.sysl.tekton.options.parse_options
+import sh.sysl.tekton.printer.CORE_ONE
 import sh.sysl.tekton.scenes.add_demo_scene
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf}
-import sysl.fs.{exists, make_temp_dir, read_bytes, remove_dir_all}
+import sysl.fs.{copy_file, exists, make_dir_all, make_temp_dir, read_bytes, read_text, remove_dir_all, write_text}
 import sysl.process.{Status, capture}
 import sysl.testing.skip
 import sysl.text.{Search, parse_real, split}
@@ -50,7 +51,7 @@ private exporting_the_demo_writes_what_the_exporters_write_for_it()
     val two = make_temp_dir("tekton-batch").unwrap()
 
     exported(["--export", s"${one}/demo.3mf", "--demo"]).unwrap()
-    export_3mf(demo(), s"${two}/demo.3mf").unwrap()
+    export_3mf(demo(), s"${two}/demo.3mf", CORE_ONE).unwrap()
     assert(same_bytes(s"${one}/demo.3mf", s"${two}/demo.3mf"), "3MF")
 
     exported(["--demo", "--export", s"${one}/demo.stl"]).unwrap()
@@ -72,7 +73,7 @@ private exporting_a_file_writes_what_the_exporters_write_for_it()
     assert(same_bytes(s"${one}/part.stl", s"${two}/part.stl"), "STL")
 
     exported(["--export", s"${one}/part.3mf", file]).unwrap()
-    export_3mf(load_file(file).unwrap(), s"${two}/part.3mf").unwrap()
+    export_3mf(load_file(file).unwrap(), s"${two}/part.3mf", CORE_ONE).unwrap()
     assert(same_bytes(s"${one}/part.3mf", s"${two}/part.3mf"), "3MF")
 
     remove_dir_all(one).unwrap()
@@ -117,7 +118,7 @@ private the_program_exports_without_a_window_and_fails_with_one_line_and_status_
     val direct = make_temp_dir("tekton-cli").unwrap()
     val file = saved_part(direct)
 
-    export_3mf(demo(), s"${direct}/demo.3mf").unwrap()
+    export_3mf(demo(), s"${direct}/demo.3mf", CORE_ONE).unwrap()
     export_stl(demo(), s"${direct}/demo.stl").unwrap()
     export_stl(load_file(file).unwrap(), s"${direct}/part.stl").unwrap()
 
@@ -161,8 +162,10 @@ private info(text: string, key: string) -> real
 end info
 
 // The slicer the part is printed with reads both exports of the demo as the five shapes Tekton made: the same
-// triangles, the same size, the same volume, and closed. A 3MF object is reported about its own centre, so only
-// the STL's place on the bed is compared.
+// triangles, the same size, the same volume, and closed. `--info` prints an object's own mesh: PrusaSlicer moves
+// a 3MF object's mesh to centre it on its own origin and keeps the placement in the instance, which `--info` does
+// not print, so it reports a 3MF about its own centre whatever its placement. Only the STL's place is compared
+// here; where the 3MF lands is what slicing it shows, below.
 @test
 private prusa_slicer_reads_both_exports_of_the_demo_as_tekton_made_them()
     // A skip, not a failure: a machine without the slicer can still build Tekton, and the run names the skip.
@@ -197,3 +200,74 @@ private prusa_slicer_reads_both_exports_of_the_demo_as_tekton_made_them()
 
     remove_dir_all(dir).unwrap()
 end prusa_slicer_reads_both_exports_of_the_demo_as_tekton_made_them
+
+// The slicer's profiles for the CORE One: the vendor bundle PrusaSlicer ships, in a data directory of the test's
+// own, so a run neither reads nor changes the person's PrusaSlicer settings.
+private prusa_data_dir(dir: string) -> string
+    val data = s"${dir}/datadir"
+
+    make_dir_all(s"${data}/vendor").unwrap()
+    copy_file(PRUSA_PROFILES, s"${data}/vendor/PrusaResearch.ini").unwrap()
+    write_text(s"${data}/PrusaSlicer.ini", "[vendor:PrusaResearch]\nmodel:COREONE = 0.4\n").unwrap()
+    data
+end prusa_data_dir
+
+const PRUSA_PROFILES: string = "/Applications/PrusaSlicer.app/Contents/Resources/profiles/PrusaResearch.ini"
+
+// The outline of the first object a G-code file prints, as PrusaSlicer's `objects_info` comment gives it, in the
+// printer's own coordinates: its least and greatest x and y.
+private object_outline(gcode: string) -> (real, real, real, real)
+    val key = "; objects_info = "
+    val from = gcode.index_of(key).unwrap() + key.len
+    val line = gcode[from..<from + gcode[from..].index_of("\n").unwrap()]
+    val polygon = line[line.index_of("[[").unwrap() + 2..<line.index_of("]]").unwrap()]
+    var (min_x, min_y, max_x, max_y) = (1.0e9, 1.0e9, -1.0e9, -1.0e9)
+
+    for point in split(polygon, "],[")
+        val xy = split(point, ",")
+        val x = parse_real(xy[0]).unwrap()
+        val y = parse_real(xy[1]).unwrap()
+
+        min_x = min_x.min(x)
+        min_y = min_y.min(y)
+        max_x = max_x.max(x)
+        max_y = max_y.max(y)
+
+    (min_x, min_y, max_x, max_y)
+end object_outline
+
+// The demo's 3MF slices for the CORE One as it is, with no `--center`, and the G-code prints it where it sat on
+// Tekton's bed: moved by half the bed's width and depth, since the slicer's origin is the bed's front-left corner.
+@test
+private prusa_slicer_slices_the_demo_3mf_where_it_sat_on_tektons_bed()
+    if !exists(PRUSA_SLICER) then skip(s"PrusaSlicer is not installed at ${PRUSA_SLICER}, so no slicer placed the 3MF")
+
+    val dir = make_temp_dir("tekton-prusa").unwrap()
+    val file = s"${dir}/demo.3mf"
+    val gcode = s"${dir}/demo.gcode"
+    val bounds = demo().solid_bounds().unwrap()
+
+    exported(["--export", file, "--demo"]).unwrap()
+
+    val out = capture(PRUSA_SLICER, ["--datadir", prusa_data_dir(dir), "--printer-profile", "Prusa CORE One 0.4 nozzle",
+                                     "--print-profile", "0.20mm SPEED @COREONE 0.4", "--material-profile",
+                                     "Prusament PLA @COREONE", "--binary-gcode=0", "--export-gcode", "-o", gcode, file],
+                      stderr = true).unwrap()
+    val said = s"${out.text}${out.err.unwrap_or("")}"
+
+    assert(out.status.ok(), said)
+    assert(!said.contains("outside of the print volume"), said)
+
+    val (min_x, min_y, max_x, max_y) = object_outline(read_text(gcode).unwrap())
+    val x = CORE_ONE.width * 0.5
+    val y = CORE_ONE.depth * 0.5
+    // The slicer's outline of a round part is a coarser polygon than its mesh, so it can fall short of a round
+    // edge by a few hundredths of a millimetre.
+    val near = 0.1
+
+    assert((min_x - (bounds.min.x + x)).abs() < near, s"left edge ${min_x}")
+    assert((max_x - (bounds.max.x + x)).abs() < near, s"right edge ${max_x}")
+    assert((min_y - (bounds.min.y + y)).abs() < near, s"front edge ${min_y}")
+    assert((max_y - (bounds.max.y + y)).abs() < near, s"back edge ${max_y}")
+    remove_dir_all(dir).unwrap()
+end prusa_slicer_slices_the_demo_3mf_where_it_sat_on_tektons_bed

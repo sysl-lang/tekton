@@ -356,7 +356,7 @@ struct Workspace
     end export_3mf_file
 
     private export_3mf_to(&self, file: string)
-        export_3mf(self.doc, file) match
+        export_3mf(self.doc, file, self.printer) match
             Ok(_) -> self.problem.set("")
             Err(why) -> self.problem.set(s"Could not export ${name_of(file)}: ${why}")
     end export_3mf_to

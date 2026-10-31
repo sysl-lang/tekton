@@ -1,6 +1,7 @@
 module sh.sysl.tekton.export
 
 import sh.sysl.tekton.document.{Document, Mesh}
+import sh.sysl.tekton.printer.Printer
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf}
 import sysl.container.{Map, map}
@@ -18,6 +19,12 @@ import sysl.text.{StrBuilder, str_builder, to_lower}
 //
 // **3MF** is a zip of three XML parts. The parts are made here (`content_types_part`, `relationships_part`,
 // `model_part`); the zip that holds them is not, since no package in the org writes one yet.
+//
+// **Placement.** Tekton's bed is centred on its origin; a slicer's origin is the front-left corner of the bed. A 3MF
+// places its object on the plate with the build item's transform, so the solid's own coordinates are written as
+// they are and the item moves them by half the printer's width and depth (`bed_offset`): the file opens in the
+// slicer exactly where the parts sat on Tekton's bed. An STL has no placement at all; a slicer centres what it
+// reads, so an STL is written in Tekton's coordinates unmoved.
 //
 // A failed write leaves the old file exactly as it was: the bytes go to a name beside it and are renamed into
 // place.
@@ -77,14 +84,14 @@ export_stl(doc: &Document, file: string) -> Result[unit, string]
         Err(e) -> Err(s"${e}")
 end export_stl
 
-// Write the document's solid to a file as 3MF, or say why not, exactly as `export_stl` does. The object is named
-// after the file.
-export_3mf(doc: &Document, file: string) -> Result[unit, string]
+// Write the document's solid to a file as 3MF, placed on the printer's bed, or say why not, exactly as
+// `export_stl` does. The object is named after the file.
+export_3mf(doc: &Document, file: string, printer: Printer) -> Result[unit, string]
     val mesh = doc.final_mesh() match
         Ok(m) -> m
         Err(why) -> return Err(why)
 
-    val bytes = three_mf_bytes(mesh, stem(file).unwrap_or("Tekton")) match
+    val bytes = three_mf_bytes(mesh, stem(file).unwrap_or("Tekton"), printer) match
         Ok(b) -> b
         Err(e) -> return Err(s"${e}")
 
@@ -101,25 +108,37 @@ export_format(file: string) -> Result[string, string]
     if e == "stl" || e == "3mf" then Ok(e) else Err(s"Not an export format: ${file} (Tekton writes .stl and .3mf)")
 end export_format
 
-// Write the document's solid to a file in the format its extension names, or say why not.
-export_file(doc: &Document, file: string) -> Result[unit, string] =
-    if export_format(file)? == "stl" then export_stl(doc, file) else export_3mf(doc, file)
+// Write the document's solid to a file in the format its extension names, or say why not. Only a 3MF is placed
+// on the printer's bed.
+export_file(doc: &Document, file: string, printer: Printer) -> Result[unit, string] =
+    if export_format(file)? == "stl" then export_stl(doc, file) else export_3mf(doc, file, printer)
 
 // Where each part of a 3MF package lives in its zip.
 val CONTENT_TYPES_NAME = "[Content_Types].xml"
 val RELATIONSHIPS_NAME = "_rels/.rels"
 val MODEL_NAME = "3D/3dmodel.model"
 
-// A mesh as a 3MF file: the three parts, deflated, in a zip stamped with the earliest DOS time, so the same mesh
-// and name always make the same bytes.
-three_mf_bytes(mesh: &Mesh, name: string) -> Result[Buf[u8], ZipError]
+// A mesh as a 3MF file placed on the printer's bed: the three parts, deflated, in a zip stamped with the earliest
+// DOS time, so the same mesh, name and printer always make the same bytes.
+three_mf_bytes(mesh: &Mesh, name: string, printer: Printer) -> Result[Buf[u8], ZipError]
     var w = writer()
 
     w.add(CONTENT_TYPES_NAME, content_types_part().bytes)?
     w.add(RELATIONSHIPS_NAME, relationships_part().bytes)?
-    w.add(MODEL_NAME, model_part(shared_mesh(mesh), name).bytes)?
+    w.add(MODEL_NAME, model_part(shared_mesh(mesh), name, printer).bytes)?
     Ok(w.finish())
 end three_mf_bytes
+
+// How far Tekton's origin, the centre of the bed, is from a slicer's, the bed's front-left corner.
+bed_offset(printer: Printer) -> Vec3 = Vec3(printer.width * 0.5, printer.depth * 0.5, 0.0)
+
+// The build item's `transform`: 3MF's twelve numbers, the rotation's three rows and then the move, here no turn
+// and `bed_offset`.
+item_transform(printer: Printer) -> string
+    val o = bed_offset(printer)
+
+    s"1 0 0 0 1 0 0 0 1 ${o.x} ${o.y} ${o.z}"
+end item_transform
 
 // A mesh as a 3MF file holds it: each distinct position once, and every triangle as three indices into them.
 struct SharedMesh
@@ -186,9 +205,9 @@ relationships_part() -> string =
     "Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n" +
     "</Relationships>\n"
 
-// `3D/3dmodel.model`: one object, the solid, in millimetres, placed once on the plate. `name` is what a slicer
-// lists it as.
-model_part(mesh: &SharedMesh, name: string) -> string
+// `3D/3dmodel.model`: one object, the solid, in millimetres, placed once on the printer's plate. `name` is what a
+// slicer lists it as.
+model_part(mesh: &SharedMesh, name: string, printer: Printer) -> string
     val title = xml_escaped(name)
     var b: &StrBuilder = str_builder()
 
@@ -213,7 +232,7 @@ model_part(mesh: &SharedMesh, name: string) -> string
         b.push(s"          <triangle v1=\"${t[i * 3]}\" v2=\"${t[i * 3 + 1]}\" v3=\"${t[i * 3 + 2]}\"/>\n")
 
     b.push("        </triangles>\n      </mesh>\n    </object>\n  </resources>\n")
-    b.push("  <build>\n    <item objectid=\"1\"/>\n  </build>\n</model>\n")
+    b.push(s"  <build>\n    <item objectid=\"1\" transform=\"${item_transform(printer)}\"/>\n  </build>\n</model>\n")
     b.finish()
 end model_part
 

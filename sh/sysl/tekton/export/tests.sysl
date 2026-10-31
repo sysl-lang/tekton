@@ -4,6 +4,7 @@ module sh.sysl.tekton.export
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.document.{Document, Mesh, Node, Primitive, Transform, identity_transform, new_document, restored_document,
                                 restored_group, restored_shape}
+import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.space.{Aabb, Vec3}
 import sysl.buf.{Buf, buf}
 import sysl.encoding.{get_u16_le, get_u32_le}
@@ -11,7 +12,7 @@ import sh.sysl.zip.{Archive, Method, open}
 import sysl.fs.{make_temp_dir, read_bytes, read_text, remove_dir_all, set_permissions, walk, write_text}
 import sysl.math.pi
 import sysl.process.capture
-import sysl.text.from_utf8
+import sysl.text.{from_utf8, parse_real, split}
 
 // -- STL --------------------------------------------------------------------------------------------------------
 
@@ -273,7 +274,7 @@ private assert_refused(doc: &Document, why: string)
     write_text(stl, "old\n").unwrap()
     write_text(three, "old\n").unwrap()
     assert_eq(export_stl(doc, stl), Err(why), "the reason")
-    assert_eq(export_3mf(doc, three), Err(why), "the same reason for 3MF")
+    assert_eq(export_3mf(doc, three, CORE_ONE), Err(why), "the same reason for 3MF")
     assert_eq(read_text(stl).unwrap(), "old\n", "the old file")
     assert_eq(read_text(three).unwrap(), "old\n", "the old 3MF file")
     assert_eq(entries_in(dir), 2, "nothing beside them")
@@ -387,7 +388,7 @@ end a_box_is_eight_shared_corners_wound_outward
 a_tiny_model_part_is_exactly_this_text()
     val shared = shared_mesh(hand_mesh([0.0, 0.0, 0.0, 2.5, 0.0, 0.0, 0.0, 0.1, -1.0], [0u32, 1, 2]))
 
-    assert_eq(model_part(shared, "wedge"),
+    assert_eq(model_part(shared, "wedge", CORE_ONE),
               "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
               "<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n" +
               "  <metadata name=\"Application\">Tekton</metadata>\n" +
@@ -407,7 +408,7 @@ a_tiny_model_part_is_exactly_this_text()
               "    </object>\n" +
               "  </resources>\n" +
               "  <build>\n" +
-              "    <item objectid=\"1\"/>\n" +
+              "    <item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 125 110 0\"/>\n" +
               "  </build>\n" +
               "</model>\n", "the model part")
 end a_tiny_model_part_is_exactly_this_text
@@ -436,12 +437,51 @@ a_name_is_escaped_wherever_it_is_written()
     assert_eq(xml_escaped("&&"), "&amp;&amp;", "side by side")
     assert_eq(xml_escaped("café"), "café", "other text is itself")
 
-    val part = model_part(shared_mesh(hand_mesh([], [])), "a<b")
+    val part = model_part(shared_mesh(hand_mesh([], [])), "a<b", CORE_ONE)
 
     assert(part.contains("<metadata name=\"Title\">a&lt;b</metadata>"), "in the title")
     assert(part.contains("name=\"a&lt;b\">"), "in the object's name")
     assert(!part.contains("a<b"), "nowhere raw")
 end a_name_is_escaped_wherever_it_is_written
+
+// -- Placement on the printer's bed ------------------------------------------------------------------------------
+
+@test
+the_item_moves_tektons_bed_centre_to_the_printers_corner_origin()
+    assert_eq(bed_offset(CORE_ONE), Vec3(125.0, 110.0, 0.0), "half the CORE One's width and depth, not its height")
+    assert_eq(item_transform(CORE_ONE), "1 0 0 0 1 0 0 0 1 125 110 0", "the CORE One's transform")
+    assert_eq(item_transform(Printer("small", 46.0, 30.0, 20.0)), "1 0 0 0 1 0 0 0 1 23 15 0", "taken from the printer")
+    assert_eq(item_transform(Printer("odd", 45.0, 31.0, 10.0)), "1 0 0 0 1 0 0 0 1 22.5 15.5 0", "half a millimetre")
+end the_item_moves_tektons_bed_centre_to_the_printers_corner_origin
+
+// Where a 3MF model part puts a point of its object on the plate: the point through the build item's transform,
+// a row vector times 3MF's four rows of three.
+private placed(model: string, p: Vec3) -> Vec3
+    val key = "transform=\""
+    val from = model.index_of(key).unwrap() + key.len
+    val text = model[from..]
+    var m: Buf[real] = buf()
+
+    for word in split(text[0..<text.index_of("\"").unwrap()], " ") do m.push(parse_real(word).unwrap())
+
+    assert_eq(m.len(), 12, "twelve numbers")
+    Vec3(p.x * m[0] + p.y * m[3] + p.z * m[6] + m[9], p.x * m[1] + p.y * m[4] + p.z * m[7] + m[10],
+         p.x * m[2] + p.y * m[5] + p.z * m[8] + m[11])
+end placed
+
+@test
+a_part_at_the_corners_of_tektons_bed_lands_at_the_corners_of_the_printers()
+    for printer in [CORE_ONE, Printer("small", 46.0, 30.0, 20.0)]
+        val near = Vec3(-printer.width * 0.5, -printer.depth * 0.5, 0.0)
+        val far = Vec3(printer.width * 0.5, printer.depth * 0.5, printer.height)
+        val corners = shared_mesh(hand_mesh([near.x, near.y, near.z, far.x, far.y, far.z, near.x, far.y, 0.0], [0u32, 1, 2]))
+        val model = model_part(corners, "corners", printer)
+
+        assert(model.contains(s"<vertex x=\"${f32(near.x)}\" y=\"${f32(near.y)}\" z=\"0\"/>"), "the vertices are Tekton's own")
+        assert_eq(placed(model, near), Vec3(0.0, 0.0, 0.0), s"the front-left corner is the ${printer.name}'s origin")
+        assert_eq(placed(model, far), Vec3(printer.width, printer.depth, printer.height), "the far top corner is its far top corner")
+        assert(printer.holds(Aabb(near, far)), "and the part was on Tekton's bed")
+end a_part_at_the_corners_of_tektons_bed_lands_at_the_corners_of_the_printers
 
 // -- Segments ---------------------------------------------------------------------------------------------------
 
@@ -517,12 +557,12 @@ end part_of
 @test
 a_package_holds_exactly_the_three_parts_deflated()
     val mesh = box_document().final_mesh().unwrap()
-    val archive = open(three_mf_bytes(mesh, "box").unwrap().view()).unwrap()
+    val archive = open(three_mf_bytes(mesh, "box", CORE_ONE).unwrap().view()).unwrap()
 
     assert_eq(archive.entries.len(), 3, "three parts and nothing else")
     assert_eq(part_of(archive, "[Content_Types].xml").view(), content_types_part().bytes, "content types")
     assert_eq(part_of(archive, "_rels/.rels").view(), relationships_part().bytes, "relationships")
-    assert_eq(part_of(archive, "3D/3dmodel.model").view(), model_part(shared_mesh(mesh), "box").bytes, "the model")
+    assert_eq(part_of(archive, "3D/3dmodel.model").view(), model_part(shared_mesh(mesh), "box", CORE_ONE).bytes, "the model")
 end a_package_holds_exactly_the_three_parts_deflated
 
 @test
@@ -532,7 +572,7 @@ an_exported_3mf_holds_the_documents_solid_in_millimetres()
     val doc = box_document()
 
     write_text(file, "old\n").unwrap()
-    export_3mf(doc, file).unwrap()
+    export_3mf(doc, file, CORE_ONE).unwrap()
 
     val bytes = read_bytes(file).unwrap()
     val archive = open(bytes).unwrap()
@@ -556,8 +596,8 @@ two_exports_of_one_document_are_byte_identical()
     val two = make_temp_dir("tekton-3mf").unwrap()
     val doc = drilled_box()
 
-    export_3mf(doc, s"${one}/part.3mf").unwrap()
-    export_3mf(doc, s"${two}/part.3mf").unwrap()
+    export_3mf(doc, s"${one}/part.3mf", CORE_ONE).unwrap()
+    export_3mf(doc, s"${two}/part.3mf", CORE_ONE).unwrap()
     assert_eq(read_bytes(s"${one}/part.3mf").unwrap().view(), read_bytes(s"${two}/part.3mf").unwrap().view(), "the same bytes")
     remove_dir_all(one).unwrap()
     remove_dir_all(two).unwrap()
@@ -568,7 +608,7 @@ unzip_finds_no_errors_in_an_exported_3mf()
     val dir = make_temp_dir("tekton-3mf-unzip").unwrap()
     val file = s"${dir}/drilled.3mf"
 
-    export_3mf(drilled_box(), file).unwrap()
+    export_3mf(drilled_box(), file, CORE_ONE).unwrap()
 
     val out = capture("unzip", ["-t", file]).unwrap()
 
@@ -588,13 +628,13 @@ a_failed_3mf_export_leaves_the_old_file_and_no_debris()
     write_text(file, "old\n").unwrap()
     set_permissions(dir, 0o555u32).unwrap()
 
-    val answer = export_3mf(box_document(), file)
+    val answer = export_3mf(box_document(), file, CORE_ONE)
 
     set_permissions(dir, 0o755u32).unwrap()
     assert(answer.is_err(), "refused")
     assert_eq(read_text(file).unwrap(), "old\n", "the old file")
     assert_eq(entries_in(dir), 1, "nothing beside it")
-    assert(export_3mf(box_document(), "/no/such/directory/a.3mf").is_err(), "no directory")
+    assert(export_3mf(box_document(), "/no/such/directory/a.3mf", CORE_ONE).is_err(), "no directory")
     remove_dir_all(dir).unwrap()
 end a_failed_3mf_export_leaves_the_old_file_and_no_debris
 
@@ -651,9 +691,9 @@ exporting_by_extension_writes_what_the_exporter_itself_writes()
         val direct = s"${one}/part.${e}"
         val chosen = s"${two}/part.${e}"
 
-        if e == "3mf" then export_3mf(drilled_box(), direct).unwrap() else export_stl(drilled_box(), direct).unwrap()
+        if e == "3mf" then export_3mf(drilled_box(), direct, CORE_ONE).unwrap() else export_stl(drilled_box(), direct).unwrap()
 
-        export_file(drilled_box(), chosen).unwrap()
+        export_file(drilled_box(), chosen, CORE_ONE).unwrap()
         assert(read_bytes(chosen).unwrap().view() == read_bytes(direct).unwrap().view(), s"the same bytes for .${e}")
         remove_dir_all(one).unwrap()
         remove_dir_all(two).unwrap()
@@ -664,8 +704,8 @@ exporting_by_extension_refuses_before_writing_anything()
     val dir = make_temp_dir("tekton-by-extension").unwrap()
     val file = s"${dir}/part.obj"
 
-    assert_eq(export_file(drilled_box(), file).unwrap_err(), s"Not an export format: ${file} (Tekton writes .stl and .3mf)")
-    assert_eq(export_file(new_document(), s"${dir}/part.stl").unwrap_err(), "There is nothing solid to export")
+    assert_eq(export_file(drilled_box(), file, CORE_ONE).unwrap_err(), s"Not an export format: ${file} (Tekton writes .stl and .3mf)")
+    assert_eq(export_file(new_document(), s"${dir}/part.stl", CORE_ONE).unwrap_err(), "There is nothing solid to export")
     assert_eq(entries_in(dir), 0)
     remove_dir_all(dir).unwrap()
 end exporting_by_extension_refuses_before_writing_anything

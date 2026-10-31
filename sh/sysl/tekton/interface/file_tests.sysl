@@ -133,8 +133,8 @@ export_3mf_writes_the_solid_and_leaves_the_document_its_file_and_mark()
     choose(w, &c, "Export 3MF…")
     assert_eq(d.three_mf_exports, 1, "asked where")
     assert_eq(d.exports, 0, "not the STL dialog")
-    assert_eq(read_bytes(s"${at}/part.3mf").unwrap(), three_mf_bytes(w.doc.final_mesh().unwrap(), "part").unwrap().view(),
-              "written, with its extension, box and sphere, named after the file")
+    assert_eq(read_bytes(s"${at}/part.3mf").unwrap(), three_mf_bytes(w.doc.final_mesh().unwrap(), "part", w.printer).unwrap().view(),
+              "written, with its extension, box and sphere, named after the file, on the window's printer's bed")
     assert_eq(w.file, doc_file, "the document's own file")
     assert(w.doc.is_dirty(), "still unsaved")
     assert_eq(w.problem.read(), "", "nothing wrong")

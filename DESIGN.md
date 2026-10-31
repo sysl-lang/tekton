@@ -85,7 +85,10 @@ write, a `.3mf` filter and `.3mf` added the same way. A 3MF file is a zip (packe
 parts, each deflated: `[Content_Types].xml` (`content_types_part`), `_rels/.rels` (`relationships_part`) and
 `3D/3dmodel.model` (`model_part`), the model in millimetres, each distinct position once with indexed triangles,
 and one object named after the file, XML-escaped (`three_mf_bytes`). Every entry carries the earliest DOS time
-and nothing from the clock, so one document exported twice is the same bytes.
+and nothing from the clock, so one document exported twice is the same bytes. The build item's `transform`
+moves the solid by half the printer's width and depth (`bed_offset`), so a 3MF opens in the slicer, whose origin
+is the bed's front-left corner, exactly where the parts sat on Tekton's centred bed; an STL has no placement and
+is written unmoved, since a slicer centres it.
 
 ## The layers
 
