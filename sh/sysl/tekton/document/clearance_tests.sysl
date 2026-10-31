@@ -249,3 +249,86 @@ a_clearance_edit_is_one_step_and_undoes()
     assert(doc.redo(), "redone")
     assert_eq(doc.find(id).unwrap().clearance, 0.2, "0.2 again")
     assert(close_vec(cut_size(doc, id), Vec3(10.4, 10.4, 10.4)), "and cuts at 10.4")
+
+// A block with a hole through it, the hole turned in the group and carrying a clearance; the group is then stretched
+// (and turned, and reflected) so that freeing the hole needs a group of its own to keep the stretch.
+private stretched_drilled_group(p: Primitive, group_turn: Quaternion[real], mirrored: bool) -> (&Document, int, int)
+    val doc = new_document()
+    val block = doc.add_shape(Primitive.Box)
+
+    doc.resize_to(block, Vec3(40.0, 40.0, 40.0)).unwrap()
+
+    val drill = hole_of(doc, p, Vec3(12.0, 12.0, 60.0))
+    val at = doc.find(drill).unwrap().transform
+
+    doc.set_transform(drill, Transform(Vec3(10.0, 5.0, -10.0), Quaternion.from_axis_angle([1.0, 0.0, 0.0], 0.5), at.scale))
+    doc.set_clearance(drill, 0.2).unwrap()
+    doc.select(Some(block))
+    doc.toggle_selected(drill)
+
+    val group = doc.group_selected().unwrap()
+
+    doc.set_transform(group, Transform(Vec3(7.0, -3.0, 4.0), group_turn, Vec3(3.0, 1.0, 0.5)))
+    doc.select(Some(group))
+    if mirrored then doc.mirror_selected(0).unwrap()
+    (doc, group, drill)
+end stretched_drilled_group
+
+private keeps_its_cut(p: Primitive, group_turn: Quaternion[real], mirrored: bool, name: string)
+    val (doc, group, drill) = stretched_drilled_group(p, group_turn, mirrored)
+    val before = doc.final_solid().unwrap()
+    val volume = before.volume()
+    val box = before.bounding_box()
+
+    doc.ungroup_selected().unwrap()
+
+    var wrapped = false
+
+    for item in doc.items() do if item.is_group then wrapped = true
+
+    assert(wrapped, s"${name}: the stretch is kept by a group of its own")
+
+    val after = doc.final_solid().unwrap()
+
+    assert(close(after.volume(), volume, 1.0e-6 * volume), s"${name}: the same cut ${after.volume()} against ${volume}")
+    assert(close_vec(Vec3(after.bounding_box().min().x, after.bounding_box().min().y, after.bounding_box().min().z),
+                     Vec3(box.min().x, box.min().y, box.min().z), 1.0e-6), s"${name}: and the same box")
+
+    assert(doc.undo(), s"${name}: undone")
+    assert_eq(doc.find(group).unwrap().children.len(), 2usize, s"${name}: back to the group")
+    assert_eq(doc.find(group).unwrap().children[1].clearance, 0.2, s"${name}: with the clearance")
+    assert(close(doc.final_solid().unwrap().volume(), volume, 1.0e-6 * volume), s"${name}: and the same cut")
+end keeps_its_cut
+
+@test
+a_box_hole_keeps_its_clearance_when_a_stretched_group_is_ungrouped()
+    keeps_its_cut(Primitive.Box, Quaternion.identity(), false, "stretched box")
+
+@test
+a_cylinder_hole_keeps_its_clearance_when_a_stretched_group_is_ungrouped()
+    keeps_its_cut(Primitive.Cylinder, Quaternion.identity(), false, "stretched cylinder")
+
+@test
+a_hole_keeps_its_clearance_when_a_turned_stretched_group_is_ungrouped()
+    val turn = Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.6)
+
+    keeps_its_cut(Primitive.Box, turn, false, "turned box")
+    keeps_its_cut(Primitive.Cylinder, turn, false, "turned cylinder")
+
+@test
+a_hole_keeps_its_clearance_when_a_reflected_stretched_group_is_ungrouped()
+    val turn = Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.6)
+
+    keeps_its_cut(Primitive.Box, turn, true, "reflected box")
+    keeps_its_cut(Primitive.Cylinder, Quaternion.identity(), true, "reflected cylinder")
+
+@test
+a_round_hole_keeps_its_segments_when_a_stretched_group_is_ungrouped()
+    val (doc, group, drill) = stretched_drilled_group(Primitive.Cylinder, Quaternion.identity(), false)
+
+    doc.set_segments(drill, 12).unwrap()
+
+    val before = doc.final_solid().unwrap().volume()
+
+    doc.ungroup_selected().unwrap()
+    assert(close(doc.final_solid().unwrap().volume(), before, 1.0e-6 * before), "a 12-sided hole cuts the same")

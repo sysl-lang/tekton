@@ -878,10 +878,13 @@ struct Document
     end ungroup_selected
 
     // A part that keeps its group's stretch by staying in a group of its own, solid or hole as it was.
+    //
+    // **The part inside is solid, so a hole's clearance is spent on its transform first**: only a hole grows by its
+    // clearance, and the cut it made must be the same one after the group came apart as before.
     private wrapped_part(&self, group: &Node, part: &Node) -> &Node
         var inside: Buf[&Node] = buf()
 
-        inside.push(part.with_hole(false))
+        inside.push(part.with_transform(self.cut_transform(part)).with_clearance(0.0).with_hole(false))
 
         val id = self.next_id
 
