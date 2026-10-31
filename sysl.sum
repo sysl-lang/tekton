@@ -1,4 +1,6 @@
+github.com/sysl-lang/hocon v0.3.4 sha256:fed595ac61f4b798a2a42f49999fced93cf297a405f7ddc5268dda6c3cbfa6e7
 github.com/sysl-lang/manifold v0.1.1 sha256:2d09b6241f9c6a568f26f52c1c1390b22d9073458273a6e465dec529ca243df5
+github.com/sysl-lang/parsing v0.13.2 sha256:05d41aa60754f7324c73b32a5cc1a546e71cea8120d15080385e8883e04cbce8
 github.com/sysl-lang/plutovg v0.2.6 sha256:daef22f6d3f1cf301052abc013ffa5634f2b9b3601dd5001a82ef25be4a584e2
 github.com/sysl-lang/quaternion v0.1.0 sha256:e4d82c4df2c20683d64e344a57063d543ef71d6426a1f7dcf339562c2008f4c3
 github.com/sysl-lang/sdl3 v0.3.14 sha256:ff3190b9d63237f17e6a0a93f0906488eb2d25015a6bc1064528aae014e32db4

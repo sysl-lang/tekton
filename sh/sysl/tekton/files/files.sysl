@@ -1,0 +1,404 @@
+module sh.sysl.tekton.files
+
+import sh.sysl.hocon.{Value, parse}
+import sh.sysl.parsing.{Source, Span, source_of}
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.document.{Document, Node, Operation, PRIMITIVES, Primitive, Transform, primitive_name, restored_document, restored_group, restored_shape}
+import sh.sysl.tekton.space.Vec3
+import sysl.buf.{Buf, buf, byte_sink}
+import sysl.container.{Set, set}
+import sysl.fs.{read_text, write_text_atomic}
+import sysl.math.Float
+import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
+
+// A document in a file, as text a person can read and a diff can show.
+//
+//     tekton = 1
+//     next = 4
+//     last = 3
+//     nodes = [
+//       {
+//         id = 3
+//         kind = group
+//         tint = 0
+//         hole = false
+//         at = [10.0, 0.0, 0.0]
+//         turn = [1.0, 0.0, 0.0, 0.0]
+//         scale = [1.0, 1.0, 1.0]
+//         parts = [
+//           ...
+//         ]
+//       }
+//     ]
+//
+// The file is HOCON, so it may hold comments and a mistake in it has a line. **The first line is the format
+// version, read before anything else**, because a later format need not be anything this reader can parse, and
+// its reader should hear "too new" rather than "expected a value".
+//
+// A file holds the tree and what the next edit needs: `next` is the id the next node gets, which also chooses
+// its colour, and `last` the thing the next shape is placed beside. Meshes are derived, and the selection and the
+// history belong to a session.
+//
+// **Every number is written as the shortest text that reads back as the same value**, so a transform comes back
+// bit for bit.
+
+// The format this writes, and the newest it reads.
+const FORMAT_VERSION: long = 1
+
+// The largest id or tint a file may hold, far past what any model reaches, so that counting on from one is safe.
+const NUMBER_LIMIT: long = 1 << 30
+
+// How many brackets may be open at once in a file. A group takes two, and the reader recurses on each.
+const BRACKET_LIMIT: int = 512
+
+// A real as the shortest text that reads back as the same value, with a point or an exponent always, so that
+// negative zero stays itself.
+private real_text(x: real) -> string
+    var sink = byte_sink()
+
+    display_real_shortest(x, &sink, FormatSpec(0, -1, false))
+
+    val t = from_utf8(sink.text()).unwrap()
+
+    for b in t.bytes
+        if b == u8('.') || b == u8('e') || b == u8('E') then return t
+
+    t + ".0"
+end real_text
+
+private numbers_text(values: []const real) -> string
+    var b = str_builder()
+
+    b.push("[")
+
+    for i in 0..<values.len
+        if i > 0 then b.push(", ")
+
+        b.push(real_text(values[i]))
+
+    b.push("]")
+    b.finish()
+end numbers_text
+
+private write_node(b: &StrBuilder, node: &Node, indent: string)
+    val inner = indent + "  "
+    val t = node.transform
+    val q = t.rotation
+    val kind = node.operation match
+        Shape(p) -> to_lower(primitive_name(p))
+        Group -> "group"
+
+    b.push(s"${indent}{\n${inner}id = ${node.id}\n${inner}kind = ${kind}\n${inner}tint = ${node.tint}\n")
+    b.push(s"${inner}hole = ${node.hole}\n")
+    b.push(s"${inner}at = ${numbers_text([t.translation.x, t.translation.y, t.translation.z])}\n")
+    b.push(s"${inner}turn = ${numbers_text([q.w, q.x, q.y, q.z])}\n")
+    b.push(s"${inner}scale = ${numbers_text([t.scale.x, t.scale.y, t.scale.z])}\n")
+
+    if node.is_group
+        b.push(s"${inner}parts = [\n")
+
+        for child in node.children.view() do write_node(b, child, inner + "  ")
+
+        b.push(s"${inner}]\n")
+
+    b.push(s"${indent}}\n")
+end write_node
+
+// The document as the text of its file.
+document_text(doc: &Document) -> string
+    var b: &StrBuilder = str_builder()
+
+    b.push(s"tekton = ${FORMAT_VERSION}\nnext = ${doc.next_id}\n")
+
+    doc.last_placed match
+        Some(id) -> if doc.find(id).is_some() then b.push(s"last = ${id}\n")
+        None -> ()
+
+    if doc.items().len == 0
+        b.push("nodes = []\n")
+    else
+        b.push("nodes = [\n")
+
+        for item in doc.items() do write_node(b, item, "  ")
+
+        b.push("]\n")
+
+    b.finish()
+end document_text
+
+// What reading one file is in the middle of.
+private struct Reading
+    src: Source
+
+    // Which line each node began on, so a refusal of the finished tree can still name one.
+    lines: Buf[(int, usize)]
+    ids: Set[int]
+    next_id: long
+
+    line_of(&self, s: Span) -> usize = self.src.locate(s.start).line
+
+    refusal(&self, s: Span, why: string) -> string = s"line ${self.line_of(s)}: ${why}"
+
+    // A key's value, or a refusal naming the node it is missing from.
+    needed(&self, node: Value, key: string) -> Result[Value, string] =
+        node.get(key).ok_or(self.refusal(node.span, s"this node has no `${key}`"))
+
+    // Exactly `count` finite numbers.
+    numbers(&self, node: Value, key: string, count: usize) -> Result[Buf[real], string]
+        val v = self.needed(node, key)?
+
+        if !v.is_arr() then return Err(self.refusal(v.span, s"`${key}` must be a list of ${count} numbers"))
+
+        val items = v.items()
+
+        if items.len() != count then return Err(self.refusal(v.span, s"`${key}` must hold ${count} numbers, not ${items.len()}"))
+
+        var out: Buf[real] = buf()
+
+        for item in items.view()
+            val x = item.as_real().ok_or(self.refusal(item.span, s"`${key}` must hold numbers"))?
+
+            if !x.is_finite() then return Err(self.refusal(item.span, s"`${key}` holds a number too large to use"))
+
+            out.push(x)
+
+        Ok(out)
+    end numbers
+
+    // A whole number from nothing up to the limit.
+    count(&self, node: Value, key: string) -> Result[int, string]
+        val v = self.needed(node, key)?
+        val n = v.as_long().ok_or(self.refusal(v.span, s"`${key}` must be a whole number"))?
+
+        if n < 0 || n > NUMBER_LIMIT then return Err(self.refusal(v.span, s"`${key}` is out of range"))
+
+        Ok(int(n))
+    end count
+
+    transform(&self, node: Value) -> Result[Transform, string]
+        val at = self.numbers(node, "at", 3)?
+        val q = self.numbers(node, "turn", 4)?
+        val s = self.numbers(node, "scale", 3)?
+
+        Ok(Transform(Vec3(at[0], at[1], at[2]), Quaternion(q[0], q[1], q[2], q[3]), Vec3(s[0], s[1], s[2])))
+    end transform
+
+    // One node and everything under it.
+    node(&self, v: Value) -> Result[&Node, string]
+        if !v.is_obj() then return Err(self.refusal(v.span, "a node must be an object"))
+
+        for f in v.fields().view()
+            if !is_node_key(f.key) then return Err(self.refusal(f.key_span, s"unknown key `${f.key}`"))
+
+        val kind_value = self.needed(v, "kind")?
+        val kind = kind_value.as_text().ok_or(self.refusal(kind_value.span, "`kind` must be the name of a kind"))?
+        val id = self.count(v, "id")?
+        val tint = self.count(v, "tint")?
+        val hole_value = self.needed(v, "hole")?
+        val hole = hole_value.as_bool().ok_or(self.refusal(hole_value.span, "`hole` must be true or false"))?
+        val t = self.transform(v)?
+
+        if id == 0 then return Err(self.refusal(v.span, "`id` must be above zero"))
+        if long(id) >= self.next_id then return Err(self.refusal(v.span, s"`id` ${id} is not below `next`"))
+        if !self.ids.add(id) then return Err(self.refusal(v.span, s"`id` ${id} is used twice"))
+
+        self.lines.push((id, self.line_of(v.span)))
+
+        val parts = v.get("parts")
+
+        if kind == "group"
+            val listed = parts.ok_or(self.refusal(v.span, "a group must have `parts`"))?
+
+            if !listed.is_arr() then return Err(self.refusal(listed.span, "`parts` must be a list"))
+
+            var children: Buf[&Node] = buf()
+
+            for item in listed.items().view() do children.push(self.node(item)?)
+
+            return Ok(restored_group(id, t, tint, hole, children))
+
+        val primitive = primitive_named(kind).ok_or(self.refusal(kind_value.span, s"unknown kind `${kind}`"))?
+
+        if parts.is_some() then return Err(self.refusal(v.span, s"a ${kind} has no `parts`"))
+
+        Ok(restored_shape(id, primitive, t, tint, hole))
+    end node
+
+    line_of_id(&self, id: int) -> usize
+        for (known, line) in self.lines.view()
+            if known == id then return line
+
+        1
+    end line_of_id
+end Reading
+
+private is_node_key(key: string) -> bool
+    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "parts"]
+        if k == key then return true
+
+    false
+end is_node_key
+
+private primitive_named(kind: string) -> Option[Primitive]
+    for p in PRIMITIVES
+        if to_lower(primitive_name(p)) == kind then return Some(p)
+
+    None
+end primitive_named
+
+// Whether every byte of this is a decimal digit.
+private all_digits(s: string) -> bool
+    if s.is_empty() then return false
+
+    for b in s.bytes
+        if b < u8('0') || b > u8('9') then return false
+
+    true
+end all_digits
+
+// What the first line says, read by itself: a mistake past it is no reason to doubt what it says.
+private check_version(text: string) -> Result[unit, string]
+    if text.is_empty() then return Err("line 1: the file is empty")
+
+    val stop = text.index_of("\n").unwrap_or(text.len)
+    val first = text[0..<stop]
+    val not_ours = s"line 1: not a Tekton document: the first line must be `tekton = ${FORMAT_VERSION}`"
+    val src = source_of("first line", first)
+    val root = parse(src).ok().ok_or(not_ours)?.root
+
+    if root.fields().len() != 1 then return Err(not_ours)
+
+    val written = root.get("tekton").ok_or(not_ours)?.as_scalar().ok_or(not_ours)?
+
+    if !all_digits(written) then return Err(not_ours)
+
+    val newer = s"line 1: this file is format ${written}, from a newer Tekton; this one reads up to format ${FORMAT_VERSION}"
+
+    root.get("tekton").unwrap().as_long() match
+        Some(n) ->
+            if n > FORMAT_VERSION then return Err(newer)
+            if n < 1 then return Err(not_ours)
+        None -> return Err(newer)
+
+    Ok(())
+end check_version
+
+// The line a bracket opened past the limit on, if one did. The HOCON reader recurses on each, so a file of nothing
+// but brackets must not reach it.
+private too_deep_at(text: string) -> Option[usize]
+    var open = 0
+    var line = 1usize
+
+    for b in text.bytes
+        if b == u8('\n') then line += 1
+
+        if b == u8('[') || b == u8('{')
+            open += 1
+
+            if open > BRACKET_LIMIT then return Some(line)
+        elif (b == u8(']') || b == u8('}')) && open > 0
+            open -= 1
+
+    None
+end too_deep_at
+
+// The line a substitution is written on, if one is. This format has none, and one is the way to make a small
+// file expand to a very large tree.
+private substitution_at(text: string) -> Option[usize]
+    text.index_of("${") match
+        Some(at) ->
+            var line = 1usize
+
+            for b in text[0..<at].bytes
+                if b == u8('\n') then line += 1
+
+            Some(line)
+        None -> None
+end substitution_at
+
+// The document a file's text says, or the line and the problem. Nothing is read twice and nothing outside the
+// answer changes, so a refusal leaves whatever is open untouched. `next_revision` goes on from the document this
+// one will replace.
+document_from_text(text: string, next_revision: int = 1) -> Result[&Document, string]
+    check_version(text)?
+
+    too_deep_at(text) match
+        Some(line) -> return Err(s"line ${line}: nested too deeply")
+        None -> ()
+
+    substitution_at(text) match
+        Some(line) -> return Err(s"line ${line}: a Tekton document has no substitutions")
+        None -> ()
+
+    val src = source_of("document", text)
+    val parsed = parse(src) match
+        Ok(d) -> d
+        Err(d) -> return Err(s"line ${src.locate(d.span.start).line}: ${d.message}")
+
+    if parsed.repeats.len() > 0
+        val again = parsed.repeats[0]
+
+        return Err(s"line ${src.locate(again.again.start).line}: `${again.path}` is written twice")
+
+    val root = parsed.root
+
+    for f in root.fields().view()
+        if f.key != "tekton" && f.key != "next" && f.key != "last" && f.key != "nodes"
+            return Err(s"line ${src.locate(f.key_span.start).line}: unknown key `${f.key}`")
+
+    val next_value = root.get("next").ok_or("line 1: this document has no `next`")?
+    val nodes = root.get("nodes").ok_or("line 1: this document has no `nodes`")?
+    val next_id = next_value.as_long().ok_or(s"line ${src.locate(next_value.span.start).line}: `next` must be a whole number")?
+
+    if next_id < 1 || next_id > NUMBER_LIMIT
+        return Err(s"line ${src.locate(next_value.span.start).line}: `next` is out of range")
+
+    val reading: &Reading = Reading(src, buf(), set[int](), next_id)
+
+    if !nodes.is_arr() then return Err(reading.refusal(nodes.span, "`nodes` must be a list"))
+
+    var items: Buf[&Node] = buf()
+
+    for item in nodes.items().view() do items.push(reading.node(item)?)
+
+    var last: Option[int] = None
+
+    root.get("last") match
+        Some(v) ->
+            val id = v.as_long().ok_or(reading.refusal(v.span, "`last` must be a whole number"))?
+
+            if id < 0 || id > NUMBER_LIMIT || !reading.ids.has(int(id))
+                return Err(reading.refusal(v.span, "`last` must be the id of a node"))
+
+            last = Some(int(id))
+        None -> ()
+
+    val doc = restored_document(items, int(next_id), last, next_revision)
+
+    doc.problem() match
+        Some((id, why)) -> Err(s"line ${reading.line_of_id(id)}: ${why}")
+        None -> Ok(doc)
+end document_from_text
+
+// The document in a file, or why not.
+load_file(file: string, next_revision: int = 1) -> Result[&Document, string]
+    val text = read_text(file) match
+        Ok(t) -> t
+        Err(e) -> return Err(s"${e}")
+
+    document_from_text(text, next_revision)
+end load_file
+
+// Put the document in a file, and say so to the document. **A failed write leaves the old file exactly as it was**:
+// the text goes to a name beside it and is renamed into place. A document no file could bring back is not written.
+save_file(doc: &Document, file: string) -> Result[unit, string]
+    doc.problem() match
+        Some((id, why)) -> return Err(s"${why} (shape ${id})")
+        None -> ()
+
+    write_text_atomic(file, document_text(doc)) match
+        Ok(_) ->
+            doc.mark_saved()
+            Ok(())
+        Err(e) -> Err(s"${e}")
+end save_file

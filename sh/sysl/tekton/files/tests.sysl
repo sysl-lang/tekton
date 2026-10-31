@@ -1,0 +1,11 @@
+module sh.sysl.tekton.files
+@tests
+
+import sh.sysl.tekton.document.new_document
+
+@test
+an_empty_document_probe()
+    val text = document_text(new_document())
+
+    print(text)
+    assert(document_from_text(text).is_ok(), "reads")

@@ -36,6 +36,21 @@ const HISTORY_MESH_BYTES: usize = 256 * 1024 * 1024
 // How far from square two axes may be, as a cosine, and still be taken for square.
 const SQUARE_TOLERANCE: real = 1.0e-9
 
+// How far a part of a group may stand from its group, and how far any node may be scaled. A part's numbers
+// answer to the group around it, so these only keep out what no edit could have made.
+const PART_LIMIT: real = 1.0e7
+const MIN_SCALE: real = 1.0e-6
+const MAX_SCALE: real = 1.0e6
+
+// How deep groups may nest in a file: deep enough for any model and shallow enough that reading one cannot run
+// out of stack.
+const MAX_NESTING: int = 128
+
+// How far from length one a rotation may be, and from the limits a side may be, by the rounding of the
+// arithmetic that made it.
+const ROTATION_TOLERANCE: real = 1.0e-6
+const SIZE_TOLERANCE: real = 1.0e-6
+
 // The shapes a palette offers.
 enum Primitive
     Box
@@ -325,6 +340,92 @@ struct Document
     in_step: bool
     step_start: Option[DocumentState]
     mesh_budget: usize
+
+    // What the tree was when it last met a file, as text, and the last answer as to whether it still is. Undo
+    // brings the same root back, so asking again about one root costs nothing.
+    saved_model: string
+    checked_root: &Node
+    checked_dirty: bool
+
+    // Whether the tree differs from what was last saved. Undoing back to it is not a difference, and neither
+    // is an edit that puts every number back.
+    is_dirty(&self) -> bool
+        if self.root !== self.checked_root
+            self.checked_root = self.root
+            self.checked_dirty = model_text(self.root) != self.saved_model
+
+        self.checked_dirty
+    end is_dirty
+
+    // This tree is what the file now holds.
+    mark_saved(&self)
+        self.saved_model = model_text(self.root)
+        self.checked_root = self.root
+        self.checked_dirty = false
+    end mark_saved
+
+    // Why this tree could not stand as a document, and the node at fault: what a file is refused for, and what
+    // keeps a save from writing a file that would be refused.
+    problem(&self) -> Option[(int, string)]
+        for item in self.items()
+            self.node_problem(item, 0) match
+                Some(found) -> return Some(found)
+                None -> ()
+
+        None
+    end problem
+
+    // **Where a thing stands is limited only on the ground**, and its size only for a shape there. A part's
+    // numbers are relative to a group that may stretch it, so a part only has to be sane, and a group may
+    // span more than one shape can.
+    private node_problem(&self, node: &Node, depth: int) -> Option[(int, string)]
+        val t = node.transform
+        val p = t.translation
+        val s = t.scale
+        val limit = if depth == 0 then POSITION_LIMIT else PART_LIMIT
+
+        if !t.is_usable() then return Some((node.id, "A transform needs finite numbers and sides above zero"))
+
+        if (t.rotation.norm() - 1.0).abs() > ROTATION_TOLERANCE
+            return Some((node.id, "A rotation must have a length of one"))
+
+        if p.x.abs() > limit || p.y.abs() > limit || p.z.abs() > limit
+            return Some((node.id, s"Position is limited to ${limit.round()} mm"))
+
+        for i in 0..<3
+            if s.axis(i) < MIN_SCALE || s.axis(i) > MAX_SCALE
+                return Some((node.id, s"Scale must be from ${MIN_SCALE} to ${MAX_SCALE.round()}"))
+
+        if node.is_group
+            if depth >= MAX_NESTING then return Some((node.id, s"Groups may nest only ${MAX_NESTING} deep"))
+
+            var solids = 0
+
+            for child in node.children.view()
+                self.node_problem(child, depth + 1) match
+                    Some(found) -> return Some(found)
+                    None -> ()
+
+                if !child.hole then solids += 1
+
+            if solids == 0 then return Some((node.id, "A group needs a solid part"))
+
+            val joined = self.local_of(node)
+
+            joined.status() match
+                NoError -> ()
+                _ -> return Some((node.id, "The kernel could not join this group"))
+
+            if joined.is_empty() then return Some((node.id, "The holes in this group cut away all of its solid"))
+        elif depth == 0
+            val size = self.size_of(node)
+
+            for i in 0..<3
+                if size.axis(i) < MIN_SIZE * (1.0 - SIZE_TOLERANCE) || size.axis(i) > MAX_SIZE * (1.0 + SIZE_TOLERANCE)
+                    return Some((node.id, s"Size must be from ${MIN_SIZE.round()} to ${MAX_SIZE.round()} mm"))
+
+        None
+    end node_problem
 
     // The one selected node, if exactly one is. What a panel's numbers and a shape's handles work on.
     selected -> Option[int] = if self.selection.len() == 1 then Some(self.selection[0]) else None
@@ -859,9 +960,26 @@ struct Document
     end bounds_of
 end Document
 
-new_document() -> &Document =
-    Document(Node(0, Operation.Group, identity_transform(), 0, false, buf(), Derived(None, None), None, None), buf(),
-             None, 1, 0, 1, buf(), buf(), false, None, HISTORY_MESH_BYTES)
+new_document() -> &Document = restored_document(buf(), 1, None, 1)
+
+// A document holding these things on the ground, with no history, nothing selected, and nothing to save.
+//
+// **`next_revision` goes on from the document this one replaces**, because a renderer knows a mesh by its node's
+// id and its revision, and a new document's first shape has the id an old one's did.
+restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], next_revision: int) -> &Document
+    val root = Node(0, Operation.Group, identity_transform(), 0, false, items, Derived(None, None), None, None)
+
+    Document(root, buf(), last_placed, next_id, 0, next_revision, buf(), buf(), false, None, HISTORY_MESH_BYTES,
+             model_text(root), root, false)
+end restored_document
+
+// A shape as a file says it.
+restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool) -> &Node =
+    Node(id, Operation.Shape(p), t, tint, hole, buf(), Derived(None, None), None, None)
+
+// A group as a file says it.
+restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node]) -> &Node =
+    Node(id, Operation.Group, t, tint, hole, parts, Derived(None, None), None, None)
 
 // What makes a tree what it is, as text.
 private model_text(node: &Node) -> string = node.model()
