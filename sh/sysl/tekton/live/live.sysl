@@ -19,10 +19,11 @@ private number(x: real) -> string = if x.is_finite() then s"${x}" else "null"
 private vector(v: Vec3) -> string = s"[${number(v.x)},${number(v.y)},${number(v.z)}]"
 
 // One node and everything under it: its id, what it is, whether it cuts or joins, where it is in its
-// parent's space, how big it is along its own axes in millimetres, and how it is turned as a quaternion.
+// parent's space, how big it is along its own axes in millimetres, how it is turned as a quaternion, and for a
+// round shape how many sides it has.
 private node_json(doc: &Document, node: &Node) -> string
     val kind = node.operation match
-        Shape(p) -> to_lower(primitive_name(p))
+        Shape(p, _) -> to_lower(primitive_name(p))
         Group -> "group"
     val q = node.transform.rotation
     val size = doc.size_of(node)
@@ -30,6 +31,10 @@ private node_json(doc: &Document, node: &Node) -> string
 
     out = out + s"\"position\":${vector(node.transform.translation)},\"size\":${vector(size)},"
     out = out + s"\"rotation\":[${number(q.w)},${number(q.x)},${number(q.y)},${number(q.z)}]"
+
+    node.segments match
+        Some(n) -> out = out + s",\"segments\":${n}"
+        None -> ()
 
     if node.is_group
         out = out + ",\"children\":["

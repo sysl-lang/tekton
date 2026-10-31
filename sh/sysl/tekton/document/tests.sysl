@@ -972,3 +972,131 @@ selecting_an_id_that_was_edited_keeps_it()
     assert(doc.selected == Some(a), "the older one")
     doc.select(None)
     assert(doc.selected.is_none(), "and none")
+
+// ## Segments
+
+private triangles_of(doc: &Document, id: int) -> usize = doc.mesh_of(doc.find(id).unwrap()).triangle_count()
+
+@test
+a_round_shape_starts_with_the_default_and_nothing_else_has_segments()
+    val doc = new_document()
+
+    for p in PRIMITIVES
+        val id = doc.add_shape(p)
+        val want = if is_round(p) then Some(ROUND_SEGMENTS) else None
+
+        assert_eq(doc.find(id).unwrap().segments, want, primitive_name(p))
+
+    assert(!is_round(Primitive.Box), "a box is not round")
+    assert_eq(restored_shape(1, Primitive.Cone, identity_transform(), 0, false).segments, Some(ROUND_SEGMENTS),
+              "a shape restored without a number")
+
+    doc.select(Some(doc.items()[0].id))
+    doc.toggle_selected(doc.items()[1].id)
+
+    val group = doc.group_selected().unwrap()
+
+    assert(doc.find(group).unwrap().segments.is_none(), "a group has none")
+    assert(doc.set_segments(group, 12).is_err(), "and none to set")
+
+@test
+segments_are_held_from_3_to_512()
+    for (asked, kept) in [(-5, 3), (0, 3), (2, 3), (3, 3), (4, 4), (511, 511), (512, 512), (513, 512), (100000, 512)]
+        assert_eq(clamped_segments(asked), kept, s"clamped ${asked}")
+
+        val doc = new_document()
+        val id = doc.add_shape(Primitive.Cylinder)
+
+        doc.set_segments(id, asked).unwrap()
+        assert_eq(doc.find(id).unwrap().segments, Some(kept), s"set ${asked}")
+
+@test
+segments_are_how_many_sides_the_kernel_builds()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Cylinder)
+    val default_triangles = triangles_of(doc, id)
+
+    doc.set_segments(id, 8).unwrap()
+    assert(near(doc.mesh_of(doc.find(id).unwrap()).volume(), polygon_area(10.0, 8) * 20.0, 1.0e-2), "an octagonal prism")
+    assert(triangles_of(doc, id) < default_triangles, "fewer triangles")
+
+    doc.set_segments(id, 200).unwrap()
+    assert(near(doc.mesh_of(doc.find(id).unwrap()).volume(), polygon_area(10.0, 200) * 20.0, 1.0e-1), "a 200-gon prism")
+    assert(triangles_of(doc, id) > default_triangles, "more triangles")
+
+    for p in [Primitive.Sphere, Primitive.Cone, Primitive.Torus]
+        val shape = doc.add_shape(p)
+        val many = triangles_of(doc, shape)
+
+        doc.set_segments(shape, 12).unwrap()
+        assert(triangles_of(doc, shape) < many, s"a ${primitive_name(p)} of 12 sides has fewer triangles")
+
+        for n in [MIN_SEGMENTS, 12, MAX_SEGMENTS]
+            assert(primitive_solid(p, n).status() == sh.sysl.manifold.Status.NoError,
+                   s"a ${primitive_name(p)} of ${n} sides is a valid solid")
+
+@test
+a_torus_tube_keeps_its_old_24_sides_at_the_default()
+    assert_eq(torus_tube_segments(ROUND_SEGMENTS), 24, "the look a torus always had")
+    assert_eq(torus_tube_segments(3), 3, "never below a triangle")
+    assert_eq(torus_tube_segments(512), 192, "three eighths")
+
+@test
+a_segments_edit_is_one_step_and_undoes()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Sphere)
+    val before = triangles_of(doc, id)
+    val steps = doc.undos.len()
+
+    doc.set_segments(id, 16).unwrap()
+    assert_eq(doc.undos.len(), steps + 1, "one step")
+
+    val after = triangles_of(doc, id)
+
+    assert(after != before, "other triangles")
+    assert(doc.undo(), "undone")
+    assert_eq(doc.find(id).unwrap().segments, Some(ROUND_SEGMENTS), "the old number")
+    assert_eq(triangles_of(doc, id), before, "and the old triangles")
+    assert(doc.redo(), "redone")
+    assert_eq(doc.find(id).unwrap().segments, Some(16), "the new number")
+    assert_eq(triangles_of(doc, id), after, "and the new triangles")
+
+    val now = doc.undos.len()
+
+    doc.set_segments(id, 16).unwrap()
+    doc.set_segments(id, 9000).unwrap()
+    doc.set_segments(id, 9001).unwrap()
+    assert_eq(doc.undos.len(), now + 1, "the same number is no step, nor one that clamps to the same")
+
+@test
+a_box_refuses_segments_and_takes_no_step()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val steps = doc.undos.len()
+
+    assert(doc.set_segments(id, 12).is_err(), "refused")
+    assert(doc.find(id).unwrap().segments.is_none(), "still none")
+    assert_eq(doc.undos.len(), steps, "and no step")
+    assert(doc.set_segments(9999, 12).is_err(), "nor anything that is not there")
+
+@test
+a_part_inside_a_group_changes_the_group_solid()
+    val doc = new_document()
+    val box = doc.add_shape(Primitive.Box)
+    val cylinder = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_part_hole(cylinder, true)
+    doc.set_transform(box, identity_transform())
+    doc.set_transform(cylinder, identity_transform())
+    doc.select(Some(box))
+    doc.toggle_selected(cylinder)
+
+    val group = doc.group_selected().unwrap()
+    val before = doc.mesh_of(doc.find(group).unwrap()).volume()
+
+    doc.set_segments(cylinder, 6).unwrap()
+
+    val after = doc.mesh_of(doc.find(group).unwrap()).volume()
+
+    assert(near(before, 8000.0 - polygon_area(10.0, ROUND_SEGMENTS) * 20.0, 1.0e-1), "a 64-sided hole")
+    assert(near(after, 8000.0 - polygon_area(10.0, 6) * 20.0, 1.0e-1), "a hexagonal hole")

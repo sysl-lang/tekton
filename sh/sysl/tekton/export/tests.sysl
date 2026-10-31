@@ -8,6 +8,7 @@ import sh.sysl.tekton.space.{Aabb, Vec3}
 import sysl.buf.{Buf, buf}
 import sysl.encoding.{get_u16_le, get_u32_le}
 import sysl.fs.{make_temp_dir, read_bytes, read_text, remove_dir_all, set_permissions, walk, write_text}
+import sysl.math.pi
 
 // -- STL --------------------------------------------------------------------------------------------------------
 
@@ -434,3 +435,51 @@ a_name_is_escaped_wherever_it_is_written()
     assert(part.contains("name=\"a&lt;b\">"), "in the object's name")
     assert(!part.contains("a<b"), "nowhere raw")
 end a_name_is_escaped_wherever_it_is_written
+
+// -- Segments ---------------------------------------------------------------------------------------------------
+
+// The facets an exported file holds, through a real file, for a cylinder of so many sides.
+private exported_cylinder(segments: int) -> Buf[Facet]
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_shape(1, Primitive.Cylinder, identity_transform(), 0, false, segments))
+
+    val dir = make_temp_dir("tekton-export").unwrap()
+    val file = s"${dir}/round.stl"
+
+    export_stl(restored_document(items, 2, None, 1), file).unwrap()
+
+    val bytes = read_bytes(file).unwrap()
+    var kept: Buf[u8] = buf()
+
+    for b in bytes do kept.push(b)
+
+    remove_dir_all(dir).unwrap()
+    facets_of(kept)
+end exported_cylinder
+
+// A regular n-gon of radius `r`, the base of a cylinder of n sides.
+private polygon_area(r: real, n: int) -> real = 0.5 * real(n) * r * r * (2.0 * pi / real(n)).sin()
+
+@test
+an_exported_round_shape_has_the_sides_it_was_given()
+    val eight = exported_cylinder(8)
+    val default = exported_cylinder(64)
+    val many = exported_cylinder(300)
+
+    assert(eight.len() < default.len(), "fewer facets at 8 than 64")
+    assert(default.len() < many.len(), "and more at 300")
+    assert((volume_of(eight) - polygon_area(10.0, 8) * 20.0).abs() < 1.0e-2, "an octagonal prism")
+    assert((volume_of(many) - polygon_area(10.0, 300) * 20.0).abs() < 1.0e-1, "a 300-gon prism")
+
+@test
+a_hole_exports_with_the_sides_set_on_it()
+    val doc = drilled_box()
+    val before = facets_of(stl_bytes(doc.final_mesh().unwrap())).len()
+
+    doc.set_segments(3, 6).unwrap()
+
+    val after = facets_of(stl_bytes(doc.final_mesh().unwrap()))
+
+    assert(after.len() < before, "a hexagonal hole has fewer facets")
+    assert((volume_of(after) - doc.final_solid().unwrap().volume()).abs() < 1.0e-3, "the kernel's volume")

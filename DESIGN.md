@@ -33,11 +33,12 @@ only the path from that node to the root. This same tree is what a script will p
 
 ## Files
 
-A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 1`, the format
+A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 2`, the format
 version, read by itself before anything else, so a newer format is told "too new" whatever else it holds. It
 holds the tree, `next` (the id the next node gets) and `last` (what the next shape is placed beside). Meshes are
 derived, and the selection and the history belong to a session. Every number is written as the shortest text
-that reads back as the same value, so a saved document comes back bit for bit.
+that reads back as the same value, so a saved document comes back bit for bit. A round shape writes its
+`segments`; format 2 added them, and a format 1 file still opens, its round shapes at the default 64.
 
 A bad file is refused with its line and the problem, and whatever is open stays as it was. That covers more than
 syntax: an id used twice, a transform no edit could make, groups nested past 128, a group the kernel cannot
@@ -114,8 +115,8 @@ Everything runs without a window, so a test or an agent can use the application 
   **Tekton's own two routes**, added through `syslui-sdl`'s `routes` (asked before the built-ins; everything
   else passes on to them):
   - `GET /tekton/state` answers one line of JSON: `items` (the document's tree: each node's `id`, `kind`,
-    `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, and for a group
-    its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
+    `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, for a round shape
+    its `segments`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
     `fov`), `file` (the path, or `null`) and `dirty`. A number JSON cannot spell is `null`.
   - `POST /tekton/quit` quits at once, asking nothing about unsaved changes, so a session nobody can answer
     can be ended; the answer is sent, and the program exits on the next frame. A `GET` of it is refused.
@@ -148,4 +149,6 @@ their own tests, so most changes never need the whole application linked or a wi
    The bed is done: the Prusa CORE One's 250 × 220 mm bed, gridded and bordered, with its 270 mm build
    volume outlined (View → Build Volume), all from one `Printer` value, and `/tekton/state` reports
    `outside_volume` when a solid reaches past it.
+   - **Facets are done**: every round shape (cylinder, sphere, cone, torus) has its own `segments`, 64 unless
+     set, edited in the panel, held to 3–512, one undo step, saved in the file and used by the STL export.
 7. nex scripting.
