@@ -76,7 +76,7 @@ struct Stroke
         val dy = self.by - self.ay
         val across = dx * dx + dy * dy
         val along = if across > 0.0 then ((x - self.ax) * dx + (y - self.ay) * dy) / across else 0.0
-        val h = max(0.0, min(along, 1.0))
+        val h = along.clamp(0.0, 1.0)
         val ex = x - (self.ax + dx * h)
         val ey = y - (self.ay + dy * h)
 
@@ -273,7 +273,7 @@ private add_arc(out: &Layout, doc: &Document, node: &Node, camera: &Camera, widt
     val centre = pivot_of(doc, node, axis)
     val radius = arc_radius(doc, node, camera, height)
     val per_point = camera.world_per_point(centre, height)
-    val half = min(ARC_LENGTH * per_point / radius, 1.2) * 0.5
+    val half = (ARC_LENGTH * per_point / radius).min(1.2) * 0.5
     val middle = arc_direction(axis, camera)
     val beside = world_axis(axis).cross(middle)
     val grip = Grip.Turn(axis)

@@ -72,8 +72,8 @@ struct Aabb derives Eq
 
     // The smallest box holding both.
     joined(self, o: Aabb) -> Aabb =
-        Aabb(Vec3(min(self.min.x, o.min.x), min(self.min.y, o.min.y), min(self.min.z, o.min.z)),
-             Vec3(max(self.max.x, o.max.x), max(self.max.y, o.max.y), max(self.max.z, o.max.z)))
+        Aabb(Vec3(self.min.x.min(o.min.x), self.min.y.min(o.min.y), self.min.z.min(o.min.z)),
+             Vec3(self.max.x.max(o.max.x), self.max.y.max(o.max.y), self.max.z.max(o.max.z)))
 
     // Whether the two share any area when seen from above, leaving `gap` between them to count as apart.
     overlaps_plan(self, o: Aabb, gap: real = 0.0) -> bool =

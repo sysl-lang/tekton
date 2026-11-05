@@ -78,8 +78,8 @@ a_cone_mirrored_along_z_stands_on_its_point()
         val p = node.transform.apply(mesh.position(u32(i)))
         val r = (p.x * p.x + p.y * p.y).sqrt()
 
-        if p.z < 1.0e-6 then widest_low = max(widest_low, r)
-        if p.z > 20.0 - 1.0e-6 then widest_high = max(widest_high, r)
+        if p.z < 1.0e-6 then widest_low = widest_low.max(r)
+        if p.z > 20.0 - 1.0e-6 then widest_high = widest_high.max(r)
 
     assert(widest_low < 1.0e-6, "the point is on the ground")
     assert((widest_high - 10.0).abs() < 1.0e-4, "the base is at the top, as near as a mesh's floats come")
@@ -231,8 +231,8 @@ align_lines_up_each_side_of_shapes_of_different_sizes()
             val (doc, small, big) = unequal_boxes()
             val all_before = box_of(doc, small)
             val big_before = box_of(doc, big)
-            val low = min(all_before.min.axis(axis), big_before.min.axis(axis))
-            val high = max(all_before.max.axis(axis), big_before.max.axis(axis))
+            val low = all_before.min.axis(axis).min(big_before.min.axis(axis))
+            val high = all_before.max.axis(axis).max(big_before.max.axis(axis))
             val want = edge match
                 Min -> low
                 Centre -> (low + high) / 2.0

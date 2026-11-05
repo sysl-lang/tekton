@@ -217,8 +217,8 @@ struct Mesh
         for i in 1..<self.vertex_count()
             val p = t.apply(self.position(u32(i)))
 
-            low = Vec3(min(low.x, p.x), min(low.y, p.y), min(low.z, p.z))
-            high = Vec3(max(high.x, p.x), max(high.y, p.y), max(high.z, p.z))
+            low = Vec3(low.x.min(p.x), low.y.min(p.y), low.z.min(p.z))
+            high = Vec3(high.x.max(p.x), high.y.max(p.y), high.z.max(p.z))
 
         Aabb(low, high)
     end bounds_after
@@ -1139,8 +1139,8 @@ struct Document
         for node in nodes
             val b = self.bounds_of(node)
 
-            e = Aabb(Vec3(min(e.min.x, b.min.x), min(e.min.y, b.min.y), min(e.min.z, b.min.z)),
-                     Vec3(max(e.max.x, b.max.x), max(e.max.y, b.max.y), max(e.max.z, b.max.z)))
+            e = Aabb(Vec3(e.min.x.min(b.min.x), e.min.y.min(b.min.y), e.min.z.min(b.min.z)),
+                     Vec3(e.max.x.max(b.max.x), e.max.y.max(b.max.y), e.max.z.max(b.max.z)))
 
         e
     end extent
@@ -1576,7 +1576,7 @@ takes_edges(p: Primitive) -> bool = p == Primitive.Box || p == Primitive.Cylinde
 
 // An edge radius held to what a shape of this size has room for: nothing up to half its smallest side, where
 // the rounds or chamfers of opposite edges meet.
-clamped_edge_radius(radius: real, size: Vec3) -> real = max(0.0, min(radius, min(size.x, min(size.y, size.z)) / 2.0))
+clamped_edge_radius(radius: real, size: Vec3) -> real = radius.min(size.x.min(size.y.min(size.z)) / 2.0).max(0.0)
 
 // A box or cylinder with finished edges, built at the size `scale` gives the palette's shape and then brought back
 // into the palette's box, so that the node's transform, which applies `scale` again, lands it at that size with
@@ -1661,7 +1661,7 @@ clamped_segments(n: int) -> int = max(MIN_SEGMENTS, min(MAX_SEGMENTS, n))
 // turning a hole into another shape.
 const MAX_CLEARANCE: real = 2.0
 
-clamped_clearance(c: real) -> real = max(0.0, min(MAX_CLEARANCE, c))
+clamped_clearance(c: real) -> real = MAX_CLEARANCE.min(c).max(0.0)
 
 // How many sides a torus's tube has: three eighths of its ring's, as many as a ring of 64 always gave it.
 torus_tube_segments(segments: int) -> int = max(MIN_SEGMENTS, segments * 3 / 8)

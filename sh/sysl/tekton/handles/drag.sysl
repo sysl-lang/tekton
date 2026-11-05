@@ -144,14 +144,14 @@ struct Drag
         val t = self.start.translation + (p - self.grab)
         val limit = POSITION_LIMIT
 
-        Transform(Vec3(clamp(to_grid(t.x, k), -limit, limit), clamp(to_grid(t.y, k), -limit, limit),
+        Transform(Vec3(to_grid(t.x, k).clamp(-limit, limit), to_grid(t.y, k).clamp(-limit, limit),
                        self.start.translation.z), self.start.rotation, self.start.scale)
     end slide
 
     private raise(self, camera: &Camera, width: real, height: real, dx: real, dy: real, k: DragKeys) -> Transform
         val travel = line_travel(camera, self.grab, Vec3(0.0, 0.0, 1.0), width, height, dx, dy)
         val t = self.start.translation
-        val z = clamp(to_grid(t.z + travel, k), self.floor, POSITION_LIMIT)
+        val z = to_grid(t.z + travel, k).clamp(self.floor, POSITION_LIMIT)
 
         Transform(Vec3(t.x, t.y, z), self.start.rotation, self.start.scale)
     end raise
@@ -207,14 +207,14 @@ private vec_back(t: Transform, v: Vec3) -> Vec3 = vec3(t.rotation.conjugate().ro
 
 // Every side scaled by one number, which is held to where no side leaves its limits.
 private proportional(s: Vec3, ratio: real) -> Vec3
-    val least = MIN_SIZE / min(s.x, min(s.y, s.z))
-    val most = MAX_SIZE / max(s.x, max(s.y, s.z))
-    val k = clamp(ratio, least, most)
+    val least = MIN_SIZE / s.x.min(s.y.min(s.z))
+    val most = MAX_SIZE / s.x.max(s.y.max(s.z))
+    val k = ratio.clamp(least, most)
 
     s * k
 
 private reach_of(camera: &Camera, at: Vec3) -> real =
-    max(camera.distance, (at - camera.eye()).length()) * REACH
+    camera.distance.max((at - camera.eye()).length()) * REACH
 
 // The signed angle about `around` from the grab to where this ray meets the ring's plane.
 private ring_angle(camera: &Camera, ray: Ray, c: Vec3, around: Vec3, grab: Vec3) -> real
@@ -274,7 +274,7 @@ drag_grip(doc: &Document, camera: &Camera, id: int, grip: Grip, width: real, hei
 
     // A shape is lowered until its lowest point reaches the ground, or stays where it is if it is already under.
     val lowest = doc.bounds_of(node).min.z
-    val floor = min(t.translation.z, t.translation.z - lowest)
+    val floor = t.translation.z.min(t.translation.z - lowest)
 
     Some(Drag(id, Some(grip), t, local, x, y, grab, floor, on_ring, pivot))
 end drag_grip

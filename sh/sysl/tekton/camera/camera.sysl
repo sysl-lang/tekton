@@ -85,8 +85,8 @@ struct Camera
         for item in items
             val b = doc.bounds_of(item)
 
-            low = Vec3(min(low.x, b.min.x), min(low.y, b.min.y), min(low.z, b.min.z))
-            high = Vec3(max(high.x, b.max.x), max(high.y, b.max.y), max(high.z, b.max.z))
+            low = Vec3(low.x.min(b.min.x), low.y.min(b.min.y), low.z.min(b.min.z))
+            high = Vec3(high.x.max(b.max.x), high.y.max(b.max.y), high.z.max(b.max.z))
 
         val across = (high - low).length()
 
@@ -111,7 +111,7 @@ struct Camera
 
     // How many world units one point of a viewport this many points tall covers, at the depth of `p`.
     world_per_point(&self, p: Vec3, height: real) -> real =
-        max((p - self.eye()).dot(self.forward()), NEAR_PLANE) * (self.fov * 0.5).tan() * 2.0 / height
+        (p - self.eye()).dot(self.forward()).max(NEAR_PLANE) * (self.fov * 0.5).tan() * 2.0 / height
 
     // The ray through a point of a viewport of this size, with `y` running down it as a pointer's does.
     ray(&self, x: real, y: real, width: real, height: real) -> Ray

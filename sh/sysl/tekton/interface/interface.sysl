@@ -469,7 +469,7 @@ struct Workspace
         val step = parse_real(text).map_err(e -> s"\"${text}\" is not a number")?
         val pattern = if kind >= FIRST_RING then Pattern.Ring(kind > FIRST_RING, step) else Pattern.Line(kind, step)
 
-        Ok((int(max(-1.0e6, min(1.0e6, count))), pattern))
+        Ok((int(count.clamp(-1.0e6, 1.0e6)), pattern))
     end array_from_fields
 
     undo(&self)
@@ -1025,7 +1025,7 @@ struct Workspace
                     Err("Segments must be a whole number")
                 else
                     // Held to what an int holds; the document holds it to what a shape may have.
-                    self.doc.set_segments(id, int(max(-1.0e6, min(1.0e6, value))))
+                    self.doc.set_segments(id, int(value.clamp(-1.0e6, 1.0e6)))
             Clearance -> self.doc.set_clearance(id, value)
             EdgeRadius -> self.doc.set_edge_radius(id, value)
             Rotation ->

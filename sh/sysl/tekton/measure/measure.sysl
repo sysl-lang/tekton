@@ -64,9 +64,9 @@ end selection_box
 
 // The distance between two boxes along an axis, where they do not overlap along it; 0 where they touch.
 gap_between(a: Aabb, b: Aabb, axis: int) -> Option[real]
-    val apart = max(b.min.axis(axis) - a.max.axis(axis), a.min.axis(axis) - b.max.axis(axis))
+    val apart = (b.min.axis(axis) - a.max.axis(axis)).max(a.min.axis(axis) - b.max.axis(axis))
 
-    if apart >= -TOUCHING then Some(max(apart, 0.0)) else None
+    if apart >= -TOUCHING then Some(apart.max(0.0)) else None
 
 // The two selected things' boxes, in the order they were chosen, when exactly two are selected.
 pair(doc: &Document) -> Option[(Aabb, Aabb)]
@@ -107,8 +107,8 @@ gap_line(a: Aabb, b: Aabb, axis: int) -> (Vec3, Vec3)
 
     for other in 0..<3
         if other != axis
-            val lo = max(low.min.axis(other), high.min.axis(other))
-            val hi = min(low.max.axis(other), high.max.axis(other))
+            val lo = low.min.axis(other).max(high.min.axis(other))
+            val hi = low.max.axis(other).min(high.max.axis(other))
             val middle = if lo <= hi then (lo + hi) * 0.5 else (low.center().axis(other) + high.center().axis(other)) * 0.5
 
             from = from.with_axis(other, middle)
