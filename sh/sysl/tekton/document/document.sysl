@@ -660,7 +660,7 @@ struct Document
 
     // The things that stand on the ground as one: what a click picks and what a renderer draws. A group
     // is one of them, however many parts it remembers.
-    items(&self) -> []&Node = self.root.children.view()
+    items(&self) -> []const &Node = self.root.children.view()
 
     find(&self, id: int) -> Option[&Node] = self.root.find(id)
 
@@ -1133,7 +1133,7 @@ struct Document
     end selected_items
 
     // The box around all of these where they stand.
-    private extent(&self, nodes: []&Node) -> Aabb
+    private extent(&self, nodes: []const &Node) -> Aabb
         var e = self.bounds_of(nodes[0])
 
         for node in nodes

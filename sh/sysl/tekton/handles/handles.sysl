@@ -148,7 +148,7 @@ struct Layout
         self.strokes.push(Stroke(a.x, a.y, b.x, b.y, radius, color))
 
     // One handle's pieces: a white halo under all of them, so it reads on any colour, then their ink.
-    private glyph(&self, grip: Grip, pieces: []Piece, radius: real, color: [4]f32)
+    private glyph(&self, grip: Grip, pieces: []const Piece, radius: real, color: [4]f32)
         val first = self.strokes.len()
 
         for p in pieces do self.line(p.a, p.b, radius + HALO, WHITE)

@@ -148,10 +148,10 @@ struct Workspace
     in_dialog: &Signal[bool]
 
     // How a file dialog is shown, given what answers it and the window it belongs to, which a test answers for itself.
-    ask_open: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
-    ask_save: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
-    ask_export_stl: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
-    ask_export_3mf: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit
+    ask_open: &Fn(@keeps &Fn(DialogResult) -> unit, Option[&Window]) -> unit
+    ask_save: &Fn(@keeps &Fn(DialogResult) -> unit, Option[&Window]) -> unit
+    ask_export_stl: &Fn(@keeps &Fn(DialogResult) -> unit, Option[&Window]) -> unit
+    ask_export_3mf: &Fn(@keeps &Fn(DialogResult) -> unit, Option[&Window]) -> unit
 
     // Whether the next frame takes the keyboard from whichever field has it.
     release_keyboard: bool
@@ -231,7 +231,7 @@ struct Workspace
             None -> ()
     end go_on
 
-    private show_dialog(&self, show: &Fn(&Fn(DialogResult) -> unit, Option[&Window]) -> unit, asked: Asked)
+    private show_dialog(&self, show: &Fn(@keeps &Fn(DialogResult) -> unit, Option[&Window]) -> unit, asked: Asked)
         val answer: &Fn(DialogResult) -> unit = r -> self.dialog_answered(asked, r)
 
         self.in_dialog.set(true)
@@ -775,7 +775,9 @@ struct Workspace
     tree(&self) -> &View
         self.changes.read()
 
-        column([menu_bar(self.menus().view(), self.open_menu).restyle(t -> light()),
+        var menus = self.menus()
+
+        column([menu_bar(menus.view_mut(), self.open_menu).restyle(t -> light()),
                 row([self.panel(), self.dimensioned().flex()]).flex()], 0)
             .modal(self.array_open, self.array_panel())
             .modal(self.in_dialog, spacer().frame(0, 0))
@@ -906,7 +908,7 @@ struct Workspace
 
     // The nine number fields, the segments field, the clearance field and the edge radius field, made once,
     // because each remembers what is being typed in it.
-    number_fields(&self) -> []&NumberField
+    number_fields(&self) -> []const &NumberField
         if self.fields.len() == 0
             for q in [Quantity.Position, Quantity.Size, Quantity.Rotation]
                 for axis in 0..<3

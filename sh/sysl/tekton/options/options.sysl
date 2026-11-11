@@ -42,7 +42,7 @@ parse_view(s: string) -> Option[(real, real)]
 end parse_view
 
 // The options in `args`, whose first is the program's own name; or what is wrong with them.
-parse_options(args: []string) -> Result[Options, string]
+parse_options(args: []const string) -> Result[Options, string]
     var o = Options("", 1280, 800, false, false, "", None, "", "", "", false, "")
     var i = 1
 

@@ -108,7 +108,7 @@ struct Renderer
     // each. Records into `cmd` and leaves it open.
     draw(&self, device: &GpuDevice, cmd: GpuCommandBuffer, color: &GpuTexture, depth: &GpuTexture, depth_format: i32,
          color_format: i32, doc: &Document, camera: &Camera, width: real, height: real, scale: real,
-         strokes: []Stroke = [], printer: Printer = CORE_ONE, volume: bool = true)
+         strokes: []const Stroke = [], printer: Printer = CORE_ONE, volume: bool = true)
         val p = self.pipelines match
             Some(have) -> have
             None ->

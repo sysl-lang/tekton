@@ -35,7 +35,7 @@ private device() -> &GpuDevice
     gpu_device(GPU_SHADERFORMAT_MSL).unwrap()
 
 // A frame of this document, as bytes of RGBA, drawn by this renderer on the device that made it.
-private frame(dev: &GpuDevice, r: &Renderer, doc: &Document, strokes: []Stroke = [], printer: Printer = CORE_ONE,
+private frame(dev: &GpuDevice, r: &Renderer, doc: &Document, strokes: []const Stroke = [], printer: Printer = CORE_ONE,
               volume: bool = true) -> Buf[u8]
     val color = dev.texture(GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, GPU_TEXTUREUSAGE_COLOR_TARGET, SIZE, SIZE).unwrap()
     val depth = dev.texture(GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, SIZE, SIZE).unwrap()

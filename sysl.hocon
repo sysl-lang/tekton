@@ -7,7 +7,7 @@
 package {
   name    = "tekton"
   version = "0.0.1"
-  sysl    = "0.9.0"
+  sysl    = "0.10.0"
 }
 
 optimization = "2"
@@ -23,10 +23,10 @@ requires {
 // `manifold` is the kernel every mesh comes from; `quaternion` turns the camera; `syslui-sdl` is the
 // window, and `syslui` the interface in it; `hocon` reads a saved document; `zip` packs a 3MF export.
 dependencies {
-  hocon      { git = "github.com/sysl-lang/hocon",      version = "0.3.6" }
-  manifold   { git = "github.com/sysl-lang/manifold",   version = "0.1.1" }
+  hocon      { git = "github.com/sysl-lang/hocon",      version = "0.3.7" }
+  manifold   { git = "github.com/sysl-lang/manifold",   version = "0.1.3" }
   quaternion { git = "github.com/sysl-lang/quaternion", version = "0.1.0" }
-  syslui     { git = "github.com/sysl-lang/syslui",     version = "0.1.17" }
-  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.22" }
-  zip        { git = "github.com/sysl-lang/zip",        version = "0.1.0" }
+  syslui     { git = "github.com/sysl-lang/syslui",     version = "0.2.0" }
+  syslui-sdl { git = "github.com/sysl-lang/syslui-sdl", version = "0.2.25" }
+  zip        { git = "github.com/sysl-lang/zip",        version = "0.1.1" }
 }

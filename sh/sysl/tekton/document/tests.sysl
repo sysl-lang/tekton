@@ -658,7 +658,7 @@ a_part_a_stretched_group_shears_stays_in_a_group_of_its_own_where_it_stood()
 end a_part_a_stretched_group_shears_stays_in_a_group_of_its_own_where_it_stood
 
 // Every command there is, each on a document it can act on.
-private commands() -> [](string, &Fn(&Document) -> unit)
+private commands() -> []const (string, &Fn(&Document) -> unit)
     var out: Buf[(string, &Fn(&Document) -> unit)] = buf()
 
     out.push(("add", d -> d.add_shape(Primitive.Torus)))

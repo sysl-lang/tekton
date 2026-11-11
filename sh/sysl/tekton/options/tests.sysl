@@ -1,6 +1,6 @@
 module sh.sysl.tekton.options
 
-private parsed(args: []string) -> Options = parse_options(args).unwrap()
+private parsed(args: []const string) -> Options = parse_options(args).unwrap()
 
 private why(args: []string) -> string
     parse_options(args) match
