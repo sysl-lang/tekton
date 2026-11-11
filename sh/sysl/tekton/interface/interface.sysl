@@ -775,9 +775,9 @@ struct Workspace
     tree(&self) -> &View
         self.changes.read()
 
-        var menus = self.menus()
+        val menus = self.menus()
 
-        column([menu_bar(menus.view_mut(), self.open_menu).restyle(t -> light()),
+        column([menu_bar(menus.view(), self.open_menu).restyle(t -> light()),
                 row([self.panel(), self.dimensioned().flex()]).flex()], 0)
             .modal(self.array_open, self.array_panel())
             .modal(self.in_dialog, spacer().frame(0, 0))
