@@ -365,6 +365,25 @@ a_group_cuts_its_holes_out_of_its_solids()
     assert_eq(group.children.len(), 2, "and it remembers both")
 end a_group_cuts_its_holes_out_of_its_solids
 
+// A node made from a committed one, as every edit makes one, owns children of its own: growing them changes
+// neither the committed node nor the document or the undo history holding it.
+@test(ignore: "a node's children are a Buf, a shared handle, so the node made from it grows the committed one too")
+a_node_made_from_a_committed_one_cannot_change_it()
+    val (doc, _, _) = box_and_hole()
+    val group = doc.find(doc.group_selected().unwrap()).unwrap()
+    val before = doc.describe()
+    val made = Node(group.id, group.operation, group.transform, group.mirror, group.tint, group.hole, group.clearance,
+                    group.children, Derived(None, None), None, None)
+
+    made.children.push(group.children[0])
+
+    assert_eq(made.children.len(), 3, "the new node has three children")
+    assert_eq(group.children.len(), 2, "and the committed one still two")
+    assert_eq(doc.describe(), before, "and the document is what it was")
+    assert(doc.undo() && doc.redo(), "through an undo and a redo")
+    assert_eq(doc.describe(), before, "the history holds it unchanged")
+end a_node_made_from_a_committed_one_cannot_change_it
+
 @test
 a_group_joins_overlapping_solids_counting_the_overlap_once()
     val doc = new_document()
