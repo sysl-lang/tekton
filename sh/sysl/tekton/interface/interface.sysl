@@ -856,8 +856,8 @@ struct Workspace
                                   separator(),
                                   item("Array…", () -> self.open_array(), enabled = doc.can_arrange)]))
         all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0),
-                               item("Build Volume", () -> self.toggle_volume()),
-                               item("Dimensions", () -> self.toggle_dimensions())]))
+                               toggle("Build Volume", () -> self.toggle_volume(), self.show_volume),
+                               toggle("Dimensions", () -> self.toggle_dimensions(), self.show_dimensions)]))
         all
     end menus
 
@@ -1070,7 +1070,7 @@ end format_number
 
 // One of the selection's numbers, in a text field.
 //
-// **Typing changes nothing until it is finished with**: enter, or the field losing the keyboard, sends it to
+// **Typing changes nothing until it is finished with**: enter, or the field's `on_blur`, sends it to
 // the document. A value the document refuses, or text that is no number, keeps the old value, marks the field
 // and says why. Escape puts the old text back. A field nobody is typing in follows the document.
 struct NumberField
@@ -1080,14 +1080,28 @@ struct NumberField
     id: int
     text: &Signal[string]
     field: &View
-    was_mine: bool
     wrong: bool
     forgetting: bool
+    typed: bool
 
     view(&self) -> &View = self
 
+    private attach(&self, v: &View) = self.field = v
+
     // What is being typed was about a document that has gone, so the next paint throws it away unsent.
     forget(&self) = self.forgetting = true
+
+    // The keyboard has left the field: send what was typed, as Enter would, and put the document's own text
+    // back where it was refused.
+    blur(&self)
+        self.accept(self.shown())
+        self.typed = false
+        self.wrong = false
+        self.text.set(self.shown())
+
+    private shown(&self) -> string = self.owner.number(self.quantity, self.axis) match
+        Some(v) -> format_number(v)
+        None -> ""
 
     // The text says what is already there, so there is nothing to send. Otherwise, send it.
     private accept(&self, shown: string)
@@ -1115,43 +1129,43 @@ impl View for NumberField
     measure(&self, c: *Canvas, avail: Size) -> Size = self.field.measure(c, avail)
 
     paint(&self, c: *Canvas, r: Rect)
+        val shown = self.shown()
+
         if self.forgetting
             self.forgetting = false
-            self.was_mine = false
             self.wrong = false
+            self.typed = false
+            self.text.set(shown)
 
             if c.focus() == self.id then c.take_focus(NOBODY)
 
         val mine = c.focus() == self.id
-        val value = self.owner.number(self.quantity, self.axis)
-        val shown = value match
-            Some(v) -> format_number(v)
-            None -> ""
 
         if mine
+            if self.text.read() != shown then self.typed = true
+
             for p in c.keys()
                 if p.key == Key.Enter
                     self.accept(shown)
 
+                    if !self.wrong then self.typed = false
                     if !self.wrong then self.text.set(format_number(self.owner.number(self.quantity, self.axis).unwrap_or(0.0)))
 
                 if p.key == Key.Escape
                     self.wrong = false
+                    self.typed = false
                     self.owner.problem.set("")
                     self.text.set(shown)
                     c.take_focus(NOBODY)
         else
-            if self.was_mine then self.accept(shown)
-
             val now = self.owner.number(self.quantity, self.axis) match
                 Some(v) -> format_number(v)
                 None -> ""
 
-            if self.text.read() != now then self.text.set(now)
+            if !self.typed && self.text.read() != now then self.text.set(now)
 
-            self.wrong = false
+            if !self.typed then self.wrong = false
 
-        self.was_mine = c.focus() == self.id
         self.field.paint(c, r)
 
         if self.wrong then c.stroke(r, WRONG_INK, 2, c.theme().radius)
@@ -1206,8 +1220,10 @@ end Dimensioned
 
 private new_number_field(owner: &Workspace, q: Quantity, axis: int, id: int) -> &NumberField
     val shown = signal("")
+    val field: &NumberField = NumberField(owner, q, axis, id, shown, text(""), false, false, false)
 
-    NumberField(owner, q, axis, id, shown, text_field(shown, id, NUMBER_WIDTH).font_size(11.0), false, false, false)
+    field.attach(text_field(shown, id, NUMBER_WIDTH, on_blur = () -> field.blur()).font_size(11.0))
+    field
 
 private name_of(file: string) -> string = file_name(file).unwrap_or(file)
 

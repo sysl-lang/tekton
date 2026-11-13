@@ -525,6 +525,71 @@ typing_a_position_size_or_rotation_sets_it_exactly()
     assert_eq(shown.text.read(), "30", "the turn, read back")
     assert(w.problem.read() == "", "and nothing is wrong")
 
+// Leaving a field the way a press elsewhere does: the keyboard goes, and the frame that sees it goes by.
+private leave(f: &NumberField, c: *Recorder)
+    c.take_focus(NOBODY)
+    paint_field(f, c)
+    paint_field(f, c)
+end leave
+
+// Typed, then left without Enter: the text is in the field and the keyboard is still there.
+private type_without_finishing(f: &NumberField, c: *Recorder, s: string)
+    paint_field(f, c)
+    c.take_focus(f.id)
+    paint_field(f, c)
+    f.text.set(s)
+    paint_field(f, c)
+end type_without_finishing
+
+@test
+a_field_left_without_enter_commits_as_one_undo_step()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 1)
+    val before = transform_of(w, a).translation.y
+
+    type_without_finishing(f, &c, "17.25")
+    assert(transform_of(w, a).translation.y != 17.25, "nothing sent while it is typed")
+    leave(f, &c)
+    assert(transform_of(w, a).translation.y == 17.25, "sent when the keyboard went")
+    assert_eq(w.problem.read(), "", "and nothing is wrong")
+    w.undo()
+    assert(transform_of(w, a).translation.y == before, "one undo puts it back, and the shape is still there")
+end a_field_left_without_enter_commits_as_one_undo_step
+
+@test
+text_that_is_no_number_is_refused_on_blur_as_on_enter()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 1)
+    val before = transform_of(w, a).translation.y
+
+    type_without_finishing(f, &c, "abc")
+    leave(f, &c)
+    assert(transform_of(w, a).translation.y == before, "the old value stays")
+    assert(w.problem.read() != "", "and it says why")
+    assert_eq(f.text.read(), format_number(before), "the field shows the old value again")
+end text_that_is_no_number_is_refused_on_blur_as_on_enter
+
+@test
+escape_then_leaving_does_not_commit()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val f = field_of(w, POSITION, 1)
+    val before = transform_of(w, a).translation.y
+
+    type_without_finishing(f, &c, "17.25")
+    c.key(press(Key.Escape))
+    paint_field(f, &c)
+    paint_field(f, &c)
+    paint_field(f, &c)
+    assert(transform_of(w, a).translation.y == before, "the old value stays")
+    assert_eq(w.problem.read(), "", "and nothing is wrong")
+end escape_then_leaving_does_not_commit
+
 @test
 typed_keys_really_reach_the_field()
     val w = new_workspace()
@@ -1124,6 +1189,20 @@ private live(w: &Workspace, c: *Recorder, title: string, label: string) -> bool
     row.marks.index_of("disabled").is_none()
 end live
 
+// Whether a row of this menu carries a tick, reading the window with the menu open and leaving it closed.
+private ticked(w: &Workspace, c: *Recorder, title: string, label: string) -> bool
+    assert(w.show_menu(title), "a menu of that title")
+
+    val v = w.tree()
+
+    render(v, c, WINDOW)
+
+    val row = snapshot(v, c, WINDOW).find(s"menu.${title}.${label}").unwrap()
+
+    w.open_menu.set(NO_MENU)
+    row.marks.index_of("checked").is_some()
+end ticked
+
 private edit_live(w: &Workspace, c: *Recorder, label: string) -> bool = live(w, c, "Edit", label)
 
 // Open a menu by its title and choose a row, where a person would.
@@ -1152,6 +1231,27 @@ an_empty_document_has_only_the_file_menu_to_offer()
 
     assert(!live(w, &c, "View", "Frame All"), "nothing to frame")
 end an_empty_document_has_only_the_file_menu_to_offer
+
+@test
+the_view_menu_ticks_build_volume_and_dimensions_exactly_when_they_are_on()
+    val w = new_workspace()
+    var c = recorder()
+
+    assert(w.show_volume, "volume starts on")
+    assert(ticked(w, &c, "View", "Build Volume"), "ticked while on")
+    choose(w, &c, "View", "Build Volume")
+    assert(!w.show_volume, "choosing it hid the volume")
+    assert(!ticked(w, &c, "View", "Build Volume"), "unticked while off")
+    choose(w, &c, "View", "Build Volume")
+    assert(ticked(w, &c, "View", "Build Volume"), "ticked again")
+
+    assert_eq(ticked(w, &c, "View", "Dimensions"), w.show_dimensions, "dimensions follows its setting")
+    choose(w, &c, "View", "Dimensions")
+    assert_eq(ticked(w, &c, "View", "Dimensions"), w.show_dimensions, "and follows it after a choice")
+    choose(w, &c, "View", "Dimensions")
+    assert_eq(ticked(w, &c, "View", "Dimensions"), w.show_dimensions, "and back")
+    assert(!ticked(w, &c, "View", "Frame All"), "Frame All is not a setting")
+end the_view_menu_ticks_build_volume_and_dimensions_exactly_when_they_are_on
 
 @test
 each_row_follows_the_selection()
