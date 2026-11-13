@@ -7,7 +7,7 @@
 package {
   name    = "tekton"
   version = "0.0.1"
-  sysl    = "0.10.0"
+  sysl    = "0.10.7"
 }
 
 optimization = "2"
