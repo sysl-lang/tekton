@@ -194,18 +194,74 @@ a_hole_cut_out_of_a_box_exports_the_cut_solid()
         assert((wound - f.normal).length() < 1.0e-6, "every normal agrees with its winding")
 end a_hole_cut_out_of_a_box_exports_the_cut_solid
 
+// The drilled box's box, standing at `x`, and its drill: ids `id` and `id + 1`.
+private box_and_drill(id: int, x: real) -> Buf[&Node]
+    var parts: Buf[&Node] = buf()
+
+    parts.push(restored_shape(id, Primitive.Box, Transform(Vec3(x, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)), 0, false))
+    parts.push(restored_shape(id + 1, Primitive.Cylinder, Transform(Vec3(x, 0.0, -5.0), Quaternion.identity(), Vec3(0.5, 0.5, 1.5)), 1,
+                              true))
+    parts
+end box_and_drill
+
+// The drilled box's two shapes standing loose on the ground, ungrouped.
+private box_beside_loose_hole() -> &Document = restored_document(box_and_drill(1, 0.0), 3, None, 1)
+
 @test
-a_hole_left_on_the_ground_cuts_what_it_overlaps()
+a_hole_left_on_the_ground_cuts_nothing()
+    val loose = box_beside_loose_hole()
+    val facets = facets_of(stl_bytes(loose.final_mesh().unwrap()))
+
+    assert_eq(loose.final_solid().unwrap().volume(), 8000.0, "the whole box")
+    assert_eq(facets.len(), box_document().final_mesh().unwrap().triangle_count(), "the box's triangles and no hole's")
+    assert_eq(volume_of(facets), 8000.0, "and the file holds the whole box")
+    assert(drilled_box().final_solid().unwrap().volume() < 8000.0 - 1500.0, "while grouped with it, it cuts")
+end a_hole_left_on_the_ground_cuts_nothing
+
+@test
+a_loose_hole_is_not_in_the_3mf_either()
+    val loose = three_mf_bytes(box_beside_loose_hole().final_mesh().unwrap(), "part", CORE_ONE).unwrap()
+    val alone = three_mf_bytes(box_document().final_mesh().unwrap(), "part", CORE_ONE).unwrap()
+    val cut = three_mf_bytes(drilled_box().final_mesh().unwrap(), "part", CORE_ONE).unwrap()
+
+    assert(loose.view() == alone.view(), "the same file as the box alone")
+    assert(loose.view() != cut.view(), "and not the drilled one")
+end a_loose_hole_is_not_in_the_3mf_either
+
+@test
+a_hole_cuts_only_the_group_it_is_in()
+    // A drilled box, and beside it a box with a loose hole through it, which stays whole.
     var items: Buf[&Node] = buf()
 
-    items.push(restored_shape(1, Primitive.Box, identity_transform(), 0, false))
-    items.push(restored_shape(2, Primitive.Cylinder, Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(0.5, 0.5, 1.5)), 1, true))
+    items.push(restored_group(1, identity_transform(), 0, false, box_and_drill(2, 0.0)))
+    items.extend(box_and_drill(4, 50.0).view())
 
-    val loose = restored_document(items, 3, None, 1)
-    val grouped = drilled_box()
+    val doc = restored_document(items, 6, None, 1)
+    val drilled = drilled_box().final_solid().unwrap().volume()
 
-    assert_eq(loose.final_solid().unwrap().volume(), grouped.final_solid().unwrap().volume(), "the same as grouped")
-end a_hole_left_on_the_ground_cuts_what_it_overlaps
+    assert((doc.final_solid().unwrap().volume() - (drilled + 8000.0)).abs() < 1.0e-6, "one drilled box and one whole")
+end a_hole_cuts_only_the_group_it_is_in
+
+@test
+a_hole_in_a_nested_group_still_cuts()
+    var parts: Buf[&Node] = buf()
+
+    parts.push(restored_group(1, identity_transform(), 0, false, box_and_drill(2, 0.0)))
+    parts.push(restored_shape(4, Primitive.Box, Transform(Vec3(50.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)), 0, false))
+
+    var inner: Buf[&Node] = buf()
+
+    inner.push(restored_group(5, identity_transform(), 0, false, parts))
+
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_group(6, identity_transform(), 0, false, inner))
+
+    val doc = restored_document(items, 7, None, 1)
+    val drilled = drilled_box().final_solid().unwrap().volume()
+
+    assert((doc.final_solid().unwrap().volume() - (drilled + 8000.0)).abs() < 1.0e-6, "the innermost group's hole cuts")
+end a_hole_in_a_nested_group_still_cuts
 
 @test
 two_solids_apart_are_both_exported()
@@ -296,12 +352,26 @@ end a_document_of_holes_alone_exports_nothing
 
 @test
 holes_that_cut_away_everything_export_nothing()
+    var parts: Buf[&Node] = buf()
+
+    parts.push(restored_shape(2, Primitive.Box, identity_transform(), 0, false))
+    parts.push(restored_shape(3, Primitive.Box, Transform(Vec3(0.0, 0.0, -1.0), Quaternion.identity(), Vec3(1.5, 1.5, 1.5)), 1, true))
+
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_group(1, identity_transform(), 0, false, parts))
+    // Only a group's holes cut, so it is the group that is refused, by name.
+    assert_refused(restored_document(items, 4, None, 1), "The holes in this group cut away all of its solid (shape 1)")
+end holes_that_cut_away_everything_export_nothing
+
+@test
+a_loose_hole_over_all_of_a_solid_cuts_none_of_it()
     var items: Buf[&Node] = buf()
 
     items.push(restored_shape(1, Primitive.Box, identity_transform(), 0, false))
     items.push(restored_shape(2, Primitive.Box, Transform(Vec3(0.0, 0.0, -1.0), Quaternion.identity(), Vec3(1.5, 1.5, 1.5)), 1, true))
-    assert_refused(restored_document(items, 3, None, 1), "The holes cut away all of the solid")
-end holes_that_cut_away_everything_export_nothing
+    assert_eq(restored_document(items, 3, None, 1).final_solid().unwrap().volume(), 8000.0, "the whole box")
+end a_loose_hole_over_all_of_a_solid_cuts_none_of_it
 
 @test
 a_refused_group_exports_nothing()

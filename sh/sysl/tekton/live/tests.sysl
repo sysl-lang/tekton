@@ -364,6 +364,30 @@ private a_hole_past_the_edge_is_not_outside()
     assert(!outside_volume(w.doc, w.printer), "only the hole sticks out")
 end a_hole_past_the_edge_is_not_outside
 
+// A loose hole through a box cuts nothing, so the report measures each as it stands; grouped, the group is
+// measured as what it prints, the box with the hole cut out of it.
+@test
+private a_loose_hole_is_reported_and_measured_as_itself_and_cuts_nothing()
+    val w = new_workspace()
+    val box = put(w, Primitive.Box, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+    val hole = put(w, Primitive.Cylinder, Vec3(0.0, 0.0, -5.0), Vec3(0.5, 0.5, 2.0))
+
+    w.doc.select(Some(hole))
+    w.doc.set_hole(true).unwrap()
+    assert(report(w).contains("{\"id\":2,\"kind\":\"cylinder\",\"hole\":true"), report(w))
+    assert(report(w).contains("\"measure\":{\"size\":[10,10,40],\"gaps\":null}"), report(w))
+
+    w.doc.select(Some(box))
+    assert(report(w).contains("\"measure\":{\"size\":[20,20,20],\"gaps\":null}"), report(w))
+    assert(!outside_volume(w.doc, w.printer), "on the bed")
+    assert(w.doc.final_solid().unwrap().volume() == 8000.0, "and the whole box is what prints")
+
+    w.doc.toggle_selected(hole)
+    w.doc.group_selected().unwrap()
+    assert(report(w).contains("\"measure\":{\"size\":[20,20,20],\"gaps\":null}"), report(w))
+    assert(w.doc.final_solid().unwrap().volume() < 8000.0 - 1500.0, "grouped, the hole is cut")
+end a_loose_hole_is_reported_and_measured_as_itself_and_cuts_nothing
+
 @test
 private the_report_judges_against_the_printer_it_is_given()
     val w = new_workspace()

@@ -81,5 +81,12 @@ private the_hole_scene_is_a_drilled_group_and_a_block_with_a_loose_hole()
     assert_eq(doc.items().len, 3)
     assert_eq(kind(doc.items()[0]), "not a shape")
     assert(doc.items()[2].hole, "the sphere is a hole")
-    assert(doc.final_solid().is_ok(), "it exports")
+
+    // What exports is the drilled box and the whole block: the loose sphere cuts nothing.
+    val drilled = doc.mesh_of(doc.items()[0]).volume()
+    val block = 40.0 * 40.0 * 20.0
+
+    assert(drilled < block - 1000.0, s"the group is drilled: ${drilled}")
+    assert((doc.final_solid().unwrap().volume() - (drilled + block)).abs() < 1.0e-6 * block,
+           s"the block is whole: ${doc.final_solid().unwrap().volume()}")
 end the_hole_scene_is_a_drilled_group_and_a_block_with_a_loose_hole

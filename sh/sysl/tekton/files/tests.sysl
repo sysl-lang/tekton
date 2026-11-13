@@ -129,6 +129,28 @@ holes_and_nested_groups_made_by_commands_come_back()
     assert_same_document(doc, round_trip(doc))
 end holes_and_nested_groups_made_by_commands_come_back
 
+// A loose hole is saved as a hole like any other, in the same format, and comes back cutting nothing.
+@test
+a_loose_hole_over_a_solid_comes_back_loose()
+    val doc = new_document()
+    val box = doc.add_shape(Primitive.Box)
+    val drill = doc.add_shape(Primitive.Cylinder)
+
+    doc.set_transform(drill, Transform(Vec3(0.0, 0.0, -5.0), Quaternion.identity(), Vec3(0.5, 0.5, 2.0)))
+    doc.select(Some(drill))
+    doc.set_hole(true).unwrap()
+
+    val back = round_trip(doc)
+
+    assert_same_document(doc, back)
+    assert(document_text(doc).contains("hole = true"), "written as a hole")
+    assert_eq(back.items().len, 2, "both on the ground")
+    assert(back.find(drill).unwrap().hole, "the hole still a hole")
+    assert(!back.find(box).unwrap().hole, "and the box a solid")
+    assert_eq(back.final_solid().unwrap().volume(), doc.final_solid().unwrap().volume(), "the same solid")
+    assert_eq(back.final_solid().unwrap().volume(), 8000.0, "the whole box")
+end a_loose_hole_over_a_solid_comes_back_loose
+
 @test
 an_empty_document_comes_back_empty_and_a_gone_last_is_not_written()
     val doc = new_document()

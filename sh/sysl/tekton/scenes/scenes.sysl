@@ -31,7 +31,8 @@ add_demo_scene(doc: &Document)
     doc.select(Some(ids[1]))
 end add_demo_scene
 
-// A box with a round hole cut through it, in a group, and beside it a block with a hole not yet grouped.
+// A box with a round hole cut through it, in a group, and beside it a block with a hole not yet grouped, which
+// cuts nothing until it is: a hole cuts only what it is grouped with.
 add_hole_scene(doc: &Document)
     val box = doc.add_shape(Primitive.Box)
     val cut = doc.add_shape(Primitive.Cylinder)

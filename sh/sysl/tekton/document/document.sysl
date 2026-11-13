@@ -956,7 +956,8 @@ struct Document
     // A part that keeps its group's stretch by staying in a group of its own, solid or hole as it was.
     //
     // **The part inside is solid, so a hole's clearance is spent on its transform first**: only a hole grows by its
-    // clearance, and the cut it made must be the same one after the group came apart as before.
+    // clearance, and the cut it makes when grouped again must be the one it made before the group came apart. Loose
+    // on the ground it cuts nothing, like any hole.
     private wrapped_part(&self, group: &Node, part: &Node) -> &Node
         var inside: Buf[&Node] = buf()
 
@@ -1321,8 +1322,12 @@ struct Document
                 var solids: Buf[&Manifold] = buf()
                 var holes: Buf[&Manifold] = buf()
 
+                // A hole cuts only what it is grouped with, so one standing loose on the ground cuts nothing.
                 for child in node.children.view()
-                    if child.hole then holes.push(self.solid_of(child)) else solids.push(self.solid_of(child))
+                    if !child.hole
+                        solids.push(self.solid_of(child))
+                    elif node !== self.root
+                        holes.push(self.solid_of(child))
 
                 if solids.len() == 0
                     empty()
@@ -1379,10 +1384,11 @@ struct Document
         Transform(t.translation + t.turned(middle.times(t.scale) - middle.times(grown)), t.rotation, grown)
     end cut_transform
 
-    // The one solid a printer is sent, in millimetres: every part joined and every hole cut out, as if the whole
-    // document were one group, so a hole standing on the ground cuts whatever it overlaps. Or why there is none:
-    // a document that would be refused as a file, one with nothing solid in it, or one whose holes cut it all
-    // away.
+    // The one solid a printer is sent, in millimetres: every solid on the ground joined, each group with its own
+    // holes cut. **A hole cuts only what it is grouped with**, so a hole standing loose on the ground cuts nothing
+    // and is not sent, as the viewport shows it. Or why there is none: a document that would be refused as a file
+    // (which covers a group whose holes cut all of it away, the only holes that cut), or one with nothing solid on
+    // the ground (holes alone are nothing).
     final_solid(&self) -> Result[&Manifold, string]
         self.problem() match
             Some((id, why)) -> return Err(s"${why} (shape ${id})")
@@ -1400,7 +1406,7 @@ struct Document
             NoError -> ()
             _ -> return Err("The kernel could not join the document")
 
-        if solid.is_empty() then return Err("The holes cut away all of the solid")
+        if solid.is_empty() then return Err("There is nothing solid to export")
 
         Ok(solid)
     end final_solid

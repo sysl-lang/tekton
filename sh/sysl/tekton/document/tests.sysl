@@ -366,6 +366,25 @@ a_group_cuts_its_holes_out_of_its_solids()
 end a_group_cuts_its_holes_out_of_its_solids
 
 @test
+a_hole_cuts_only_once_it_is_grouped_and_ungrouping_frees_it_to_cut_nothing()
+    val (doc, _, hole) = box_and_hole()
+    val whole = box_volume(20.0, 20.0, 20.0)
+    val cut = whole - polygon_area(5.0, 64) * 20.0
+
+    assert(near(doc.final_solid().unwrap().volume(), whole, 1.0e-3), "loose, the hole cuts nothing")
+    doc.group_selected().unwrap()
+    assert(near(doc.final_solid().unwrap().volume(), cut, 1.0e-3), "grouped, it cuts")
+    doc.ungroup_selected().unwrap()
+    assert(doc.find(hole).unwrap().hole, "freed, it is still a hole")
+    assert_eq(doc.items().len, 2, "standing loose")
+    assert(near(doc.final_solid().unwrap().volume(), whole, 1.0e-3), "and cuts nothing again")
+    assert(doc.undo(), "the ungroup undone")
+    assert(near(doc.final_solid().unwrap().volume(), cut, 1.0e-3), "brings the cut back")
+    assert(doc.redo(), "and redone")
+    assert(near(doc.final_solid().unwrap().volume(), whole, 1.0e-3), "takes it away")
+end a_hole_cuts_only_once_it_is_grouped_and_ungrouping_frees_it_to_cut_nothing
+
+@test
 a_group_joins_overlapping_solids_counting_the_overlap_once()
     val doc = new_document()
     val a = doc.add_shape(Primitive.Box)

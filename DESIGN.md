@@ -31,6 +31,12 @@ A document is a tree of operations, not a mesh: shapes and groups, each with a t
 solid-or-hole flag. Meshes are derived from it by the kernel and cached per node, so an edit recomputes
 only the path from that node to the root. This same tree is what a script will produce.
 
+**A hole cuts only the solids it is grouped with**, as in Tinkercad. The ground is not a group: a hole standing
+loose there cuts nothing, on screen (it is drawn as a hole over whole solids), in an export, or in any figure
+(`/tekton/state`'s `outside_volume` and `measure` take each loose thing as it stands, and a hole never counts as
+outside). Ungrouping a group frees its holes to cut nothing, and undoing the ungroup brings the cut back. Inside a
+group a hole cuts at any depth, grown by its clearance.
+
 ## Files
 
 A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 2`, the format
@@ -69,14 +75,14 @@ question are given the window `syslui-sdl` opened (`window()`), so they belong t
 ## Export
 
 **File > Export STL…** writes what a slicer is sent, in `sh.sysl.tekton.export`: the document's one final solid
-(`Document.final_solid`), every part joined and every hole cut as if the whole document were one group, so a hole
-standing on the ground cuts whatever it overlaps. It is binary STL in millimetres: an 80-byte header that says
+(`Document.final_solid`): every solid on the ground joined, each group with its own holes cut. A hole standing
+loose on the ground is not written and cuts nothing, however it overlaps a solid. It is binary STL in millimetres: an 80-byte header that says
 Tekton (and so never begins with `solid`, which marks a text STL), the triangle count, and each triangle's unit
 normal and three corners, counter-clockwise from outside, as the kernel's own little-endian `f32`s.
 
 A document with nothing to send says why in the panel before any dialog, and nothing is written: one a file
-would refuse (a group with no solid part, one the kernel cannot join), one with no solid at all, or one whose
-holes cut everything away. The file is written atomically like a save, so a failure leaves the old one whole. The
+would refuse (a group with no solid part, one the kernel cannot join, one whose holes cut all of it away), or one
+with no solid at all (loose holes alone are nothing, the same as an empty document). The file is written atomically like a save, so a failure leaves the old one whole. The
 dialog filters for `.stl`, and the answer gets `.stl` added unless it already ends that way in any case
 (`export_answer`), since a slicer goes by the extension. **An export is not a save**: the document keeps its file
 and its unsaved mark.

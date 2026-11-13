@@ -288,12 +288,22 @@ private keeps_its_cut(p: Primitive, group_turn: Quaternion[real], mirrored: bool
 
     assert(wrapped, s"${name}: the stretch is kept by a group of its own")
 
+    // Loose on the ground the freed hole cuts nothing: what is sent is the whole stretched block.
+    val whole = doc.final_solid().unwrap().volume()
+
+    assert(close(whole, 40.0 * 40.0 * 40.0 * 1.5, 1.0e-6 * whole), s"${name}: loose, it cuts nothing: ${whole}")
+
+    // Grouped again, it cuts what it cut before it was freed.
+    doc.group_selected().unwrap()
+
     val after = doc.final_solid().unwrap()
 
     assert(close(after.volume(), volume, 1.0e-6 * volume), s"${name}: the same cut ${after.volume()} against ${volume}")
     assert(close_vec(Vec3(after.bounding_box().min().x, after.bounding_box().min().y, after.bounding_box().min().z),
                      Vec3(box.min().x, box.min().y, box.min().z), 1.0e-6), s"${name}: and the same box")
 
+    assert(doc.undo(), s"${name}: the regrouping undone")
+    assert(close(doc.final_solid().unwrap().volume(), whole, 1.0e-6 * whole), s"${name}: loose again")
     assert(doc.undo(), s"${name}: undone")
     assert_eq(doc.find(group).unwrap().children.len(), 2usize, s"${name}: back to the group")
     assert_eq(doc.find(group).unwrap().children[1].clearance, 0.2, s"${name}: with the clearance")
@@ -331,4 +341,5 @@ a_round_hole_keeps_its_segments_when_a_stretched_group_is_ungrouped()
     val before = doc.final_solid().unwrap().volume()
 
     doc.ungroup_selected().unwrap()
-    assert(close(doc.final_solid().unwrap().volume(), before, 1.0e-6 * before), "a 12-sided hole cuts the same")
+    doc.group_selected().unwrap()
+    assert(close(doc.final_solid().unwrap().volume(), before, 1.0e-6 * before), "grouped again, a 12-sided hole cuts the same")
