@@ -1,6 +1,7 @@
 module sh.sysl.tekton.scenes
 
-import sh.sysl.tekton.document.{Document, Node, PLACEMENT_GAP, PRIMITIVES, Primitive, new_document, primitive_name}
+import sh.sysl.tekton.document.{Document, Node, PLACEMENT_GAP, Primitive, new_document, primitive_name}
+import sh.sysl.tekton.scenes.DEMO_PRIMITIVES
 import sh.sysl.tekton.printer.CORE_ONE
 import sh.sysl.tekton.space.Vec3
 
@@ -30,10 +31,10 @@ private the_demo_row_keeps_the_palette_order_and_spacing_centred_on_the_bed()
     val doc = demo()
     val items = doc.items()
 
-    assert_eq(items.len, PRIMITIVES.len)
+    assert_eq(items.len, DEMO_PRIMITIVES.len)
 
     for i in 0..<items.len
-        assert_eq(kind(items[i]), primitive_name(PRIMITIVES[i]))
+        assert_eq(kind(items[i]), primitive_name(DEMO_PRIMITIVES[i]))
 
         val b = doc.bounds_of(items[i])
 
@@ -55,7 +56,7 @@ private moving_the_demo_row_onto_the_bed_is_one_undo_step()
     val doc = demo()
 
     assert(doc.undo(), "the move")
-    assert_eq(doc.items().len, PRIMITIVES.len)
+    assert_eq(doc.items().len, DEMO_PRIMITIVES.len)
     assert_eq(doc.bounds_of(doc.items()[0]).min.x, -doc.bounds_of(doc.items()[0]).max.x)
     assert(!CORE_ONE.holds(doc.solid_bounds().unwrap()), "where the palette put them, the torus is past the edge")
 end moving_the_demo_row_onto_the_bed_is_one_undo_step
@@ -68,7 +69,7 @@ private the_demo_beside_shapes_already_there_leaves_them_where_they_are()
     doc.move_to(box, Vec3(-100.0, 60.0, 0.0)).unwrap()
     add_demo_scene(doc)
 
-    assert_eq(doc.items().len, PRIMITIVES.len + 1)
+    assert_eq(doc.items().len, DEMO_PRIMITIVES.len + 1)
     assert(doc.find(box).unwrap().transform.translation == Vec3(-100.0, 60.0, 0.0), "the box stays")
 end the_demo_beside_shapes_already_there_leaves_them_where_they_are
 
