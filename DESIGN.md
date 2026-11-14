@@ -232,4 +232,13 @@ their own tests, so most changes never need the whole application linked or a wi
      curves with typed lengths; Extrude it to a height (straight or tapered) or Revolve it about an axis by an
      angle, or Loft between two profiles on parallel planes. The result is a shape like any other that keeps
      its profiles, so it can be opened and edited again.
+   - **Edit Mesh**: any item (a shape, a group, an import) can be turned into an editable mesh, a kind of item
+     like any other: grouped, cut by holes, arrayed, mirrored, saved. Opened for editing, its vertices, edges
+     and faces are selected and moved with the same handles, snapping and typed values as items, and faces are
+     extruded and inset, edge loops cut, and edges bevelled. **It stays printable by construction**: every edit
+     is checked for a closed, non-self-intersecting surface, and one that would break it is refused with the
+     reason, rather than left for the slicer to find.
+   - **Smooth**: an editable mesh can be smoothed by subdivision (levels 0–4), its edited cage staying the
+     thing that is edited, so organic shapes, a grip that fits a hand, are made by shaping a rough cage. Edges
+     can be marked sharp so a smooth body keeps a crisp rim.
 8. nex scripting.
