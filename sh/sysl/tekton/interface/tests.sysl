@@ -1037,7 +1037,7 @@ the_shortcuts_group_ungroup_undo_and_redo()
 
     assert(!w.shortcut(KEY_Z, 0u16, false), "without the command key it is a letter")
     assert(!w.shortcut(KEY_Z, KMOD_SHIFT, false), "and with only shift")
-    assert(!w.shortcut(u32(97), CMD, false), "and another letter is not ours")
+    assert(!w.shortcut(u32(104), CMD, false), "and another letter is not ours")
     assert_eq(w.doc.describe(), grouped, "and those changed nothing")
 
     w.shortcut(KEY_G, CMD_SHIFT, true)

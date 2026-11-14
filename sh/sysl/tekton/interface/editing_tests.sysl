@@ -1,0 +1,385 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.sdl3.{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KMOD_GUI, KMOD_SHIFT}
+import sh.sysl.tekton.document.{Primitive, Transform}
+import sh.sysl.tekton.handles.layout
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+
+// Cut, Copy, Paste, Select All, the arrow keys and the selection rectangle, through the window's own entry points.
+
+private const CMD: u16 = KMOD_GUI
+private const KEY_A: u32 = 97
+private const KEY_C: u32 = 99
+private const KEY_V: u32 = 118
+private const KEY_X: u32 = 120
+private val AT: Rect = Rect(0, 0, 900, 600)
+private val WHOLE: Rect = Rect(0, 0, 1280, 800)
+
+private paint_frame(w: &Workspace, c: *Recorder)
+    render(w.viewport(), c, AT)
+
+private at(w: &Workspace, id: int) -> Vec3 = w.doc.find(id).unwrap().transform.translation
+
+// Where a shape's centre lands in the viewport.
+private centre_of(w: &Workspace, id: int) -> (int, int)
+    val centre = w.doc.bounds_of(w.doc.find(id).unwrap()).center()
+    val (x, y) = w.camera.project(centre, 900.0, 600.0).unwrap()
+
+    (int(x), int(y))
+
+// Two boxes, 60 apart along x, the second selected.
+private pair() -> (&Workspace, int, int)
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+
+    w.doc.set_transform(a, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    w.doc.set_transform(b, Transform(Vec3(60.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    (w, a, b)
+end pair
+
+private live(w: &Workspace, c: *Recorder, title: string, label: string) -> bool
+    assert(w.show_menu(title), "a menu of that title")
+
+    val v = w.tree()
+
+    render(v, c, WHOLE)
+
+    val row = snapshot(v, c, WHOLE).find(s"menu.${title}.${label}").unwrap()
+
+    w.open_menu.set(NO_MENU)
+    row.marks.index_of("disabled").is_none()
+end live
+
+// ## Copy, cut, paste
+
+@test
+the_shortcuts_copy_cut_and_paste_and_each_paste_stands_a_step_further_along()
+    val (w, a, b) = pair()
+
+    w.doc.select(Some(a))
+    assert(w.shortcut(KEY_C, CMD, false), "copy is taken")
+    assert_eq(w.doc.items().len, 2, "and copies nothing into the document")
+    assert(w.shortcut(KEY_V, CMD, false), "paste is taken")
+    assert_eq(w.doc.items().len, 3, "a copy")
+    assert(at(w, w.doc.selection[0]) == Vec3(1.0, 0.0, 0.0), "one grid step beside the original")
+    assert(w.shortcut(KEY_V, CMD, false), "again")
+    assert(at(w, w.doc.selection[0]) == Vec3(2.0, 0.0, 0.0), "a step beside that")
+    assert_eq(w.doc.selection.len(), 1, "the paste is the selection")
+
+    assert(w.shortcut(KEY_C, CMD, false), "a new copy starts the count again")
+    assert(w.shortcut(KEY_V, CMD, false), "paste")
+    assert(at(w, w.doc.selection[0]) == Vec3(3.0, 0.0, 0.0), "a step from the pasted one that was copied")
+    assert(at(w, b) == Vec3(60.0, 0.0, 0.0), "the other box has not moved")
+
+@test
+cut_takes_the_selection_out_in_one_step_and_paste_puts_it_back()
+    val (w, a, b) = pair()
+    val steps = w.doc.undos.len()
+
+    w.doc.select(Some(b))
+    assert(w.shortcut(KEY_X, CMD, false), "taken")
+    assert_eq(w.doc.items().len, 1, "gone")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+    assert(w.shortcut(KEY_V, CMD, false), "paste")
+    assert_eq(w.doc.items().len, 2, "back")
+    assert(at(w, w.doc.selection[0]) == Vec3(61.0, 0.0, 0.0), "a step beside where it was")
+    w.undo()
+    assert_eq(w.doc.items().len, 1, "undo takes the paste back")
+    w.undo()
+    assert_eq(w.doc.items().len, 2, "and a second the cut")
+
+@test
+a_held_key_does_not_repeat_a_paste_or_a_cut()
+    val (w, a, _) = pair()
+
+    w.doc.select(Some(a))
+    w.shortcut(KEY_C, CMD, false)
+    assert(w.shortcut(KEY_V, CMD, true), "taken, held")
+    assert_eq(w.doc.items().len, 2, "and does nothing")
+
+@test
+paste_is_dead_in_the_menu_until_something_is_copied()
+    val (w, a, _) = pair()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    assert(!live(w, &c, "Edit", "Paste"), "nothing copied")
+    assert(live(w, &c, "Edit", "Copy"), "something selected to copy")
+    assert(live(w, &c, "Edit", "Cut"), "and to cut")
+    assert(live(w, &c, "Edit", "Select All"), "and to select")
+    w.copy()
+    assert(live(w, &c, "Edit", "Paste"), "now there is")
+    w.doc.select(None)
+    assert(!live(w, &c, "Edit", "Copy"), "nothing selected")
+    assert(!live(w, &c, "Edit", "Cut"), "nothing selected")
+    assert(live(w, &c, "Edit", "Paste"), "the clipboard does not depend on the selection")
+
+@test
+the_menu_rows_work()
+    val (w, a, _) = pair()
+
+    w.doc.select(Some(a))
+    w.copy()
+    w.paste()
+    assert_eq(w.doc.items().len, 3, "pasted")
+    w.cut()
+    assert_eq(w.doc.items().len, 2, "cut")
+    w.select_all()
+    assert_eq(w.doc.selection.len(), 2, "selected")
+
+@test
+the_clipboard_survives_new_and_pastes_into_the_new_document()
+    val (w, a, _) = pair()
+
+    w.doc.select(Some(a))
+    w.copy()
+    w.doc.mark_saved()
+    w.new_file()
+    assert_eq(w.doc.items().len, 0, "a new document")
+    w.paste()
+    assert_eq(w.doc.items().len, 1, "the copy is in it")
+    assert(at(w, w.doc.selection[0]) == Vec3(1.0, 0.0, 0.0), "a step beside where it was copied from")
+
+@test
+with_nothing_to_paste_or_copy_a_paste_and_a_copy_change_nothing()
+    val w = new_workspace()
+    val before = w.doc.describe()
+
+    w.paste()
+    w.copy()
+    w.cut()
+    assert_eq(w.doc.describe(), before, "the document is as it was")
+    assert_eq(w.doc.undos.len(), 0, "no step")
+
+@test
+the_clipboard_commands_wait_for_a_field_and_a_dragged_shape()
+    val (w, a, _) = pair()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    c.take_focus(FIRST_FIELD_ID)
+    paint_frame(w, &c)
+    assert(!w.shortcut(KEY_X, CMD, false), "the field keeps it")
+    assert(!w.shortcut(KEY_A, CMD, false), "and this one")
+    assert_eq(w.doc.items().len, 2, "nothing was cut")
+
+// ## Select all
+
+@test
+select_all_selects_every_item_and_shows_it()
+    val (w, a, b) = pair()
+
+    w.doc.select(None)
+    assert(w.shortcut(KEY_A, CMD, false), "taken")
+    assert(w.doc.is_selected(a) && w.doc.is_selected(b), "both")
+
+// ## The arrow keys
+
+@test
+the_arrows_move_the_selection_a_grid_step_a_millimetre_or_up_and_down()
+    val (w, a, _) = pair()
+
+    w.grid = 5.0
+    w.doc.select(Some(a))
+    assert(w.shortcut(KEY_RIGHT, 0u16, false), "right is taken")
+    assert(at(w, a) == Vec3(5.0, 0.0, 0.0), "a grid step along x")
+    assert(w.shortcut(KEY_LEFT, 0u16, false), "left")
+    assert(w.shortcut(KEY_LEFT, 0u16, false), "left")
+    assert(at(w, a) == Vec3(-5.0, 0.0, 0.0), "back past where it began")
+    assert(w.shortcut(KEY_UP, 0u16, false), "up")
+    assert(at(w, a) == Vec3(-5.0, 5.0, 0.0), "along y")
+    assert(w.shortcut(KEY_DOWN, 0u16, false), "down")
+    assert(w.shortcut(KEY_DOWN, 0u16, false), "down")
+    assert(at(w, a) == Vec3(-5.0, -5.0, 0.0), "down is toward the front")
+    assert(w.shortcut(KEY_RIGHT, KMOD_SHIFT, false), "shift and right")
+    assert(at(w, a) == Vec3(-4.0, -5.0, 0.0), "a millimetre, whatever the grid")
+    assert(w.shortcut(KEY_UP, KMOD_SHIFT, false), "shift and up")
+    assert(at(w, a) == Vec3(-4.0, -4.0, 0.0), "a millimetre along y")
+    assert(w.shortcut(KEY_UP, CMD, false), "command and up")
+    assert(at(w, a) == Vec3(-4.0, -4.0, 5.0), "a grid step along z")
+    assert(w.shortcut(KEY_DOWN, CMD, false), "command and down")
+    assert(w.shortcut(KEY_DOWN, CMD | KMOD_SHIFT, false), "and with shift")
+    assert(at(w, a) == Vec3(-4.0, -4.0, -1.0), "a millimetre down")
+
+@test
+a_held_arrow_is_one_undo_step_and_a_different_key_on_the_same_selection_joins_it()
+    val (w, a, _) = pair()
+
+    w.doc.select(Some(a))
+
+    val steps = w.doc.undos.len()
+
+    w.shortcut(KEY_RIGHT, 0u16, false)
+    for i in 0..<6 do w.shortcut(KEY_RIGHT, 0u16, true)
+
+    assert(at(w, a) == Vec3(7.0, 0.0, 0.0), "seven")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+    w.undo()
+    assert(at(w, a) == Vec3(0.0, 0.0, 0.0), "all taken back")
+    w.redo()
+    assert(at(w, a) == Vec3(7.0, 0.0, 0.0), "and put back")
+
+@test
+an_arrow_with_nothing_selected_does_nothing_and_says_nothing()
+    val (w, _, _) = pair()
+
+    val steps = w.doc.undos.len()
+
+    w.doc.select(None)
+    assert(w.shortcut(KEY_RIGHT, 0u16, false), "taken")
+    assert_eq(w.doc.undos.len(), steps, "no step")
+    assert_eq(w.problem.read(), "", "and no complaint")
+
+@test
+an_arrow_goes_to_a_field_being_typed_in_and_to_an_open_menu()
+    val (w, a, _) = pair()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    c.take_focus(FIRST_FIELD_ID)
+    paint_frame(w, &c)
+    assert(!w.shortcut(KEY_RIGHT, 0u16, false), "the field keeps it")
+    assert(at(w, a) == Vec3(0.0, 0.0, 0.0), "nothing moved")
+    c.take_focus(NOBODY)
+    paint_frame(w, &c)
+    assert(w.shortcut(KEY_RIGHT, 0u16, false), "the field gave it back")
+    assert(at(w, a) == Vec3(1.0, 0.0, 0.0), "moved")
+    assert(w.show_menu("Edit"), "a menu")
+    assert(!w.shortcut(KEY_RIGHT, 0u16, false), "the menu has it")
+    assert(at(w, a) == Vec3(1.0, 0.0, 0.0), "and nothing moved")
+    w.open_menu.set(NO_MENU)
+
+@test
+an_arrow_moves_a_group_a_hole_and_several_things_together()
+    val (w, a, b) = pair()
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+    w.shortcut(KEY_UP, 0u16, false)
+    assert(at(w, a) == Vec3(0.0, 1.0, 0.0), "the first")
+    assert(at(w, b) == Vec3(60.0, 1.0, 0.0), "and the second")
+    w.doc.group_selected().unwrap()
+
+    val g = w.doc.selection[0]
+
+    w.shortcut(KEY_RIGHT, 0u16, false)
+    assert(w.doc.find(g).unwrap().children.len() == 2, "the group still has both")
+    assert(at(w, g).x == 31.0, "and has moved whole")
+
+// ## The selection rectangle
+
+// A press here, a move there, and a release there, with a frame painted around each, shift held throughout.
+private shift_drag(w: &Workspace, c: *Recorder, x: int, y: int, to_x: int, to_y: int)
+    c.chord.keys = Modifiers(true, false, false, false)
+    paint_frame(w, c)
+    c.point(x, y, true)
+    paint_frame(w, c)
+    c.point(to_x, to_y, true)
+    paint_frame(w, c)
+    c.release(to_x, to_y)
+    paint_frame(w, c)
+    c.chord.keys = no_modifiers()
+    paint_frame(w, c)
+end shift_drag
+
+@test
+a_shift_drag_on_empty_space_selects_what_the_rectangle_touches_and_adds_to_the_selection()
+    val (w, a, b) = pair()
+    var c = recorder()
+    val (ax, ay) = centre_of(w, a)
+    val (bx, by) = centre_of(w, b)
+    val turn = w.camera.turn
+
+    w.doc.select(None)
+    shift_drag(w, &c, ax - 20, ay - 90, ax + 20, ay + 40)
+    assert(w.doc.selection.len() == 1 && w.doc.is_selected(a), "the box the rectangle touches")
+    assert(w.camera.turn == turn, "and the view did not turn")
+    assert(w.box.is_none(), "the rectangle is gone once let go")
+    shift_drag(w, &c, bx - 20, by - 90, bx + 20, by + 40)
+    assert(w.doc.is_selected(a) && w.doc.is_selected(b), "the next one is added to it")
+    assert_eq(w.doc.selection.len(), 2, "each once")
+
+@test
+a_shift_drag_in_any_direction_and_one_that_touches_nothing_work()
+    val (w, a, b) = pair()
+    var c = recorder()
+    val (ax, ay) = centre_of(w, a)
+
+    w.doc.select(None)
+    shift_drag(w, &c, ax + 20, ay + 40, ax - 20, ay - 90)
+    assert(w.doc.selection.len() == 1 && w.doc.is_selected(a), "from the far corner to the near one")
+    shift_drag(w, &c, 3, 590, 30, 570)
+    assert(w.doc.selection.len() == 1, "a rectangle over nothing adds nothing, and takes nothing away")
+
+@test
+the_rectangle_is_drawn_while_it_is_dragged_and_not_after()
+    val (w, a, _) = pair()
+    var c = recorder()
+    val (ax, ay) = centre_of(w, a)
+
+    w.doc.select(None)
+    paint_frame(w, &c)
+
+    val bare = w.overlay.strokes.len()
+
+    c.chord.keys = Modifiers(true, false, false, false)
+    c.point(5, 5, true)
+    paint_frame(w, &c)
+    c.point(ax, ay, true)
+    paint_frame(w, &c)
+    assert(w.box.is_some(), "it is up")
+    assert(w.overlay.strokes.len() > bare + 4, "its fill and its four sides are strokes")
+    c.release(ax, ay)
+    paint_frame(w, &c)
+    paint_frame(w, &c)
+    assert(w.box.is_none(), "and down")
+
+    assert_eq(w.overlay.strokes.len(), layout(w.doc, w.camera, 900.0, 600.0).strokes.len(), "with nothing but the handles left")
+
+@test
+a_plain_drag_on_empty_space_still_orbits_and_a_shift_drag_on_a_shape_still_moves_it()
+    val (w, a, _) = pair()
+    var c = recorder()
+    val (ax, ay) = centre_of(w, a)
+    val turn = w.camera.turn
+
+    w.doc.select(None)
+    paint_frame(w, &c)
+    c.point(5, 5, true)
+    paint_frame(w, &c)
+    c.point(45, 5, true)
+    paint_frame(w, &c)
+    c.release(45, 5)
+    paint_frame(w, &c)
+    assert(w.camera.turn != turn, "it orbited")
+    assert(w.box.is_none() && w.doc.selection.len() == 0, "no rectangle")
+
+    shift_drag(w, &c, ax, ay, ax + 40, ay)
+    assert(at(w, a) != Vec3(0.0, 0.0, 0.0), "a shift drag that began on a shape moved it")
+
+@test
+the_box_strokes_are_an_outline_and_a_fill_in_the_selected_colour()
+    val s = box_strokes(10.0, 20.0, 110.0, 60.0)
+
+    assert_eq(s.len(), 5 + 4, "five bands of eight across forty points, and four sides")
+    assert(s[s.len() - 1].color == BOX_INK && s[0].color == BOX_FILL, "ink and fill")
+    assert(s[0].color[3] < 0.3, "the fill is see-through")
+    assert_eq(box_strokes(10.0, 20.0, 10.0, 20.0).len(), 4, "a rectangle of no size is an outline")
+    assert_eq(box_strokes(110.0, 60.0, 10.0, 20.0).len(), s.len(), "either way round")
+
+@test
+a_cut_starts_the_count_of_pastes_again_as_a_copy_does()
+    val (w, a, b) = pair()
+
+    w.doc.select(Some(a))
+    w.copy()
+    w.paste()
+    w.paste()
+    w.doc.select(Some(b))
+    w.cut()
+    w.paste()
+    assert(at(w, w.doc.selection[0]) == Vec3(61.0, 0.0, 0.0), "one step beside what was cut")
