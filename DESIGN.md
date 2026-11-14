@@ -218,7 +218,18 @@ their own tests, so most changes never need the whole application linked or a wi
    - **Views**: Top, Front, Right and Home views, perspective or orthographic, and a view cube in the corner.
    - **Files**: import STL, OBJ and 3MF as mesh shapes (moved, turned, scaled, grouped and cut like any
      other), import an SVG's outlines extruded to a depth, export OBJ, and a colour per item carried into 3MF.
-   - **Sketching**: on the workplane, draw a closed profile from lines, rectangles, circles and arcs with
-     typed lengths; Extrude it to a height or Revolve it about an axis by an angle. The result is a shape like
-     any other that keeps its profile, so it can be opened and edited again.
+   - **Threads**: a thread shape, outside (a bolt, a bottle's neck) or inside (a nut, a lid), from a diameter,
+     a pitch, a length and a profile (ISO metric, or a rounder container thread), with a clearance so a lid
+     printed with an inside thread fits a neck printed with the matching outside one. It is a shape like any
+     other, so it is grouped with a cylinder to make a neck, or with a hole to make a lid.
+   - **Section view**: View → Section cuts the view (not the model) along a plane the user drags, so the walls,
+     the fit of a lid and the inside of a hollow are seen in cross-section, the cut faces filled.
+   - **Push/pull**: dragging a flat face of a shape moves that face along its normal, lengthening or
+     shortening the shape on that side only, the opposite face staying where it was.
+   - **Printability check**: View → Check for Printing marks walls thinner than the nozzle allows, overhangs
+     steeper than the printer bridges without support, and parts too small to print, from the `Printer` value.
+   - **Sketching**: on the workplane, draw a closed profile from lines, rectangles, circles, arcs and spline
+     curves with typed lengths; Extrude it to a height (straight or tapered) or Revolve it about an axis by an
+     angle, or Loft between two profiles on parallel planes. The result is a shape like any other that keeps
+     its profiles, so it can be opened and edited again.
 8. nex scripting.
