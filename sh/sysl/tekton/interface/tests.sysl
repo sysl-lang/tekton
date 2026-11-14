@@ -1889,7 +1889,7 @@ end the_round_and_chamfer_buttons_choose_the_finish_as_one_step
 
 private sides_field(w: &Workspace) -> &NumberField = w.number_fields()[12]
 
-private wall_field(w: &Workspace) -> &NumberField = w.number_fields()[13]
+private tube_wall_field(w: &Workspace) -> &NumberField = w.number_fields()[13]
 
 @test
 the_palette_has_a_button_for_each_new_shape_that_adds_it()
@@ -1904,7 +1904,7 @@ the_palette_has_a_button_for_each_new_shape_that_adds_it()
         assert(w.doc.selected == Some(w.doc.items()[0].id), "and selected")
         assert_eq(w.doc.find(w.doc.items()[0].id).unwrap().operation match
                       Shape(q, _, _, _) -> q
-                      Group -> Primitive.Box,
+                      Group(_) -> Primitive.Box,
                   p, name)
 
 @test
@@ -1915,7 +1915,8 @@ the_sides_and_wall_fields_show_only_for_their_own_shape()
     for p in PRIMITIVES
         w.doc.select(Some(w.doc.add_shape(p)))
         assert_eq(shows(w, &c, "panel.sides"), p == Primitive.PolygonPrism, s"sides, ${primitive_name(p)}")
-        assert_eq(shows(w, &c, "panel.wall"), p == Primitive.Tube, s"wall, ${primitive_name(p)}")
+        assert_eq(shows(w, &c, "panel.tube_wall"), p == Primitive.Tube, s"tube wall, ${primitive_name(p)}")
+        assert(!shows(w, &c, "panel.wall"), s"no shell wall, ${primitive_name(p)}")
         assert_eq(shows(w, &c, "panel.segments"), p != Primitive.Box && p != Primitive.Wedge && p != Primitive.Pyramid
                   && p != Primitive.PolygonPrism, s"segments, ${primitive_name(p)}")
 
@@ -1952,7 +1953,7 @@ typing_a_wall_sets_it_held_to_leave_a_bore_as_one_step()
     val w = new_workspace()
     val a = w.doc.add_shape(Primitive.Tube)
     var c = recorder()
-    val f = wall_field(w)
+    val f = tube_wall_field(w)
 
     paint_field(f, &c)
     assert_eq(f.text.read(), "2", "the default")
@@ -1960,20 +1961,20 @@ typing_a_wall_sets_it_held_to_leave_a_bore_as_one_step()
     val steps = w.doc.undos.len()
 
     type_into(f, &c, "3.5", Key.Enter)
-    assert_eq(w.doc.find(a).unwrap().wall, Some(3.5), "set")
+    assert_eq(w.doc.find(a).unwrap().tube_wall, Some(3.5), "set")
     assert_eq(w.doc.undos.len(), steps + 1, "one step")
     type_into(f, &c, "50", Key.Enter)
-    assert_eq(w.doc.find(a).unwrap().wall, Some(9.8), "held to leave a bore")
+    assert_eq(w.doc.find(a).unwrap().tube_wall, Some(9.8), "held to leave a bore")
     paint_field(f, &c)
     assert_eq(f.text.read(), "9.8", "and the field says so")
 
     for bad in ["", "abc", "nan"]
         type_into(f, &c, bad, Key.Enter)
-        assert_eq(w.doc.find(a).unwrap().wall, Some(9.8), s"kept, for '${bad}'")
+        assert_eq(w.doc.find(a).unwrap().tube_wall, Some(9.8), s"kept, for '${bad}'")
         assert(f.wrong, s"marked, for '${bad}'")
 
     assert(w.doc.undo(), "undone")
-    assert_eq(w.doc.find(a).unwrap().wall, Some(3.5), "one edit back")
+    assert_eq(w.doc.find(a).unwrap().tube_wall, Some(3.5), "one edit back")
 
 @test
 the_clearance_field_shows_for_the_new_holes_that_take_one_and_not_for_a_tube()

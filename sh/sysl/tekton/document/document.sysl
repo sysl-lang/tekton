@@ -120,10 +120,24 @@ val SHARP_EDGES = Edges(0.0, false)
 private edges_text(e: Edges) -> string =
     s"${if e.radius == 0.0 then "" else s" edge:${e.radius}"}${if e.chamfer then " chamfer" else ""}"
 
-// What a node computes. A group's solid is its solid children joined, with its hole children cut out.
+// How a solid is hollowed: into a shell whose walls are `wall` millimetres thick, every point of the solid within that
+// distance of its surface, and with `open` the cavity carried straight up through its own top. A wall of nothing
+// leaves it solid.
+struct Shell derives Eq
+    wall: real
+    open: bool
+
+val NO_SHELL = Shell(0.0, false)
+
+// How a node is hollowed, as a model's text says it: nothing where it is solid.
+private shell_text(s: Shell) -> string =
+    if s.wall == 0.0 then "" else s" wall:${s.wall}${if s.open then " open" else ""}"
+
+// What a node computes. A group's solid is its solid children joined, or with `intersect` only what all of them
+// share, with its hole children cut out.
 enum Operation
     Shape(primitive: Primitive, segments: int, edges: Edges, wall: real)
-    Group
+    Group(intersect: bool)
 
 // Where a node's solid goes in its parent's space: scaled, then rotated, then moved.
 struct Transform derives Eq
@@ -307,6 +321,9 @@ struct Node
     // How far a hole is grown on every side before it cuts, in millimetres, so that a printed part fits it. Kept
     // while the node is solid, and ignored.
     clearance: real
+
+    // How this node's own solid is hollowed, after its parts are combined and before its transform places it.
+    shell: Shell
     children: Buf[&Node]
     derived: &Derived
 
@@ -323,34 +340,47 @@ struct Node
     segments -> Option[int] =
         self.operation match
             Shape(p, n, e, _) -> if is_round(p) || (e.radius > 0.0 && !e.chamfer) then Some(n) else None
-            Group -> None
+            Group(_) -> None
 
     // How many sides a polygon prism has, or nothing for any other shape or a group.
     sides -> Option[int] =
         self.operation match
             Shape(p, n, _, _) -> if p == Primitive.PolygonPrism then Some(n) else None
-            Group -> None
+            Group(_) -> None
 
-    // How thick a tube's wall is, in millimetres at the palette's size, or nothing for any other shape or a group.
-    wall -> Option[real] =
+    // How thick a tube's own wall is, in millimetres at the palette's size, or nothing for any other shape or a
+    // group. It is the tube's shape, not a shell: a hollowed tube has both.
+    tube_wall -> Option[real] =
         self.operation match
             Shape(p, _, _, w) -> if p == Primitive.Tube then Some(w) else None
-            Group -> None
+            Group(_) -> None
 
     // How the edges of a box or cylinder are finished, or nothing for a shape that has no straight edges to
     // finish, or a group.
     edges -> Option[Edges] =
         self.operation match
             Shape(p, _, e, _) -> if takes_edges(p) then Some(e) else None
-            Group -> None
+            Group(_) -> None
 
     // Whether this node's own solid is built at its real size rather than at the palette's 20 mm, because its
-    // rounded or chamfered edges must keep their radius however it is sized. Its scale is then part of what it
-    // derives, so a new scale needs a new solid.
-    sized_by_scale -> bool =
+    // rounded or chamfered edges must keep their radius, or its walls their thickness, however it is sized. Its
+    // scale is then part of what it derives, so a new scale needs a new solid.
+    sized_by_scale -> bool = self.is_hollow || self.has_finished_edges
+
+    // Whether this is a shape whose edges are rounded or chamfered.
+    has_finished_edges -> bool =
         self.operation match
             Shape(_, _, e, _) -> e.radius > 0.0
-            Group -> false
+            Group(_) -> false
+
+    // Whether this node is hollowed into a shell.
+    is_hollow -> bool = self.shell.wall > 0.0
+
+    // Whether this node is a group that keeps only what all of its solid parts share.
+    intersects -> bool =
+        self.operation match
+            Group(i) -> i
+            _ -> false
 
     // What a copy of this node placed by `t` may share of what it derived: all of it, unless its solid is built
     // at its real size and `t` sizes it otherwise.
@@ -359,7 +389,7 @@ struct Node
 
     is_group -> bool =
         self.operation match
-            Group -> true
+            Group(_) -> true
             _ -> false
 
     // Whether a clearance can grow this node: every shape but a torus, a tube and a group. A torus and a tube
@@ -369,57 +399,62 @@ struct Node
     takes_clearance -> bool =
         self.operation match
             Shape(p, _, _, _) -> p != Primitive.Torus && p != Primitive.Tube
-            Group -> false
+            Group(_) -> false
 
     // This node somewhere else: the same triangles, unless they were built at a size `t` changes.
     private with_transform(&self, t: Transform) -> &Node =
-        Node(self.id, self.operation, t, self.mirror, self.tint, self.hole, self.clearance, self.children,
+        Node(self.id, self.operation, t, self.mirror, self.tint, self.hole, self.clearance, self.shell, self.children,
              self.derived_at(t), None, None)
 
     // This node reflected otherwise and placed by `t`: its own solid is another, so nothing derived holds.
     private with_mirror(&self, t: Transform, m: Mirror) -> &Node =
-        Node(self.id, self.operation, t, m, self.tint, self.hole, self.clearance, self.children, Derived(None, None),
-             None, None)
+        Node(self.id, self.operation, t, m, self.tint, self.hole, self.clearance, self.shell, self.children,
+             Derived(None, None), None, None)
 
     // This node as solid or as hole: the same triangles in the same place, but a clearance grows only a hole, so
     // a node with one cuts from somewhere else, and one built at its real size is built again at the new one.
     private with_hole(&self, hole: bool) -> &Node =
-        Node(self.id, self.operation, self.transform, self.mirror, self.tint, hole, self.clearance, self.children,
-             if self.sized_by_scale && self.clearance != 0.0 then Derived(None, None) else self.derived,
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, hole, self.clearance, self.shell,
+             self.children, if self.sized_by_scale && self.clearance != 0.0 then Derived(None, None) else self.derived,
              if self.clearance == 0.0 then self.solid else None, self.bounds)
 
     // This node with another clearance: the same triangles in the same place, cut from somewhere else; for a
     // hole built at its real size, built again at the size it now cuts.
     private with_clearance(&self, clearance: real) -> &Node =
-        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, clearance, self.children,
-             if self.sized_by_scale && self.hole then Derived(None, None) else self.derived, None, self.bounds)
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, clearance, self.shell,
+             self.children, if self.sized_by_scale && self.hole then Derived(None, None) else self.derived, None, self.bounds)
 
     // This shape with another number of sides, so nothing derived from the old one holds.
     private with_segments(&self, segments: int) -> &Node =
         self.operation match
             Shape(p, _, e, w) -> self.with_operation(Operation.Shape(p, segments, e, w))
-            Group -> self
+            Group(_) -> self
 
-    // This tube with another wall, so nothing derived from the old one holds.
-    private with_wall(&self, wall: real) -> &Node =
+    // This tube with another wall of its own, so nothing derived from the old one holds.
+    private with_tube_wall(&self, wall: real) -> &Node =
         self.operation match
             Shape(p, n, e, _) -> self.with_operation(Operation.Shape(p, n, e, wall))
-            Group -> self
+            Group(_) -> self
 
     // This shape with its edges finished otherwise, so nothing derived from the old ones holds.
     private with_edges(&self, edges: Edges) -> &Node =
         self.operation match
             Shape(p, n, _, w) -> self.with_operation(Operation.Shape(p, n, edges, w))
-            Group -> self
+            Group(_) -> self
 
     private with_operation(&self, operation: Operation) -> &Node =
-        Node(self.id, operation, self.transform, self.mirror, self.tint, self.hole, self.clearance, self.children,
-             Derived(None, None), None, None)
+        Node(self.id, operation, self.transform, self.mirror, self.tint, self.hole, self.clearance, self.shell,
+             self.children, Derived(None, None), None, None)
+
+    // This node hollowed otherwise, so nothing derived from the old shell holds.
+    private with_shell(&self, shell: Shell) -> &Node =
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, self.clearance, shell,
+             self.children, Derived(None, None), None, None)
 
     // This node made of other children, so nothing derived from the old ones holds.
     private with_children(&self, children: Buf[&Node]) -> &Node =
-        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, self.clearance, children,
-             Derived(None, None), None, None)
+        Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, self.clearance, self.shell,
+             children, Derived(None, None), None, None)
 
     // This tree with the node of `with`'s id replaced by `with`, sharing everything off the path to it; or
     // nothing, if that id is not here.
@@ -447,14 +482,14 @@ struct Node
         val q = t.rotation
         val name = self.operation match
             Shape(p, n, e, w) -> s"${primitive_name(p)}/${n}${edges_text(e)}${if p == Primitive.Tube then s"/${w}" else ""}"
-            Group -> "Group"
+            Group(i) -> if i then "Intersection" else "Group"
         var parts = ""
 
         for child in self.children.view() do parts = s"${parts}${child.model()}"
 
         s"${self.id} ${name} ${self.tint} ${self.hole} ${t.translation.x} ${t.translation.y} ${t.translation.z} " +
         s"${q.w} ${q.x} ${q.y} ${q.z} ${t.scale.x} ${t.scale.y} ${t.scale.z}${mirror_text(self.mirror)}" +
-        s"${if self.clearance == 0.0 then "" else s" clearance:${self.clearance}"} (${parts})"
+        s"${if self.clearance == 0.0 then "" else s" clearance:${self.clearance}"}${shell_text(self.shell)} (${parts})"
     end model
 
     private find(&self, id: int) -> Option[&Node]
@@ -581,6 +616,9 @@ struct Document
             joined.status() match
                 NoError -> ()
                 _ -> return Some((node.id, "The kernel could not join this group"))
+
+            if joined.is_empty() && node.intersects && self.solids_combined(node, true).is_empty()
+                return Some((node.id, "The solids in this intersection share nothing"))
 
             if joined.is_empty() then return Some((node.id, "The holes in this group cut away all of its solid"))
         elif depth == 0
@@ -720,7 +758,8 @@ struct Document
 
         for item in self.items() do items.push(item)
 
-        items.push(Node(id, Operation.Shape(p, default_segments(p), SHARP_EDGES, TUBE_WALL), moved_to(at), NO_MIRROR, id - 1, false, 0.0, buf(),
+        items.push(Node(id, Operation.Shape(p, default_segments(p), SHARP_EDGES, TUBE_WALL), moved_to(at), NO_MIRROR, id - 1,
+                        false, 0.0, NO_SHELL, buf(),
                         Derived(None, None), None, None))
         self.put_items(items)
         self.next_id += 1
@@ -772,22 +811,22 @@ struct Document
         Ok(())
     end set_sides
 
-    // The command behind the wall field: how thick a tube's wall is, held to what leaves it a bore. Any other
-    // shape is refused, and a number that changes nothing is not a step.
-    set_wall(&self, id: int, wall: real) -> Result[unit, string]
+    // The command behind the tube wall field: how thick a tube's own wall is, held to what leaves it a bore. Any
+    // other shape is refused, and a number that changes nothing is not a step.
+    set_tube_wall(&self, id: int, wall: real) -> Result[unit, string]
         val node = self.find(id).ok_or("Nothing is selected")?
-        val now = node.wall.ok_or("Only a tube has a wall")?
+        val now = node.tube_wall.ok_or("Only a tube has a tube wall")?
 
         if !wall.is_finite() then return Err("The wall must be a number")
 
-        val wanted = clamped_wall(wall)
+        val wanted = clamped_tube_wall(wall)
 
         if wanted == now then return Ok(())
 
         self.record()
-        self.put_node(node.with_wall(wanted))
+        self.put_node(node.with_tube_wall(wanted))
         Ok(())
-    end set_wall
+    end set_tube_wall
 
     // The command behind the clearance field: how far a hole grows on every side before it cuts, held to what a
     // printer needs. A shape a clearance cannot grow is refused, and so is a number that is no distance; one that
@@ -920,8 +959,10 @@ struct Document
     // The command behind the group button: what is selected becomes one thing, standing where it stood, its
     // holes cut from its solids. The group's origin is the middle of its solids' base, so its numbers mean
     // what a shape's mean. Refused, leaving the document as it was, where there would be nothing to hold.
-    group_selected(&self) -> Result[int, string]
-        if self.selection.len() < 2 then return Err("Select two or more to group")
+    //
+    // With `intersect` the group keeps only what all of its solids share, and its holes cut that.
+    group_selected(&self, intersect: bool = false) -> Result[int, string]
+        if self.selection.len() < 2 then return Err(s"Select two or more to ${if intersect then "intersect" else "group"}")
 
         var extent: Option[Aabb] = None
 
@@ -947,15 +988,15 @@ struct Document
 
                 if tint.is_none() && !item.hole then tint = Some(item.tint)
 
-        val group = Node(self.next_id, Operation.Group, moved_to(origin), NO_MIRROR, tint.unwrap(), false, 0.0,
-                         parts, Derived(None, None), None, None)
+        val group = Node(self.next_id, Operation.Group(intersect), moved_to(origin), NO_MIRROR, tint.unwrap(), false, 0.0,
+                         NO_SHELL, parts, Derived(None, None), None, None)
         val joined = self.local_of(group)
 
         joined.status() match
             NoError -> ()
             _ -> return Err("The kernel could not join these")
 
-        if joined.is_empty() then return Err("The holes would cut away\nall of the solid")
+        if joined.is_empty() then return Err(self.emptied_why(group))
 
         self.record()
 
@@ -1044,7 +1085,7 @@ struct Document
 
         self.next_id += 1
 
-        Node(id, Operation.Group, group.transform, group.mirror, part.tint, part.hole, 0.0, inside,
+        Node(id, Operation.Group(false), group.transform, group.mirror, part.tint, part.hole, 0.0, NO_SHELL, inside,
              Derived(None, None), None, None)
     end wrapped_part
 
@@ -1102,6 +1143,208 @@ struct Document
         self.put_arranged(changed)
         Ok(())
     end drop_selected
+
+    // The command behind Union and Intersect on a selected group: whether it joins its solids or keeps only what
+    // all of them share. Refused, leaving the group as it was, where that would leave nothing.
+    set_group_mode(&self, id: int, intersect: bool) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+
+        if !node.is_group || node === self.root then return Err("Only a group can intersect")
+        if node.intersects == intersect then return Ok(())
+
+        val changed = node.with_operation(Operation.Group(intersect))
+        val joined = self.local_of(changed)
+
+        joined.status() match
+            NoError -> ()
+            _ -> return Err("The kernel could not combine these")
+
+        if joined.is_empty() then return Err(self.emptied_why(changed))
+
+        self.record()
+        self.put_node(changed)
+        Ok(())
+    end set_group_mode
+
+    // Whether `hollow_selected` has something to hollow: a solid among the selection.
+    can_hollow(&self) -> bool
+        for item in self.selected_items() do if !item.hole then return true
+
+        false
+    end can_hollow
+
+    // The command behind Hollow: each selected solid becomes a shell with walls `wall` millimetres thick, open at
+    // its own top or closed, as one step. A hole is left as it is. Refused, leaving everything as it was, where a
+    // wall is out of range or leaves no room inside a solid.
+    hollow_selected(&self, wall: real, open: bool) -> Result[unit, string]
+        if self.selection.len() == 0 then return Err("Nothing is selected")
+        if !wall.is_finite() then return Err("The wall must be a number\nof millimetres")
+        if wall < MIN_WALL || wall > MAX_WALL then return Err(s"The wall must be from\n${MIN_WALL} to ${MAX_WALL.round()} mm")
+
+        var changed: Buf[&Node] = buf()
+
+        for item in self.selected_items()
+            if !item.hole && item.shell != Shell(wall, open)
+                val shelled = item.with_shell(Shell(wall, open))
+
+                if !self.has_room(shelled) then return Err(s"A ${wall} mm wall leaves no\nroom inside shape ${item.id}")
+
+                changed.push(shelled)
+
+        if !self.can_hollow() then return Err("Only a solid can be hollowed")
+        if changed.len() == 0 then return Ok(())
+
+        self.record()
+
+        for node in changed.view() do self.put_node(node)
+
+        Ok(())
+    end hollow_selected
+
+    // The command behind the wall field: how thick a node's walls are, held to what a printer makes, or solid again
+    // at nothing. Refused where the wall would leave no room inside.
+    set_wall(&self, id: int, wall: real) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+
+        if !wall.is_finite() then return Err("The wall must be a number\nof millimetres")
+
+        val shell = if wall <= 0.0 then NO_SHELL else Shell(clamped_wall(wall), node.shell.open)
+
+        if shell == node.shell then return Ok(())
+
+        val changed = node.with_shell(shell)
+
+        if changed.is_hollow && !self.has_room(changed)
+            return Err(s"A ${shell.wall} mm wall leaves no\nroom inside shape ${id}")
+
+        self.record()
+        self.put_node(changed)
+        Ok(())
+    end set_wall
+
+    // The command behind the Closed and Open Top buttons on a hollow node.
+    set_open_top(&self, id: int, open: bool) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+
+        if !node.is_hollow then return Err("Only a hollow solid has\na top to open")
+        if node.shell.open == open then return Ok(())
+
+        self.record()
+        self.put_node(node.with_shell(Shell(node.shell.wall, open)))
+        Ok(())
+    end set_open_top
+
+    // Whether a hollowed node has a cavity: a node whose wall leaves no room is built solid, so its solid holds
+    // as much as the same node unhollowed.
+    private has_room(&self, shelled: &Node) -> bool =
+        self.local_of(shelled).volume() < self.local_of(shelled.with_shell(NO_SHELL)).volume() * (1.0 - 1.0e-6)
+
+    // The command behind Split: each selected thing the plane through the middle of the selection's box, square to
+    // `axis`, passes through is cut in two there, and each half stands as a thing of its own. Everything selected
+    // stays selected, the halves in place of what they halve, as one step.
+    //
+    // **A half is a group of the thing and a box-shaped hole that cuts the other half away**, so a half is made of
+    // what the document already holds and stays editable: ungrouped, it gives back the whole thing and the cutter.
+    // Whatever the thing was, a group with holes, an intersection, a hollow shell, a rounded box, its half is that
+    // thing's own solid cut by the plane. A hole is halved as a hole: it goes into its halves solid, its clearance
+    // spent on its transform the way an ungroup spends it, and each half is a hole.
+    split_selected(&self, axis: int) -> Result[unit, string]
+        val chosen = self.selected_items()
+
+        if chosen.len() == 0 then return Err("Nothing is selected")
+
+        val at = self.extent(chosen.view()).center().axis(axis)
+        val first_id = self.next_id
+        var halves: Buf[(int, &Node, &Node)] = buf()
+
+        for item in chosen.view()
+            val b = self.bounds_of(item)
+
+            if b.min.axis(axis) < at && b.max.axis(axis) > at
+                val low = self.half(item, b, axis, at, true)
+                val high = self.half(self.fresh_copy(item, item.transform), b, axis, at, false)
+
+                for h in [low, high]
+                    val solid = self.local_of(h)
+
+                    solid.status() match
+                        NoError -> ()
+                        _ ->
+                            self.next_id = first_id
+                            return Err(s"The kernel could not split\nshape ${item.id}")
+
+                    if solid.is_empty()
+                        self.next_id = first_id
+                        return Err(s"Shape ${item.id} has nothing\non one side of the middle")
+
+                halves.push((item.id, low, high))
+
+        if halves.len() == 0 then return Err("Nothing selected reaches\nacross the middle")
+
+        val made_ids = self.next_id
+
+        self.next_id = first_id
+        self.record()
+        self.next_id = made_ids
+
+        var items: Buf[&Node] = buf()
+        var chosen_ids: Buf[int] = buf()
+
+        for item in self.items()
+            var split = false
+
+            for (id, low, high) in halves.view()
+                if id == item.id
+                    items.push(low)
+                    items.push(high)
+                    split = true
+
+                    if self.is_selected(item.id)
+                        chosen_ids.push(low.id)
+                        chosen_ids.push(high.id)
+
+            if !split
+                items.push(item)
+
+                if self.is_selected(item.id) then chosen_ids.push(item.id)
+
+        self.put_items(items)
+        self.selection = chosen_ids
+        self.last_placed = Some(halves[halves.len() - 1].2.id)
+        Ok(())
+    end split_selected
+
+    // One half of a thing whose box is `b`: below the plane where `coordinate axis = at` with `keep_low`, above it
+    // otherwise. The group stands at the middle of the half's base, as a group made by Group does.
+    private half(&self, thing: &Node, b: Aabb, axis: int, at: real, keep_low: bool) -> &Node
+        val solid = if thing.hole then thing.with_transform(self.cut_transform(thing)).with_clearance(0.0).with_hole(false)
+                    else thing
+
+        // Past the thing's box on every side, by more than any clearance grows a hole.
+        val margin = MAX_CLEARANCE + 1.0
+        val reach = Aabb(b.min - Vec3(margin, margin, margin), b.max + Vec3(margin, margin, margin))
+        val cut = if keep_low then Aabb(reach.min.with_axis(axis, at), reach.max)
+                  else Aabb(reach.min, reach.max.with_axis(axis, at))
+        val kept = if keep_low then Aabb(b.min, b.max.with_axis(axis, at)) else Aabb(b.min.with_axis(axis, at), b.max)
+        val middle = kept.center()
+        val origin = Vec3(middle.x, middle.y, kept.min.z)
+        val t = solid.transform
+        val cutter_at = Vec3(cut.center().x, cut.center().y, cut.min.z) - origin
+        val cutter_scale = cut.size() * (1.0 / PALETTE_SIDE)
+        var parts: Buf[&Node] = buf()
+
+        parts.push(solid.with_transform(Transform(t.translation - origin, t.rotation, t.scale)))
+        parts.push(Node(self.next_id, Operation.Shape(Primitive.Box, ROUND_SEGMENTS, SHARP_EDGES, TUBE_WALL),
+                        Transform(cutter_at, Quaternion.identity(), cutter_scale), NO_MIRROR, thing.tint, true, 0.0,
+                        NO_SHELL, buf(), Derived(None, None), None, None))
+
+        val id = self.next_id + 1
+
+        self.next_id += 2
+
+        Node(id, Operation.Group(false), moved_to(origin), NO_MIRROR, thing.tint, thing.hole, 0.0, NO_SHELL, parts,
+             Derived(None, None), None, None)
+    end half
 
     // The command behind Duplicate: a copy of everything selected, a group with all of its parts, moved `step`
     // along x, and the copies selected in place of what they copy.
@@ -1274,7 +1517,8 @@ struct Document
 
         val same = t == node.transform
 
-        Node(id, node.operation, t, node.mirror, node.tint, node.hole, node.clearance, parts, node.derived_at(t),
+        Node(id, node.operation, t, node.mirror, node.tint, node.hole, node.clearance, node.shell, parts,
+             node.derived_at(t),
              if same then node.solid else None, if same then node.bounds else None)
     end fresh_copy
 
@@ -1482,30 +1726,46 @@ struct Document
 
         val made = node.operation match
             Shape(p, n, e, w) ->
-                if e.radius > 0.0 then edged_solid(p, n, e, self.cut_transform(node).scale) else primitive_solid(p, n, w)
-            Group ->
-                var solids: Buf[&Manifold] = buf()
+                if node.is_hollow
+                    hollow_shape(p, n, e, w, node.shell, self.cut_transform(node).scale)
+                elif e.radius > 0.0
+                    edged_solid(p, n, e, self.cut_transform(node).scale)
+                else
+                    primitive_solid(p, n, w)
+            Group(intersect) ->
                 var holes: Buf[&Manifold] = buf()
 
                 // A hole cuts only what it is grouped with, so one standing loose on the ground cuts nothing.
                 for child in node.children.view()
-                    if !child.hole
-                        solids.push(self.solid_of(child))
-                    elif node !== self.root
-                        holes.push(self.solid_of(child))
+                    if child.hole && node !== self.root then holes.push(self.solid_of(child))
 
-                if solids.len() == 0
-                    empty()
-                elif holes.len() == 0
-                    batch(solids.view(), Op.Add)
-                else
-                    batch(solids.view(), Op.Add).difference(batch(holes.view(), Op.Add))
+                val solids = self.solids_combined(node, intersect)
+                val combined = if holes.len() == 0 then solids else solids.difference(batch(holes.view(), Op.Add))
+
+                if node.is_hollow then hollowed(combined, node.shell, node.transform.scale) else combined
 
         val own = if node.mirror.any then mirrored(made, node.mirror) else made
 
         node.derived.local = Some(own)
         own
     end local_of
+
+    // A group's solid parts joined, or with `intersect` only what all of them share, before its holes cut.
+    //
+    // **Where the holes cut makes no difference to an intersection**: cutting each part before taking what they
+    // share leaves exactly what cutting what they share leaves, so the holes are cut once, after.
+    private solids_combined(&self, group: &Node, intersect: bool) -> &Manifold
+        var solids: Buf[&Manifold] = buf()
+
+        for child in group.children.view() do if !child.hole then solids.push(self.solid_of(child))
+
+        if solids.len() == 0 then empty() else batch(solids.view(), if intersect then Op.Intersect else Op.Add)
+    end solids_combined
+
+    // Why a group leaves nothing: an intersection whose solids share nothing, or holes that cut all of it away.
+    private emptied_why(&self, group: &Node) -> string =
+        if group.intersects && self.solids_combined(group, true).is_empty() then "These solids share nothing:\nan intersection of them is empty"
+        else "The holes would cut away\nall of the solid"
 
     // A node's solid in its parent's space, computed once until an edit clears it.
     solid_of(&self, node: &Node) -> &Manifold
@@ -1637,7 +1897,8 @@ new_document(next_revision: int = 1) -> &Document = restored_document(buf(), 1, 
 // **`next_revision` goes on from the document this one replaces**, because a renderer knows a mesh by its node's
 // id and its revision, and a new document's first shape has the id an old one's did.
 restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], next_revision: int) -> &Document
-    val root = Node(0, Operation.Group, identity_transform(), NO_MIRROR, 0, false, 0.0, items, Derived(None, None),
+    val root = Node(0, Operation.Group(false), identity_transform(), NO_MIRROR, 0, false, 0.0, NO_SHELL, items,
+                    Derived(None, None),
                     None, None)
 
     Document(root, buf(), last_placed, next_id, 0, next_revision, buf(), buf(), false, None, HISTORY_MESH_BYTES,
@@ -1647,12 +1908,14 @@ end restored_document
 // A shape as a file says it.
 restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool, segments: int = ROUND_SEGMENTS,
                mirror: Mirror = NO_MIRROR, clearance: real = 0.0, edges: Edges = SHARP_EDGES,
-               wall: real = TUBE_WALL) -> &Node =
-    Node(id, Operation.Shape(p, segments, edges, wall), t, mirror, tint, hole, clearance, buf(), Derived(None, None), None, None)
+               wall: real = TUBE_WALL, shell: Shell = NO_SHELL) -> &Node =
+    Node(id, Operation.Shape(p, segments, edges, wall), t, mirror, tint, hole, clearance, shell, buf(), Derived(None, None),
+         None, None)
 
 // A group as a file says it.
-restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node], mirror: Mirror = NO_MIRROR) -> &Node =
-    Node(id, Operation.Group, t, mirror, tint, hole, 0.0, parts, Derived(None, None), None, None)
+restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node], mirror: Mirror = NO_MIRROR,
+               intersect: bool = false, shell: Shell = NO_SHELL) -> &Node =
+    Node(id, Operation.Group(intersect), t, mirror, tint, hole, 0.0, shell, parts, Derived(None, None), None, None)
 
 // What makes a tree what it is, as text.
 private model_text(node: &Node) -> string = node.model()
@@ -1742,7 +2005,7 @@ primitive_solid(p: Primitive, segments: int = ROUND_SEGMENTS, wall: real = TUBE_
                               KernelVec3(10.0, 10.0, 0.0), KernelVec3(10.0, -10.0, 20.0), KernelVec3(10.0, 10.0, 20.0)])
         Pyramid -> hull_points([KernelVec3(-10.0, -10.0, 0.0), KernelVec3(10.0, -10.0, 0.0), KernelVec3(-10.0, 10.0, 0.0),
                                 KernelVec3(10.0, 10.0, 0.0), KernelVec3(0.0, 0.0, 20.0)])
-        Tube -> square(clamped_wall(wall), 20.0).translate(10.0 - clamped_wall(wall), 0.0).revolve(segments)
+        Tube -> square(clamped_tube_wall(wall), 20.0).translate(10.0 - clamped_tube_wall(wall), 0.0).revolve(segments)
         HalfSphere -> sphere(10.0, segments).trim_by_plane(0.0, 0.0, 1.0, 0.0)
         PolygonPrism -> cylinder(20.0, 10.0, 10.0, segments)
 
@@ -1778,6 +2041,132 @@ edged_solid(p: Primitive, segments: int, e: Edges, scale: Vec3) -> &Manifold
 
     built.scale(1.0 / scale.x, 1.0 / across_y, 1.0 / scale.z)
 end edged_solid
+
+// The thinnest and thickest wall a hollowed solid may have, in millimetres: from about two lines of a 0.2 mm nozzle
+// to far more than any shell needs.
+const MIN_WALL: real = 0.4
+const MAX_WALL: real = 20.0
+
+clamped_wall(w: real) -> real = MAX_WALL.min(w).max(MIN_WALL)
+
+// A shape hollowed into a shell, built at the size `scale` gives the palette's shape and brought back into the
+// palette's box, as `edged_solid` is, so that its walls are `shell.wall` millimetres thick however it is sized. A
+// shape whose cavity would be nothing stays solid. `wall` is a tube's own wall, which the shell is made inside.
+hollow_shape(p: Primitive, segments: int, e: Edges, wall: real, shell: Shell, scale: Vec3) -> &Manifold
+    val size = scale.times(Vec3(PALETTE_SIDE, PALETTE_SIDE, PALETTE_SIDE))
+    val outer = real_sized(p, segments, e, wall, size)
+    val cavity = if has_built_cavity(p) then shape_cavity(p, segments, e, shell, size) else eroded(outer, shell)
+    val made = cavity match
+        Some(c) -> outer.difference(c)
+        None -> outer
+
+    made.scale(1.0 / scale.x, 1.0 / scale.y, 1.0 / scale.z)
+end hollow_shape
+
+// Any solid hollowed into a shell, built at the size `scale` gives it, and brought back.
+hollowed(m: &Manifold, shell: Shell, scale: Vec3) -> &Manifold
+    val outer = m.scale(scale.x, scale.y, scale.z)
+
+    eroded(outer, shell) match
+        Some(c) -> outer.difference(c).scale(1.0 / scale.x, 1.0 / scale.y, 1.0 / scale.z)
+        None -> m
+end hollowed
+
+// Whether a shape's cavity is built exactly: a box's, cylinder's, sphere's or cone's. Every other shape, a torus,
+// wedge, pyramid, tube, half sphere or polygon prism, is eroded.
+has_built_cavity(p: Primitive) -> bool =
+    p == Primitive.Box || p == Primitive.Cylinder || p == Primitive.Sphere || p == Primitive.Cone
+
+// A palette shape at this size, edges finished, standing on the ground about the z axis.
+private real_sized(p: Primitive, segments: int, e: Edges, wall: real, size: Vec3) -> &Manifold
+    if e.radius > 0.0 && takes_edges(p)
+        val r = clamped_edge_radius(e.radius, size)
+
+        if p == Primitive.Box then return edged_box(size, r, e.chamfer, segments)
+
+        return edged_cylinder(size.x / 2.0, size.z, r, e.chamfer, segments).scale(1.0, size.y / size.x, 1.0)
+
+    primitive_solid(p, segments, wall).scale(size.x / PALETTE_SIDE, size.y / PALETTE_SIDE, size.z / PALETTE_SIDE)
+end real_sized
+
+// The cavity of a box, cylinder, sphere or cone of this size: the same shape moved in by the wall on every side, its
+// rounds and chamfers moved in with it, and carried up through its top where the shell is open; or nothing where the
+// wall leaves no room.
+//
+// **Built rather than eroded, because each is exact and immediate.** A box's faces, a cylinder's, sphere's or
+// cone's surfaces and a box's rounds each move in to the same kind of surface: a face to a face, a round of radius
+// `r` to one of `r - wall` (or a sharp edge, once the wall passes the radius), and a 45 degree chamfer to one set back
+// by `wall * (2 - sqrt 2)` less. A cone's slope moves in parallel to itself, so its apex drops. A shape stretched
+// out of round in plan keeps its wall exactly at the ends of each axis and moves in by the same distance along each
+// axis between them. A Minkowski erosion makes the same cavities, rounded where these are sharp, hundreds of times
+// more slowly.
+private shape_cavity(p: Primitive, segments: int, e: Edges, shell: Shell, size: Vec3) -> Option[&Manifold]
+    val w = shell.wall
+    val inner = Vec3(size.x - 2.0 * w, size.y - 2.0 * w, size.z - 2.0 * w)
+
+    if inner.x <= 0.0 || inner.y <= 0.0 || inner.z <= 0.0 then return None
+
+    val r = if e.radius > 0.0 && takes_edges(p) then clamped_edge_radius(e.radius, size) else 0.0
+    val moved_in = if e.chamfer then r - w * (2.0 - 2.0.sqrt()) else r - w
+    val r_in = clamped_edge_radius(moved_in, inner)
+    val cavity = p match
+        Box ->
+            if r_in > 0.0 then edged_box(inner, r_in, e.chamfer, segments).translate(0.0, 0.0, w)
+            else cube(inner.x, inner.y, inner.z, center = true).translate(0.0, 0.0, w + inner.z / 2.0)
+        Cylinder ->
+            if r_in > 0.0
+                edged_cylinder(inner.x / 2.0, inner.z, r_in, e.chamfer, segments).scale(1.0, inner.y / inner.x, 1.0)
+                    .translate(0.0, 0.0, w)
+            else
+                cylinder(inner.z, 1.0, 1.0, segments).scale(inner.x / 2.0, inner.y / 2.0, 1.0).translate(0.0, 0.0, w)
+        Sphere -> sphere(1.0, segments).scale(inner.x / 2.0, inner.y / 2.0, inner.z / 2.0).translate(0.0, 0.0, size.z / 2.0)
+        Cone -> cone_cavity(size, w, segments)?
+        _ -> return None
+
+    Some(if shell.open then batch_hull([cavity, cavity.translate(0.0, 0.0, size.z)]) else cavity)
+end shape_cavity
+
+// The cavity of a cone of this size: its base raised by the wall and its slope moved in by the wall, so its apex
+// drops. Out of round, each axis is moved in by its own slope and the lower apex is taken, which leaves the other
+// axis's wall no thinner.
+private cone_cavity(size: Vec3, w: real, segments: int) -> Option[&Manifold]
+    val h = size.z
+    var apex = h
+    var base: Buf[real] = buf()
+
+    for radius in [size.x / 2.0, size.y / 2.0]
+        val across = w * (radius * radius + h * h).sqrt() / h
+
+        base.push(radius * (1.0 - w / h) - across)
+        apex = apex.min(h * (1.0 - across / radius))
+
+    if base[0] <= 0.0 || base[1] <= 0.0 || apex <= w then return None
+
+    Some(cylinder(apex - w, 1.0, 0.0, segments).scale(base[0], base[1], 1.0).translate(0.0, 0.0, w))
+end cone_cavity
+
+// How many segments the ball an erosion rolls has: enough for a wall within a few hundredths of a millimetre of
+// round on the inside, and few enough for an erosion to take a second rather than a minute.
+const BALL_SEGMENTS: int = 16
+
+// The cavity of any solid: what is left of it after a ball of the wall's radius is rolled around inside its surface,
+// carried straight up through its top where the shell is open; or nothing where no room is left.
+//
+// **The ball is grown until its facets reach the wall's radius**, so the wall is nowhere thinner than asked; it is
+// thicker by at most the ball's facets, about 2% of the wall. Carrying a cavity up is a Minkowski sum with an upright
+// segment, which the kernel takes as a box a micrometre across.
+private eroded(m: &Manifold, shell: Shell) -> Option[&Manifold]
+    val ball = sphere(shell.wall / (real.pi() / real(BALL_SEGMENTS)).cos(), BALL_SEGMENTS)
+    val inner = m.minkowski_difference(ball)
+
+    if inner.is_empty() then return None
+    if !shell.open then return Some(inner)
+
+    val b = m.bounding_box()
+    val height = b.max().z - b.min().z
+
+    Some(inner.minkowski_sum(cube(0.001, 0.001, height).translate(-0.0005, -0.0005, 0.0)))
+end eroded
 
 // A box of these sides centred on the z axis and standing on the ground, every edge rounded or chamfered by `r`.
 private edged_box(size: Vec3, r: real, chamfer: bool, segments: int) -> &Manifold
@@ -1856,12 +2245,12 @@ clamped_sides(n: int) -> int = max(MIN_SIDES, min(MAX_SIDES, n))
 // How thick a tube's wall is when it is added, and the thinnest it may be, in millimetres at the palette's size.
 // The widest is what leaves a bore of at least `MIN_BORE` across its radius, so there is always a hole.
 const TUBE_WALL: real = 2.0
-const MIN_WALL: real = 0.2
+const MIN_TUBE_WALL: real = 0.2
 const MIN_BORE: real = 0.2
-const MAX_WALL: real = 10.0 - MIN_BORE
+const MAX_TUBE_WALL: real = 10.0 - MIN_BORE
 
 // A wall held to what a tube may have.
-clamped_wall(w: real) -> real = w.min(MAX_WALL).max(MIN_WALL)
+clamped_tube_wall(w: real) -> real = w.min(MAX_TUBE_WALL).max(MIN_TUBE_WALL)
 
 // The ring and tube radii of the palette's torus, in millimetres.
 const TORUS_RING: real = 7.0

@@ -97,7 +97,7 @@ a_tube_is_a_cylinder_with_a_coaxial_bore_through_it()
 
     assert(near(volume_of(doc, id), ring * 20.0, 1.0e-2), "a 2 mm wall, 20 mm tall")
 
-    doc.set_wall(id, 5.0).unwrap()
+    doc.set_tube_wall(id, 5.0).unwrap()
     assert(near(volume_of(doc, id), (regular_area(10.0, ROUND_SEGMENTS) - regular_area(5.0, ROUND_SEGMENTS)) * 20.0, 1.0e-2),
            "a thicker wall")
     assert(near(doc.bounds_of(doc.find(id).unwrap()).size().z, 20.0, 1.0e-9), "as tall as before")
@@ -157,9 +157,9 @@ only_a_polygon_prism_has_sides_and_only_a_tube_has_a_wall()
         val node = doc.find(id).unwrap()
 
         assert_eq(node.sides.is_some(), p == Primitive.PolygonPrism, s"${primitive_name(p)} sides")
-        assert_eq(node.wall.is_some(), p == Primitive.Tube, s"${primitive_name(p)} wall")
+        assert_eq(node.tube_wall.is_some(), p == Primitive.Tube, s"${primitive_name(p)} wall")
         assert_eq(doc.set_sides(id, 5).is_ok(), p == Primitive.PolygonPrism, s"${primitive_name(p)} set_sides")
-        assert_eq(doc.set_wall(id, 3.0).is_ok(), p == Primitive.Tube, s"${primitive_name(p)} set_wall")
+        assert_eq(doc.set_tube_wall(id, 3.0).is_ok(), p == Primitive.Tube, s"${primitive_name(p)} set_wall")
 
     assert(doc.set_sides(99, 5).is_err(), "nothing there")
 
@@ -181,35 +181,35 @@ a_polygon_prisms_sides_are_not_segments_and_a_wedge_has_none()
 a_tubes_wall_is_held_so_that_its_bore_stays_at_least_two_tenths_of_a_millimetre()
     val (doc, id) = fresh(Primitive.Tube)
 
-    assert_eq(doc.find(id).unwrap().wall, Some(2.0), "two millimetres to begin with")
+    assert_eq(doc.find(id).unwrap().tube_wall, Some(2.0), "two millimetres to begin with")
 
     for (asked, kept) in [(50.0, 9.8), (10.0, 9.8), (0.0, 0.2), (-3.0, 0.2), (4.5, 4.5)]
-        doc.set_wall(id, asked).unwrap()
-        assert(near(doc.find(id).unwrap().wall.unwrap(), kept, 1.0e-12), s"set ${asked}")
+        doc.set_tube_wall(id, asked).unwrap()
+        assert(near(doc.find(id).unwrap().tube_wall.unwrap(), kept, 1.0e-12), s"set ${asked}")
 
-    doc.set_wall(id, 1000.0).unwrap()
+    doc.set_tube_wall(id, 1000.0).unwrap()
 
     val solid = doc.solid_of(doc.find(id).unwrap())
 
     assert(solid.status() == Status.NoError, "still a valid solid")
     assert(near(volume_of(doc, id), (regular_area(10.0, ROUND_SEGMENTS) - regular_area(0.2, ROUND_SEGMENTS)) * 20.0, 1.0e-2),
            "with a bore of 0.2 mm radius")
-    assert(doc.set_wall(id, 0.0 / 0.0).is_err(), "not a number is refused")
+    assert(doc.set_tube_wall(id, 0.0 / 0.0).is_err(), "not a number is refused")
 
 @test
 a_wall_is_one_step_and_a_wall_that_changes_nothing_is_none()
     val (doc, id) = fresh(Primitive.Tube)
     val steps = doc.undos.len()
 
-    doc.set_wall(id, 3.0).unwrap()
+    doc.set_tube_wall(id, 3.0).unwrap()
     assert_eq(doc.undos.len(), steps + 1, "one step")
-    doc.set_wall(id, 3.0).unwrap()
-    doc.set_wall(id, 3000.0).unwrap()
+    doc.set_tube_wall(id, 3.0).unwrap()
+    doc.set_tube_wall(id, 3000.0).unwrap()
     assert_eq(doc.undos.len(), steps + 2, "none for the same number, one for the next")
     assert(doc.undo(), "undone")
-    assert_eq(doc.find(id).unwrap().wall, Some(3.0), "to the step before")
+    assert_eq(doc.find(id).unwrap().tube_wall, Some(3.0), "to the step before")
     assert(doc.undo(), "and again")
-    assert_eq(doc.find(id).unwrap().wall, Some(2.0), "to the default")
+    assert_eq(doc.find(id).unwrap().tube_wall, Some(2.0), "to the default")
 
 @test
 a_tubes_wall_scales_with_the_shape_like_every_palette_number()

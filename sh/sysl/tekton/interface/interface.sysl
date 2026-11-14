@@ -5,7 +5,7 @@ import sh.sysl.tekton.camera.{Camera, NamedView, new_camera}
 import sh.sysl.tekton.cube.view_cube
 import sh.sysl.sdl3.{DialogResult, FileFilter, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
                      ask_save_file, message_button}
-import sh.sysl.tekton.document.{Document, Edge, Node, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_key, primitive_name}
+import sh.sysl.tekton.document.{Document, Edge, MAX_WALL, MIN_WALL, Node, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_key, primitive_name}
 import sh.sysl.tekton.export.{export_3mf, export_stl}
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, Stroke, drag_body, drag_grip, layout}
@@ -63,6 +63,10 @@ const ARRAY_COUNT_ID: int = 120
 const ARRAY_SPACING_ID: int = 121
 const ARRAY_ANGLE_ID: int = 122
 
+// The keyboard id of the hollow panel's wall field, and the choices of its top.
+const HOLLOW_WALL_ID: int = 123
+val HOLLOW_TOPS = ["Closed", "Open top"]
+
 // What the question about unsaved changes answers for each of its buttons, and the line under its title.
 const SAVE_ANSWER: i32 = 1
 const DISCARD_ANSWER: i32 = 2
@@ -109,6 +113,7 @@ enum Quantity
     Clearance
     EdgeRadius
     Sides
+    TubeWall
     Wall
 
 // A click selected or cleared the selection, or the palette added a shape. What a document's panel
@@ -204,10 +209,16 @@ struct Workspace
     pastes: int
     box: Option[(real, real, real, real)]
 
+    // Whether the hollow panel is up, what is typed into its wall field, and which of `HOLLOW_TOPS` it has chosen.
+    hollow_open: &Signal[bool]
+    hollow_wall: &Signal[string]
+    hollow_top: &Signal[int]
+
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
     // Whether something is over the viewport that the pointer belongs to instead.
-    private covered(&self) -> bool = self.open_menu.read() != NO_MENU || self.in_dialog.read() || self.array_open.read()
+    private covered(&self) -> bool =
+        self.open_menu.read() != NO_MENU || self.in_dialog.read() || self.array_open.read() || self.hollow_open.read()
 
     // Ask first if this would lose anything, and otherwise do it. A drag or an open dialog finishes first.
     private guarded(&self, intent: Intent)
@@ -430,6 +441,61 @@ struct Workspace
 
     group(&self) = if !self.is_editing() then self.answer(self.doc.group_selected().map(id -> ()))
 
+    // Groups the selection as an intersection: only what all of its solids share.
+    intersect(&self) = if !self.is_editing() then self.answer(self.doc.group_selected(intersect = true).map(id -> ()))
+
+    // Whether the selected group joins its solids or keeps only what they share.
+    set_group_mode(&self, intersect: bool)
+        if self.is_editing() then return
+
+        self.answer(self.doc.selected.ok_or("Nothing is selected").and_then(id -> self.doc.set_group_mode(id, intersect)))
+
+    // Whether the selected hollow solid is open at its top.
+    set_open_top(&self, open: bool)
+        if self.is_editing() then return
+
+        self.answer(self.doc.selected.ok_or("Nothing is selected").and_then(id -> self.doc.set_open_top(id, open)))
+
+    split(&self, axis: int) = if !self.is_editing() then self.answer(self.doc.split_selected(axis))
+
+    // Put up the hollow panel over everything, with nothing typing anywhere else.
+    open_hollow(&self)
+        if self.is_editing() then return
+
+        self.open_menu.set(NO_MENU)
+
+        if !self.doc.can_hollow() then return self.answer(Err("Only a solid can be hollowed"))
+
+        self.release_keyboard = true
+        self.problem.set("")
+        self.hollow_open.set(true)
+        self.changed()
+    end open_hollow
+
+    // Take the hollow panel down and leave the document as it was.
+    cancel_hollow(&self)
+        self.release_keyboard = true
+        self.problem.set("")
+        self.hollow_open.set(false)
+        self.changed()
+    end cancel_hollow
+
+    // The hollow panel's OK: each selected solid made a shell. A wall that is no number, or one the document
+    // refuses, keeps the panel up and says why.
+    accept_hollow(&self)
+        val typed = self.hollow_wall.read()
+        val made = parse_real(typed).map_err(e -> s"\"${typed}\" is not a number")
+            .and_then(wall -> self.doc.hollow_selected(wall, self.hollow_top.read() == 1))
+
+        made match
+            Ok(_) ->
+                self.release_keyboard = true
+                self.hollow_open.set(false)
+            Err(_) -> ()
+
+        self.answer(made)
+    end accept_hollow
+
     ungroup(&self) = if !self.is_editing() then self.answer(self.doc.ungroup_selected())
 
     delete(&self) = if !self.is_editing() then self.answer(self.doc.delete_selected())
@@ -631,8 +697,8 @@ struct Workspace
 
         if (mods & KMOD_GUI) == 0u16 || self.typing then return false
 
-        // The array panel is answered before anything else is asked for.
-        if self.array_open.read() then return true
+        // The array and hollow panels are answered before anything else is asked for.
+        if self.array_open.read() || self.hollow_open.read() then return true
 
         if code == u32(u8('n')) || code == u32(u8('o')) || code == u32(u8('s'))
             if !repeat
@@ -655,6 +721,11 @@ struct Workspace
         if code == u32(u8('g'))
             if !repeat
                 if shift then self.ungroup() else self.group()
+
+            return true
+
+        if code == u32(u8('i')) && shift
+            if !repeat then self.intersect()
 
             return true
 
@@ -841,6 +912,11 @@ struct Workspace
                     if p.key == Key.Enter then self.accept_array()
                     if p.key == Key.Escape then self.cancel_array()
 
+            if self.hollow_open.read()
+                for p in c.keys()
+                    if p.key == Key.Enter then self.accept_hollow()
+                    if p.key == Key.Escape then self.cancel_hollow()
+
             self.lay_out(real(r.w), real(r.h))
 
             return
@@ -952,6 +1028,7 @@ struct Workspace
         column([menu_bar(menus.view(), self.open_menu).restyle(t -> light()),
                 row([self.panel(), self.dimensioned().flex()]).flex()], 0)
             .modal(self.array_open, self.array_panel())
+            .modal(self.hollow_open, self.hollow_panel())
             .modal(self.in_dialog, spacer().frame(0, 0))
     end tree
 
@@ -985,6 +1062,25 @@ struct Workspace
         column(parts.view(), 6).padding(16).background(0xFFFFFFu32, 8).border(0xCBD2DCu32, 1, 8).restyle(t -> light())
     end array_panel
 
+    // The hollow panel: how thick the walls are, closed or open at the top, and OK or Cancel.
+    private hollow_panel(&self) -> &View
+        var parts: Buf[&View] = buf()
+
+        parts.push(text("Hollow").font_size(16.0))
+        parts.push(text(s"Wall, mm (${MIN_WALL} to ${MAX_WALL.round()})").font_size(11.0))
+        parts.push(text_field(self.hollow_wall, HOLLOW_WALL_ID, NUMBER_WIDTH).font_size(11.0).named("hollow.wall"))
+
+        for i in 0..<HOLLOW_TOPS.len do parts.push(radio(self.hollow_top, int(i), HOLLOW_TOPS[i]).named(s"hollow.top.${i}"))
+
+        for line in split(wrapped(self.problem.read(), PROBLEM_ROOM), "\n")
+            if line != "" then parts.push(text(line).font_size(11.0).foreground(WRONG_INK))
+
+        parts.push(row([button("Cancel", () -> self.cancel_hollow(), Role.Primary, Variant.Soft).named("hollow.cancel").flex(),
+                        button("OK", () -> self.accept_hollow(), Role.Primary, Variant.Filled).named("hollow.ok").flex()], 6))
+
+        column(parts.view(), 6).padding(16).background(0xFFFFFFu32, 8).border(0xCBD2DCu32, 1, 8).restyle(t -> light())
+    end hollow_panel
+
     // The menus, each row live only where its command would do something now.
     private menus(&self) -> Buf[Menu]
         val doc = self.doc
@@ -1012,6 +1108,7 @@ struct Workspace
                                separator(),
                                item("Group", () -> self.group(), "Cmd+G", enabled = doc.can_group()),
                                item("Ungroup", () -> self.ungroup(), "Cmd+Shift+G", enabled = doc.can_ungroup()),
+                               item("Intersect", () -> self.intersect(), "Cmd+Shift+I", enabled = doc.can_group()),
                                separator(),
                                item("Solid", () -> self.set_hole(false), enabled = doc.can_set_hole(false)),
                                item("Hole", () -> self.set_hole(true), enabled = doc.can_set_hole(true))]))
@@ -1031,7 +1128,12 @@ struct Workspace
                                   separator(),
                                   item("Drop to Bed", () -> self.drop_to_bed(), "Cmd+B", enabled = doc.can_arrange),
                                   separator(),
-                                  item("Array…", () -> self.open_array(), enabled = doc.can_arrange)]))
+                                  item("Array…", () -> self.open_array(), enabled = doc.can_arrange),
+                                  item("Hollow…", () -> self.open_hollow(), enabled = doc.can_hollow()),
+                                  separator(),
+                                  item("Split X", () -> self.split(0), enabled = doc.can_arrange),
+                                  item("Split Y", () -> self.split(1), enabled = doc.can_arrange),
+                                  item("Split Z", () -> self.split(2), enabled = doc.can_arrange)]))
         all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0),
                                separator(),
                                item("Home", () -> self.look_from(NamedView.Home), "Cmd+0"),
@@ -1098,7 +1200,7 @@ struct Workspace
              spacer().frame(1, 0).background(0xCBD2DCu32)])
     end panel
 
-    // The nine number fields, the segments field, the clearance field and the edge radius field, made once,
+    // The nine number fields, the segments, clearance, edge radius, sides, tube wall and shell wall fields, made once,
     // because each remembers what is being typed in it.
     number_fields(&self) -> []const &NumberField
         if self.fields.len() == 0
@@ -1108,7 +1210,8 @@ struct Workspace
 
                     self.fields.push(new_number_field(self, q, axis, id))
 
-            for q in [Quantity.Segments, Quantity.Clearance, Quantity.EdgeRadius, Quantity.Sides, Quantity.Wall]
+            for q in [Quantity.Segments, Quantity.Clearance, Quantity.EdgeRadius, Quantity.Sides, Quantity.TubeWall,
+                      Quantity.Wall]
                 self.fields.push(new_number_field(self, q, 0, FIRST_FIELD_ID + int(self.fields.len())))
 
         self.fields.view()
@@ -1142,6 +1245,20 @@ struct Workspace
              button("Chamfer", () -> self.set_edge_chamfer(true), Role.Primary,
                     if chamfer then Variant.Filled else Variant.Outline).named("panel.edge.chamfer").flex()], 6)
 
+    // Whether a group joins its solids or keeps only what they share: filled, and the other quiet.
+    private union_or_intersect(&self, intersect: bool) -> &View =
+        row([button("Union", () -> self.set_group_mode(false), Role.Primary,
+                    if intersect then Variant.Outline else Variant.Filled).named("panel.union").flex(),
+             button("Intersect", () -> self.set_group_mode(true), Role.Primary,
+                    if intersect then Variant.Filled else Variant.Outline).named("panel.intersect").flex()], 6)
+
+    // Whether a hollow solid is closed or open at its top: filled, and the other quiet.
+    private closed_or_open(&self, open: bool) -> &View =
+        row([button("Closed", () -> self.set_open_top(false), Role.Primary,
+                    if open then Variant.Outline else Variant.Filled).named("panel.closed").flex(),
+             button("Open top", () -> self.set_open_top(true), Role.Primary,
+                    if open then Variant.Filled else Variant.Outline).named("panel.open_top").flex()], 6)
+
     private selection_panel(&self) -> &View
         val count = self.doc.selection.len()
 
@@ -1153,7 +1270,7 @@ struct Workspace
             Some(node) ->
                 val name = node.operation match
                     Shape(p, _, _, _) -> primitive_name(p)
-                    Group -> "Group"
+                    Group(i) -> if i then "Intersection" else "Group"
                 val fields = self.number_fields()
 
                 parts.push(text(name).font_size(16.0))
@@ -1171,9 +1288,9 @@ struct Workspace
                     parts.push(text("Sides").font_size(11.0))
                     parts.push(row([fields[12].view().named("panel.sides")], 3))
 
-                if node.wall.is_some()
-                    parts.push(text("Wall, mm").font_size(11.0))
-                    parts.push(row([fields[13].view().named("panel.wall")], 3))
+                if node.tube_wall.is_some()
+                    parts.push(text("Tube wall, mm").font_size(11.0))
+                    parts.push(row([fields[13].view().named("panel.tube_wall")], 3))
 
                 if node.hole && node.takes_clearance
                     parts.push(text("Clearance, mm").font_size(11.0))
@@ -1186,6 +1303,13 @@ struct Workspace
                         parts.push(text("Edge").font_size(11.0))
                         parts.push(self.round_or_chamfer(e.chamfer))
                     None -> ()
+
+                if node.is_group then parts.push(self.union_or_intersect(node.intersects))
+
+                if node.is_hollow
+                    parts.push(text("Shell wall, mm").font_size(11.0))
+                    parts.push(row([fields[14].view().named("panel.wall")], 3))
+                    parts.push(self.closed_or_open(node.shell.open))
 
                 if node.is_group
                     parts.push(row([self.small_button("Ungroup", () -> self.ungroup(), "panel.ungroup", true).flex(),
@@ -1213,7 +1337,8 @@ struct Workspace
             Clearance -> node.clearance
             EdgeRadius -> node.edges?.radius
             Sides -> real(node.sides?)
-            Wall -> node.wall?)
+            TubeWall -> node.tube_wall?
+            Wall -> node.shell.wall)
     end number
 
     // The command behind a number typed into a field.
@@ -1235,9 +1360,10 @@ struct Workspace
                     Err("Sides must be a whole number")
                 else
                     self.doc.set_sides(id, int(value.clamp(-1.0e6, 1.0e6)))
-            Wall -> self.doc.set_wall(id, value)
+            TubeWall -> self.doc.set_tube_wall(id, value)
             Clearance -> self.doc.set_clearance(id, value)
             EdgeRadius -> self.doc.set_edge_radius(id, value)
+            Wall -> self.doc.set_wall(id, value)
             Rotation ->
                 if !value.is_finite()
                     Err("Rotation must be a number of degrees")
@@ -1567,4 +1693,5 @@ new_workspace() -> &Workspace =
               (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"),
               (answer, parent) -> ask_save_file(answer, parent, three_mf_filters().view(), title = "Export 3MF"), false,
               () -> window(), title -> set_title(title), "", false, CORE_ONE, true, signal(false), signal(0), signal("3"),
-              signal("25"), signal("90"), true, Measures(buf(), buf()), buf(), 0, None)
+              signal("25"), signal("90"), true, Measures(buf(), buf()), buf(), 0, None, signal(false), signal("2"),
+              signal(0))

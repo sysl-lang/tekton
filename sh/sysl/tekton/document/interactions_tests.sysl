@@ -1,0 +1,139 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.manifold.Status
+import sh.sysl.tekton.space.Vec3
+import sysl.math.pi
+
+// The wedge, pyramid, tube, half sphere and polygon prism meeting Split and Hollow.
+
+private close(a: real, b: real, tolerance: real) -> bool = (a - b).abs() <= tolerance
+
+private volume(doc: &Document, id: int) -> real = doc.solid_of(doc.find(id).unwrap()).volume()
+
+// The area of a regular hexagon whose sides are this far from its middle.
+private hexagon(apothem: real) -> real = 2.0 * 3.0.sqrt() * apothem * apothem
+
+private val NEW_SHAPES = [Primitive.Wedge, Primitive.Pyramid, Primitive.Tube, Primitive.HalfSphere, Primitive.PolygonPrism]
+
+// One shape of this kind at the origin, alone and selected.
+private alone(p: Primitive) -> (&Document, int)
+    val doc = new_document()
+    val id = doc.add_shape(p)
+
+    doc.set_transform(id, moved_to(Vec3(0.0, 0.0, 0.0)))
+    (doc, id)
+end alone
+
+@test
+split_halves_each_new_shape_without_loss_along_every_axis()
+    for p in NEW_SHAPES
+        for axis in 0..<3
+            val (doc, _) = alone(p)
+            val whole = doc.final_solid().unwrap().volume()
+
+            doc.split_selected(axis).unwrap()
+            assert_eq(doc.items().len, 2, s"${primitive_name(p)} ${axis}: two halves")
+
+            val a = volume(doc, doc.selection[0])
+            val b = volume(doc, doc.selection[1])
+
+            assert(a > 0.0 && b > 0.0, s"${primitive_name(p)} ${axis}: neither half is empty")
+            assert(close(a + b, whole, whole * 1.0e-6), s"${primitive_name(p)} ${axis}: nothing lost, ${a} + ${b} of ${whole}")
+
+            // Every one of them is mirror-symmetric across the plane through its middle along y.
+            if axis == 1 then assert(close(a, b, whole * 1.0e-6), s"${primitive_name(p)}: equal halves across y")
+
+            assert(doc.undo(), "one step")
+            assert_eq(doc.items().len, 1, "whole again")
+
+@test
+hollow_erodes_each_new_shape_inside_its_own_outline()
+    for p in NEW_SHAPES
+        val (doc, id) = alone(p)
+
+        doc.resize_to(id, Vec3(40.0, 40.0, 40.0)).unwrap()
+
+        val solid = volume(doc, id)
+        val outline = doc.bounds_of(doc.find(id).unwrap())
+
+        doc.hollow_selected(1.0, false).unwrap()
+
+        val node = doc.find(id).unwrap()
+        val shell = volume(doc, id)
+
+        assert(node.is_hollow, s"${primitive_name(p)} is hollow")
+        assert(doc.solid_of(node).status() == Status.NoError, s"${primitive_name(p)}: a valid solid")
+        assert(shell > 0.0 && shell < solid * 0.9, s"${primitive_name(p)}: ${shell} of ${solid} left")
+
+        val b = doc.bounds_of(node)
+
+        assert(close(b.min.x, outline.min.x, 1.0e-6) && close(b.max.z, outline.max.z, 1.0e-6), s"${primitive_name(p)}: the same outline")
+
+@test
+a_hollow_polygon_prism_loses_its_prism_moved_in_by_the_wall()
+    val (doc, id) = alone(Primitive.PolygonPrism)
+
+    // Six sides about a 20 mm radius, 40 mm tall: apothem 20 cos 30.
+    doc.resize_to(id, Vec3(40.0, 40.0 * (pi / 6.0).cos(), 40.0)).unwrap()
+    doc.hollow_selected(2.0, false).unwrap()
+
+    val apothem = 20.0 * (pi / 6.0).cos()
+    val want = hexagon(apothem) * 40.0 - hexagon(apothem - 2.0) * 36.0
+
+    assert(close(volume(doc, id), want, want * 0.03), s"${volume(doc, id)} against ${want}")
+    assert(volume(doc, id) >= want - 1.0e-6, "the wall nowhere thinner than asked")
+
+@test
+a_hollow_tube_keeps_its_own_wall_and_its_shell_apart()
+    val (doc, id) = alone(Primitive.Tube)
+
+    doc.resize_to(id, Vec3(40.0, 40.0, 40.0)).unwrap()
+
+    val solid = volume(doc, id)
+
+    doc.hollow_selected(1.0, false).unwrap()
+
+    val shelled = volume(doc, id)
+    val node = doc.find(id).unwrap()
+
+    assert_eq(node.tube_wall, Some(TUBE_WALL), "the tube's own wall")
+    assert(node.shell == Shell(1.0, false), "and the shell's")
+    assert(shelled < solid, "the shell is inside the tube's wall")
+
+    // Another tube wall keeps the shell and builds it again inside the new wall.
+    doc.set_tube_wall(id, 4.0).unwrap()
+    assert(doc.find(id).unwrap().shell == Shell(1.0, false), "the shell is kept")
+    assert(!close(volume(doc, id), shelled, 1.0), "and built again")
+    assert(doc.undo(), "one step")
+    assert(close(volume(doc, id), shelled, 1.0e-6), "and back")
+
+    // The shell's wall is set apart from the tube's.
+    doc.set_wall(id, 0.0).unwrap()
+    assert_eq(doc.find(id).unwrap().tube_wall, Some(TUBE_WALL), "solid again, its tube wall untouched")
+    assert(close(volume(doc, id), solid, 1.0e-6), "and as solid as it was")
+
+@test
+a_shell_too_thick_for_a_thin_tubes_wall_is_refused()
+    val (doc, id) = alone(Primitive.Tube)
+
+    doc.set_tube_wall(id, 0.5).unwrap()
+
+    val steps = doc.undos.len()
+
+    assert(doc.hollow_selected(0.4, false).is_err(), "no room inside a half millimetre wall")
+    assert_eq(doc.undos.len(), steps, "and nothing done")
+    assert(!doc.find(id).unwrap().is_hollow, "still solid")
+
+@test
+an_open_hollow_wedge_and_half_sphere_are_open_at_their_own_top()
+    for p in [Primitive.Wedge, Primitive.HalfSphere]
+        val (doc, id) = alone(p)
+
+        doc.resize_to(id, Vec3(40.0, 40.0, 40.0)).unwrap()
+        doc.hollow_selected(1.0, false).unwrap()
+
+        val closed = volume(doc, id)
+
+        doc.set_open_top(id, true).unwrap()
+        assert(volume(doc, id) < closed, s"${primitive_name(p)}: the opening takes its top away")

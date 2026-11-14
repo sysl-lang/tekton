@@ -1,0 +1,181 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.sdl3.{KEY_RIGHT, KMOD_GUI}
+import sh.sysl.tekton.cube.view_cube
+import sh.sysl.tekton.document.{Node, Primitive, Shell, Transform, moved_to}
+import sh.sysl.tekton.handles.layout
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+
+// The clipboard, the arrow keys, the selection rectangle and the view cube meeting the new shapes, intersections
+// and shells.
+
+private const CMD: u16 = KMOD_GUI
+private const KEY_C: u32 = 99
+private const KEY_V: u32 = 118
+private val AT: Rect = Rect(0, 0, 900, 600)
+private val SCREEN: Rect = Rect(0, 0, 1280, 800)
+
+private shows(w: &Workspace, c: *Recorder, name: string) -> bool
+    val v = w.tree()
+
+    render(v, c, SCREEN)
+    snapshot(v, c, SCREEN).find(name).is_ok()
+end shows
+
+private volume(w: &Workspace, id: int) -> real = w.doc.solid_of(w.doc.find(id).unwrap()).volume()
+
+// Copy what is selected and paste it once: the pasted thing, which is the selection.
+private copied_and_pasted(w: &Workspace) -> &Node
+    assert(w.shortcut(KEY_C, CMD, false), "copy")
+    assert(w.shortcut(KEY_V, CMD, false), "paste")
+    assert_eq(w.doc.selection.len(), 1, "one thing pasted")
+    w.doc.find(w.doc.selection[0]).unwrap()
+end copied_and_pasted
+
+// Whether two nodes compute alike: the same shape with the same sides, edges and tube wall, or groups of one mode.
+private same_operation(a: &Node, b: &Node) -> bool
+    a.operation match
+        Shape(p, n, e, w) ->
+            b.operation match
+                Shape(q, m, f, x) -> p == q && n == m && e == f && w == x
+                Group(_) -> false
+        Group(i) ->
+            b.operation match
+                Shape(_, _, _, _) -> false
+                Group(j) -> i == j
+end same_operation
+
+// Everything a node is but where it stands and what it is called.
+private assert_alike(a: &Node, b: &Node)
+    assert(a.id != b.id, "a new id")
+    assert(same_operation(a, b), "the same kind, sides, edges and tube wall, or the same group mode")
+    assert(a.shell == b.shell, "the same shell")
+    assert(a.mirror == b.mirror, "the same mirror")
+    assert_eq(a.hole, b.hole, "solid or hole alike")
+    assert_eq(a.clearance, b.clearance, "the same clearance")
+    assert(a.transform.rotation == b.transform.rotation && a.transform.scale == b.transform.scale, "turned and sized alike")
+    assert_eq(a.children.len(), b.children.len(), "as many parts")
+
+    for i in 0..<a.children.len()
+        val (p, q) = (a.children[i], b.children[i])
+
+        assert(same_operation(p, q) && p.shell == q.shell && p.hole == q.hole, s"part ${i} alike")
+        assert(p.transform == q.transform, s"part ${i} placed alike in its group")
+end assert_alike
+
+@test
+a_pasted_tube_keeps_its_wall_its_segments_its_shell_and_its_mirror()
+    val w = new_workspace()
+    val tube = w.doc.add_shape(Primitive.Tube)
+
+    w.doc.set_transform(tube, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(2.0, 1.5, 2.0)))
+    w.doc.set_tube_wall(tube, 3.5).unwrap()
+    w.doc.set_segments(tube, 24).unwrap()
+    w.doc.select(Some(tube))
+    w.doc.mirror_selected(0).unwrap()
+    w.doc.hollow_selected(0.8, true).unwrap()
+
+    val pasted = copied_and_pasted(w)
+
+    assert_alike(w.doc.find(tube).unwrap(), pasted)
+    assert_eq(pasted.tube_wall, Some(3.5), "the tube's wall")
+    assert_eq(pasted.segments, Some(24), "its segments")
+    assert(pasted.shell == Shell(0.8, true), "its open shell")
+    assert((volume(w, pasted.id) - volume(w, tube)).abs() < 1.0e-6, "the same solid")
+
+@test
+a_pasted_hollow_intersection_keeps_its_mode_its_shell_and_its_parts()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.PolygonPrism)
+
+    w.doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    w.doc.set_transform(b, moved_to(Vec3(5.0, 0.0, 0.0)))
+    w.doc.set_sides(b, 8).unwrap()
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+
+    val group = w.doc.group_selected(intersect = true).unwrap()
+
+    w.doc.hollow_selected(1.0, false).unwrap()
+
+    val pasted = copied_and_pasted(w)
+
+    assert(pasted.intersects, "still an intersection")
+    assert(pasted.shell == Shell(1.0, false), "still hollow")
+    assert_alike(w.doc.find(group).unwrap(), pasted)
+    assert((volume(w, pasted.id) - volume(w, group)).abs() < 1.0e-6, "the same solid")
+    assert(w.doc.problem().is_none(), "a document that saves")
+
+@test
+an_arrow_moves_a_hollow_thing_and_leaves_its_shell_as_it_was()
+    val w = new_workspace()
+    val id = w.doc.add_shape(Primitive.Wedge)
+
+    w.doc.set_transform(id, moved_to(Vec3(0.0, 0.0, 0.0)))
+    w.doc.hollow_selected(1.0, false).unwrap()
+
+    val before = volume(w, id)
+    val steps = w.doc.undos.len()
+
+    assert(w.shortcut(KEY_RIGHT, 0u16, false), "the arrow is taken")
+
+    val node = w.doc.find(id).unwrap()
+
+    assert(node.transform.translation == Vec3(w.grid, 0.0, 0.0), "a grid step along")
+    assert(node.shell == Shell(1.0, false), "the shell kept")
+    assert((volume(w, id) - before).abs() < 1.0e-6, "the same solid")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+
+@test
+a_hollow_tube_shows_its_tube_wall_and_its_shell_wall_as_two_fields()
+    val w = new_workspace()
+    var c = recorder()
+    val tube = w.doc.add_shape(Primitive.Tube)
+
+    assert(shows(w, &c, "panel.tube_wall") && !shows(w, &c, "panel.wall"), "a solid tube has only its own wall")
+    w.doc.hollow_selected(0.4, false).unwrap()
+    assert(shows(w, &c, "panel.tube_wall") && shows(w, &c, "panel.wall"), "a hollow one has both")
+    assert(w.number_fields()[13].quantity == Quantity.TubeWall && w.number_fields()[14].quantity == Quantity.Wall,
+           "each field its own quantity")
+
+    w.doc.select(Some(w.doc.add_shape(Primitive.Box)))
+    w.doc.hollow_selected(1.0, false).unwrap()
+    assert(!shows(w, &c, "panel.tube_wall") && shows(w, &c, "panel.wall"), "a hollow box has only the shell's")
+    assert_eq(w.doc.find(tube).unwrap().tube_wall, Some(2.0), "the tube is untouched")
+
+@test
+the_view_cube_is_drawn_while_a_selection_rectangle_is_dragged()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.doc.add_shape(Primitive.Box)
+    w.doc.select(None)
+    render(w.viewport(), &c, AT)
+
+    val cube = view_cube(w.camera, 900.0, 600.0).strokes.len()
+
+    assert(cube > 0, "the cube has strokes")
+    assert_eq(w.overlay.strokes.len(), layout(w.doc, w.camera, 900.0, 600.0).strokes.len() + cube, "the cube with nothing selected")
+
+    c.chord.keys = Modifiers(true, false, false, false)
+    c.point(5, 590, true)
+    render(w.viewport(), &c, AT)
+    c.point(200, 400, true)
+    render(w.viewport(), &c, AT)
+
+    val (ax, ay, bx, by) = w.box.unwrap()
+
+    assert_eq(w.overlay.strokes.len(),
+              layout(w.doc, w.camera, 900.0, 600.0).strokes.len() + cube + box_strokes(ax, ay, bx, by).len(),
+              "the cube and the rectangle both")
+
+    c.release(200, 400)
+    render(w.viewport(), &c, AT)
+    c.chord.keys = no_modifiers()
+    render(w.viewport(), &c, AT)
+    assert(w.box.is_none(), "the rectangle is gone")
+    assert_eq(w.overlay.strokes.len(), layout(w.doc, w.camera, 900.0, 600.0).strokes.len() + cube, "and the cube stays")

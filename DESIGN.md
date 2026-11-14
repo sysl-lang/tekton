@@ -20,7 +20,7 @@ panel for the selection. Undo reaches everything. There are no modes: no edit mo
 vertex editing.
 
 The bar holds File, Edit and View. File has New, Open, Save, Save As, Export STL… and Quit, with Cmd+N, Cmd+O,
-Cmd+S and Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All, the named
+Cmd+S and Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Intersect, Solid and Hole. View has Frame All, the named
 views Home, Top, Front, Right, Back and Left (Cmd+0 to Cmd+5, each turning there over a quarter second and
 keeping the target and distance), Orthographic (Cmd+P, keeping the scale at the target) and the Build Volume and
 Dimensions settings. A view cube in the viewport's top-right corner shows the orientation: a click on a face goes
@@ -43,7 +43,7 @@ group a hole cuts at any depth, grown by its clearance.
 
 ## Files
 
-A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 2`, the format
+A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 2` (or `3` when it holds an intersection or a hollow shell), the format
 version, read by itself before anything else, so a newer format is told "too new" whatever else it holds. It
 holds the tree, `next` (the id the next node gets) and `last` (what the next shape is placed beside). Meshes are
 derived, and the selection and the history belong to a session. Every number is written as the shortest text
@@ -134,9 +134,11 @@ Everything runs without a window, so a test or an agent can use the application 
   - `GET /tekton/state` answers one line of JSON: `items` (the document's tree: each node's `id`, `kind`,
     `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, for a round shape
     its `segments`, for one with a hole clearance its `clearance`, for a box or cylinder with finished edges its
-    `edge_radius` and (chamfered) `edge_style`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
-    `fov`, `projection` as `perspective` or `orthographic`, and `view`: the named view it is at or turning to, or
-    `custom`), `file` (the path, or `null`) and `dirty`. A number JSON cannot spell is `null`.
+    `edge_radius` and (chamfered) `edge_style`, for a polygon prism its `sides`, for a tube its `tube_wall`, for an
+    intersection `mode`, for a hollow node `wall` and `open_top`, and for a group its `children`), `selection` (ids,
+    in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`, `fov`, `projection` as `perspective` or
+    `orthographic`, and `view`: the named view it is at or turning to, or `custom`), `file` (the path, or `null`) and
+    `dirty`. A number JSON cannot spell is `null`.
   - `POST /tekton/quit` quits at once, asking nothing about unsaved changes, so a session nobody can answer
     can be ended; the answer is sent, and the program exits on the next frame. A `GET` of it is refused.
     The window's own close still asks.
@@ -209,10 +211,24 @@ their own tests, so most changes never need the whole application linked or a wi
    - **Editing**: Cut, Copy, Paste (Cmd+X/C/V; a paste lands beside the original, a second paste beside that),
      Select All (Cmd+A), arrow keys nudge the selection one grid step in the plan (Shift: one millimetre; Up and
      Down with Cmd: along z), and Shift+drag on empty space selects every item its rectangle touches.
-   - **Combining**: a group can be a Union (today's), or an Intersection (only what all its solids share);
-     Split cuts the selection in two along a plane through its middle; Hollow turns a solid into a shell of a
-     given wall thickness, open at the top or closed.
-   - **Shapes**: wedge, pyramid, tube (wall thickness), half sphere, polygon prism (3–64 sides), each with the
+   - **Combining is done**: a group is a Union (the default) or an Intersection, which keeps only what all its
+     solids share, its holes then cutting that (the order makes no difference: cutting each part first leaves the
+     same). Edit → Intersect (Cmd+Shift+I) groups the selection as one; a group's panel has a Union / Intersect pair.
+     One whose solids share nothing is refused, by name, as a group cut away entirely is. Arrange → Split X/Y/Z cuts
+     each selected thing the plane through the middle of the selection's box passes through, square to that axis;
+     each half is a group of the thing and a box-shaped hole that cuts the other half off, so a half is anything a
+     group can be and ungroups back to the whole thing and its cutter (a hole is halved into hole halves, its
+     clearance spent on its transform). Arrange → Hollow… (a panel: wall 0.4–20 mm, Closed or Open top) makes each
+     selected solid a shell; the wall is the node's, so its panel has a "Shell wall, mm" field (0 fills it again) and a
+     Closed / Open top pair, and a resize rebuilds it keeping the wall. A box, cylinder, sphere or cone builds its
+     cavity exactly (moved in by the wall, rounds and chamfers with it, a cone's slope parallel); a torus, wedge,
+     pyramid, tube, half sphere, polygon prism or group is eroded by a ball (Minkowski difference; about a second for
+     a torus); a tube's shell is made inside its own wall, which stays the tube's. Open carries the cavity straight up
+     through the node's own top. A wall that leaves no room is refused. Each command is one undo step; the file
+     says `mode = intersect`, `wall` and `open_top` (format 3, written only when used); `/tekton/state` reports
+     `mode`, `wall` and `open_top`.
+   - **Shapes**: wedge, pyramid, tube (its own wall thickness: "Tube wall, mm", `tube_wall` in the file and in
+     `/tekton/state`, apart from a shell's `wall`), half sphere, polygon prism (3–64 sides), each with the
      fields its shape needs, and text (a line of characters, font size, depth) once its kerning is settled.
    - **Interface redesign**: the shape library on the left as icon tiles (a drawn glyph and a short label)
      in collapsible groups — Basic, More, Threads & Text, Imported; on the right the object list above the
