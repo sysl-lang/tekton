@@ -20,7 +20,11 @@ panel for the selection. Undo reaches everything. There are no modes: no edit mo
 vertex editing.
 
 The bar holds File, Edit and View. File has New, Open, Save, Save As, Export STL… and Quit, with Cmd+N, Cmd+O,
-Cmd+S and Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All. A
+Cmd+S and Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All, the named
+views Home, Top, Front, Right, Back and Left (Cmd+0 to Cmd+5, each turning there over a quarter second and
+keeping the target and distance), Orthographic (Cmd+P, keeping the scale at the target) and the Build Volume and
+Dimensions settings. A view cube in the viewport's top-right corner shows the orientation: a click on a face goes
+to that view and a drag on it orbits. The view is a session's, like the selection: it is not saved. A
 row is dimmed where its command would do nothing now, and its shortcut is shown only where that key works.
 While a menu is open the viewport takes no input at all, so a press, a drag or the wheel over a menu or
 beside it never reaches the model or the camera.
@@ -131,7 +135,8 @@ Everything runs without a window, so a test or an agent can use the application 
     `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, for a round shape
     its `segments`, for one with a hole clearance its `clearance`, for a box or cylinder with finished edges its
     `edge_radius` and (chamfered) `edge_style`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
-    `fov`), `file` (the path, or `null`) and `dirty`. A number JSON cannot spell is `null`.
+    `fov`, `projection` as `perspective` or `orthographic`, and `view`: the named view it is at or turning to, or
+    `custom`), `file` (the path, or `null`) and `dirty`. A number JSON cannot spell is `null`.
   - `POST /tekton/quit` quits at once, asking nothing about unsaved changes, so a session nobody can answer
     can be ended; the answer is sent, and the program exits on the next frame. A `GET` of it is refused.
     The window's own close still asks.
