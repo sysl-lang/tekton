@@ -193,4 +193,32 @@ their own tests, so most changes never need the whole application linked or a wi
      selected each axis they are apart on gets a thin line between the facing faces labelled "X gap 5" (0 where
      they touch, nothing where they overlap). View → Dimensions shows and hides both; `/tekton/state` reports
      `measure`: `size`, and `gaps` along x, y, z for a pair.
-7. nex scripting.
+7. The basics every modeller has, at the level of Tinkercad plus sketching, and rigid solids. Each item is one
+   undo step per command, saved in the file where it is state, reported in `/tekton/state` where a test or a
+   driver would want it, and tested through the document without a window.
+   - **Rigid solids** (Arrange → Rigid, on by default, saved with the document): a solid cannot be moved, turned
+     or resized into another solid. A drag stops at contact (Manifold's `min_gap`, searched along the move), a
+     new shape and Drop to Bed land on whatever is beneath them, so things stack. Holes pass through solids,
+     since cutting is their job, and the members of one group do not collide with each other. Shift, which
+     already means no snapping, also means no collision for that drag. Off, everything behaves as before.
+   - **Editing**: Cut, Copy, Paste (Cmd+X/C/V; a paste lands beside the original, a second paste beside that),
+     Select All (Cmd+A), arrow keys nudge the selection one grid step in the plan (Shift: one millimetre; Up and
+     Down with Cmd: along z), and Shift+drag on empty space selects every item its rectangle touches.
+   - **Combining**: a group can be a Union (today's), or an Intersection (only what all its solids share);
+     Split cuts the selection in two along a plane through its middle; Hollow turns a solid into a shell of a
+     given wall thickness, open at the top or closed.
+   - **Shapes**: wedge, pyramid, tube (wall thickness), half sphere, polygon prism (3–64 sides), each with the
+     fields its shape needs, and text (a line of characters, font size, depth) once its kerning is settled.
+   - **Object list**: a panel naming every top-level item (renamable), with hide, show and lock; a hidden item
+     is not drawn, picked or exported; a locked one cannot be selected by a click in the viewport.
+   - **Workplane**: a new shape is placed on the face under the pointer, standing on it; a Workplane tool
+     moves the grid onto a face, so dragging and sketching happen in its plane; a Ruler measures between points.
+   - **Snapping to objects**: while dragging, a box's faces, edges and middle snap to another's within a few
+     pixels, with a guide line drawn where they meet.
+   - **Views**: Top, Front, Right and Home views, perspective or orthographic, and a view cube in the corner.
+   - **Files**: import STL, OBJ and 3MF as mesh shapes (moved, turned, scaled, grouped and cut like any
+     other), import an SVG's outlines extruded to a depth, export OBJ, and a colour per item carried into 3MF.
+   - **Sketching**: on the workplane, draw a closed profile from lines, rectangles, circles and arcs with
+     typed lengths; Extrude it to a height or Revolve it about an axis by an angle. The result is a shape like
+     any other that keeps its profile, so it can be opened and edited again.
+8. nex scripting.
