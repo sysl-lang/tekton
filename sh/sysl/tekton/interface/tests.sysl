@@ -1212,11 +1212,17 @@ private choose(w: &Workspace, c: *Recorder, title: string, label: string)
     tap(w, c, s"menu.${title}.${label}")
 end choose
 
-// The rectangle the window gives the viewport, which is everything the bar and the palette leave.
+// The rectangle the window gives the viewport, between the toolbar, the side panels and the status line.
 private viewport_rect(w: &Workspace, c: *Recorder) -> Rect
-    render(w.tree(), c, WINDOW)
+    val v = w.tree()
 
-    Rect(WINDOW.w - w.width, WINDOW.h - w.height, w.width, w.height)
+    render(v, c, WINDOW)
+
+    val r = snapshot(v, c, WINDOW).find("viewport").unwrap().rect
+
+    assert_eq(r.w, w.width, "the viewport is painted as wide as the window gave it")
+    assert_eq(r.h, w.height, "and as tall")
+    r
 end viewport_rect
 
 @test
@@ -1622,9 +1628,10 @@ a_click_below_the_bar_picks_the_shape_drawn_there()
     var c = recorder()
     val r = viewport_rect(w, &c)
 
-    assert(r.y > 0, "the bar takes the top of the window")
-    assert(r.x > 0, "the palette takes its left")
-    assert_eq(r.y + r.h, WINDOW.h, "and the viewport reaches the bottom")
+    assert(r.y > 0, "the bar and the toolbar take the top of the window")
+    assert(r.x > 0, "the library takes its left")
+    assert(r.x + r.w < WINDOW.w, "the object list and the inspector its right")
+    assert(r.y + r.h < WINDOW.h, "and the status line its bottom")
 
     val (x, y) = w.camera.project(w.doc.bounds_of(w.doc.find(a).unwrap()).center(), real(r.w), real(r.h)).unwrap()
     val at_x = r.x + int(x)

@@ -1,0 +1,362 @@
+module sh.sysl.tekton.glyphs
+
+import sh.sysl.tekton.document.Primitive
+import sh.sysl.ui.{Path, path}
+import sysl.buf.{Buf, buf}
+
+// The small drawings on the shape tiles, the object list and the toolbar.
+//
+// **Each is a line drawing on a 24-point square**, in the ink of whatever it sits in, so a glyph on a tile
+// turns with the tile's label and follows the theme. The shapes are drawn as a person sketches them: from
+// above and in front, isometric, the edges that face the eye and none behind, with one weight of line for
+// all of them, so a row of tiles reads as one set.
+
+// How wide each glyph's box is, in its own units: an icon is asked for with `view = GLYPH_VIEW`.
+const GLYPH_VIEW: real = 24.0
+
+// The one weight of line every glyph is drawn in, in points.
+const GLYPH_LINE: real = 1.25
+
+// The drawing of a primitive, for its tile and its row in the object list.
+primitive_glyph(p: Primitive) -> Buf[Path] =
+    p match
+        Box -> box_glyph()
+        Cylinder -> cylinder_glyph()
+        Sphere -> sphere_glyph()
+        Cone -> cone_glyph()
+        Torus -> torus_glyph()
+        Wedge -> wedge_glyph()
+        Pyramid -> pyramid_glyph()
+        Tube -> tube_glyph()
+        HalfSphere -> dome_glyph()
+        PolygonPrism -> prism_glyph()
+
+// A cube: its outline, and the three edges that meet at the corner nearest the eye.
+private box_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(12.0, 3.0)
+    p.line_to(20.0, 7.5)
+    p.line_to(20.0, 16.5)
+    p.line_to(12.0, 21.0)
+    p.line_to(4.0, 16.5)
+    p.line_to(4.0, 7.5)
+    p.close()
+    p.move_to(4.0, 7.5)
+    p.line_to(12.0, 12.0)
+    p.line_to(20.0, 7.5)
+    p.move_to(12.0, 12.0)
+    p.line_to(12.0, 21.0)
+    one(p)
+end box_glyph
+
+private cylinder_glyph() -> Buf[Path] = one(cylinder())
+
+// An upright cylinder: the whole top, the two sides, and the front of the bottom.
+private cylinder() -> Path
+    var p = path()
+
+    ellipse(&p, 12.0, 6.5, 8.0, 3.5)
+    p.move_to(4.0, 6.5)
+    p.line_to(4.0, 17.5)
+    p.move_to(20.0, 6.5)
+    p.line_to(20.0, 17.5)
+    p.move_to(4.0, 17.5)
+    p.arc_to(8.0, 3.5, 0.0, false, false, 20.0, 17.5)
+    p
+end cylinder
+
+// A ball with the front half of its equator.
+private sphere_glyph() -> Buf[Path]
+    var p = path()
+
+    p.circle(12.0, 12.0, 9.0)
+    p.move_to(3.0, 12.0)
+    p.arc_to(9.0, 3.0, 0.0, false, false, 21.0, 12.0)
+    one(p)
+end sphere_glyph
+
+// A cone on its base: the front of the base and the two sides meeting at the tip.
+private cone_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(4.0, 17.5)
+    p.arc_to(8.0, 3.5, 0.0, false, false, 20.0, 17.5)
+    p.move_to(4.0, 17.5)
+    p.line_to(12.0, 3.0)
+    p.line_to(20.0, 17.5)
+    one(p)
+end cone_glyph
+
+// A ring lying flat: its outline, and the hole's near and far rims.
+private torus_glyph() -> Buf[Path]
+    var p = path()
+
+    ellipse(&p, 12.0, 12.0, 10.0, 6.0)
+    p.move_to(7.0, 11.0)
+    p.arc_to(5.0, 2.2, 0.0, false, false, 17.0, 11.0)
+    p.move_to(8.5, 12.2)
+    p.arc_to(3.6, 1.5, 0.0, false, true, 15.5, 12.2)
+    one(p)
+end torus_glyph
+
+// A ramp: tall at the back left, running down to nothing at the front right.
+private wedge_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(4.0, 7.5)
+    p.line_to(12.0, 3.0)
+    p.line_to(20.0, 16.5)
+    p.line_to(12.0, 21.0)
+    p.line_to(4.0, 16.5)
+    p.close()
+    p.move_to(4.0, 7.5)
+    p.line_to(12.0, 21.0)
+    one(p)
+end wedge_glyph
+
+// A square pyramid: the two faces toward the eye.
+private pyramid_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(12.0, 3.0)
+    p.line_to(3.5, 15.0)
+    p.line_to(12.0, 20.0)
+    p.line_to(20.5, 15.0)
+    p.close()
+    p.move_to(12.0, 3.0)
+    p.line_to(12.0, 20.0)
+    one(p)
+end pyramid_glyph
+
+// A cylinder with the hole through it showing in its top.
+private tube_glyph() -> Buf[Path]
+    var p = cylinder()
+
+    ellipse(&p, 12.0, 6.5, 4.0, 1.75)
+    one(p)
+end tube_glyph
+
+// Half a ball standing on its flat face.
+private dome_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(3.0, 16.0)
+    p.arc_to(9.0, 9.0, 0.0, false, true, 21.0, 16.0)
+    ellipse(&p, 12.0, 16.0, 9.0, 3.0)
+    one(p)
+end dome_glyph
+
+// A six-sided prism: the whole top, and the three faces toward the eye.
+private prism_glyph() -> Buf[Path]
+    var p = path()
+    val top = 5.5
+    val drop = 12.0
+
+    p.move_to(4.0, top)
+    p.line_to(8.0, top - 3.0)
+    p.line_to(16.0, top - 3.0)
+    p.line_to(20.0, top)
+    p.line_to(16.0, top + 3.0)
+    p.line_to(8.0, top + 3.0)
+    p.close()
+
+    for x in [4.0, 8.0, 16.0, 20.0]
+        val y = if x == 4.0 || x == 20.0 then top else top + 3.0
+
+        p.move_to(x, y)
+        p.line_to(x, y + drop)
+
+    p.move_to(4.0, top + drop)
+    p.line_to(8.0, top + 3.0 + drop)
+    p.line_to(16.0, top + 3.0 + drop)
+    p.line_to(20.0, top + drop)
+    one(p)
+end prism_glyph
+
+// A group, in the object list: two squares, one over the other.
+group_glyph() -> Buf[Path]
+    var p = path()
+
+    square(&p, 3.0, 3.0, 13.0)
+    square(&p, 8.0, 8.0, 13.0)
+    one(p)
+end group_glyph
+
+// ## The toolbar's glyphs
+
+// An arrow turning back to the left.
+undo_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(5.0, 10.0)
+    p.line_to(14.0, 10.0)
+    p.arc_to(5.0, 5.0, 0.0, false, true, 14.0, 20.0)
+    p.line_to(9.0, 20.0)
+    p.move_to(9.0, 5.0)
+    p.line_to(4.0, 10.0)
+    p.line_to(9.0, 15.0)
+    one(p)
+end undo_glyph
+
+// An arrow turning on to the right.
+redo_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(19.0, 10.0)
+    p.line_to(10.0, 10.0)
+    p.arc_to(5.0, 5.0, 0.0, false, false, 10.0, 20.0)
+    p.line_to(15.0, 20.0)
+    p.move_to(15.0, 5.0)
+    p.line_to(20.0, 10.0)
+    p.line_to(15.0, 15.0)
+    one(p)
+end redo_glyph
+
+// Two squares overlapping inside a frame of corners: made into one.
+grouping_glyph() -> Buf[Path]
+    var p = path()
+
+    square(&p, 5.0, 5.0, 9.0)
+    square(&p, 10.0, 10.0, 9.0)
+
+    for (x, y, dx, dy) in [(2.0, 2.0, 1.0, 1.0), (22.0, 2.0, -1.0, 1.0), (2.0, 22.0, 1.0, -1.0), (22.0, 22.0, -1.0, -1.0)]
+        p.move_to(x, y + 4.0 * dy)
+        p.line_to(x, y)
+        p.line_to(x + 4.0 * dx, y)
+
+    one(p)
+end grouping_glyph
+
+// Two squares pulled apart.
+ungrouping_glyph() -> Buf[Path]
+    var p = path()
+
+    square(&p, 3.0, 3.0, 9.0)
+    square(&p, 12.0, 12.0, 9.0)
+    one(p)
+end ungrouping_glyph
+
+// Two overlapping rings, the part they share filled.
+intersect_glyph() -> Buf[Path]
+    var rings = path()
+    var shared = path()
+
+    rings.circle(9.0, 12.0, 6.5)
+    rings.circle(15.0, 12.0, 6.5)
+    shared.move_to(12.0, 6.6)
+    shared.arc_to(6.5, 6.5, 0.0, false, true, 12.0, 17.4)
+    shared.arc_to(6.5, 6.5, 0.0, false, true, 12.0, 6.6)
+    shared.close()
+    shared.fill()
+    shared.no_stroke()
+
+    var all: Buf[Path] = buf()
+
+    all.push(shared)
+    all.push(thin(rings))
+    all
+end intersect_glyph
+
+// Two bars against a rule on their left.
+align_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(4.0, 3.0)
+    p.line_to(4.0, 21.0)
+    rectangle(&p, 7.0, 6.0, 13.0, 4.0)
+    rectangle(&p, 7.0, 14.0, 8.0, 4.0)
+    one(p)
+end align_glyph
+
+// A triangle and its reflection either side of a dashed line.
+mirror_glyph() -> Buf[Path]
+    var p = path()
+
+    p.move_to(10.0, 6.0)
+    p.line_to(10.0, 19.0)
+    p.line_to(3.0, 19.0)
+    p.close()
+    p.move_to(14.0, 6.0)
+    p.line_to(14.0, 19.0)
+    p.line_to(21.0, 19.0)
+    p.close()
+
+    var y = 2.0
+
+    while y < 22.0
+        p.move_to(12.0, y)
+        p.line_to(12.0, y + 2.0)
+        y += 4.0
+
+    one(p)
+end mirror_glyph
+
+// A block cut in two across the middle.
+split_glyph() -> Buf[Path]
+    var p = path()
+
+    rectangle(&p, 4.0, 4.0, 16.0, 6.5)
+    rectangle(&p, 4.0, 13.5, 16.0, 6.5)
+    one(p)
+end split_glyph
+
+// A block with a wall round an empty middle.
+hollow_glyph() -> Buf[Path]
+    var p = path()
+
+    square(&p, 4.0, 4.0, 16.0)
+    square(&p, 8.0, 8.0, 8.0)
+    one(p)
+end hollow_glyph
+
+// A grid of dots, for the snap step.
+snap_glyph() -> Buf[Path]
+    var p = path()
+
+    for i in 0..<4
+        for j in 0..<4
+            p.circle(4.5 + 5.0 * real(i), 4.5 + 5.0 * real(j), 0.9)
+
+    p.fill()
+    p.no_stroke()
+
+    var all: Buf[Path] = buf()
+
+    all.push(p)
+    all
+end snap_glyph
+
+// ## Building them
+
+private one(p: Path) -> Buf[Path]
+    var all: Buf[Path] = buf()
+
+    all.push(thin(p))
+    all
+end one
+
+// The weight every outline is drawn in.
+private thin(p: Path) -> Path
+    var q = p
+
+    q.stroke(GLYPH_LINE)
+    q
+end thin
+
+// A whole ellipse about `(cx, cy)`, drawn from its left end clockwise.
+private ellipse(p: *Path, cx: real, cy: real, rx: real, ry: real)
+    p.move_to(cx - rx, cy)
+    p.arc_to(rx, ry, 0.0, false, true, cx + rx, cy)
+    p.arc_to(rx, ry, 0.0, false, true, cx - rx, cy)
+end ellipse
+
+private rectangle(p: *Path, x: real, y: real, w: real, h: real)
+    p.move_to(x, y)
+    p.line_to(x + w, y)
+    p.line_to(x + w, y + h)
+    p.line_to(x, y + h)
+    p.close()
+end rectangle
+
+private square(p: *Path, x: real, y: real, side: real) = rectangle(p, x, y, side, side)

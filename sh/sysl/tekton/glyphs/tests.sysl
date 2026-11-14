@@ -1,0 +1,73 @@
+module sh.sysl.tekton.glyphs
+
+import sh.sysl.tekton.document.{PRIMITIVES, primitive_name}
+import sh.sysl.ui.{Path, PathStep}
+import sysl.buf.{Buf, buf}
+
+// Every point a path's steps name, ends and control points alike.
+private points_of(p: Path) -> Buf[(real, real)]
+    var out: Buf[(real, real)] = buf()
+
+    for s in p.steps.view()
+        s match
+            Move(x, y) -> out.push((x, y))
+            Line(x, y) -> out.push((x, y))
+            Quad(x1, y1, x, y) ->
+                out.push((x1, y1))
+                out.push((x, y))
+            Cubic(x1, y1, x2, y2, x, y) ->
+                out.push((x1, y1))
+                out.push((x2, y2))
+                out.push((x, y))
+            Arc(cx, cy, r, _, _, _) ->
+                out.push((cx - r, cy - r))
+                out.push((cx + r, cy + r))
+            ArcTo(_, _, _, _, _, x, y) -> out.push((x, y))
+            Close -> ()
+
+    out
+end points_of
+
+// Whether a glyph draws something, and all of it inside its box.
+private drawn_inside(all: Buf[Path], what: string)
+    assert(all.len() > 0, s"${what} has a path")
+
+    for p in all.view()
+        assert(p.steps.len() > 1, s"${what} draws more than a point")
+
+        for (x, y) in points_of(p).view()
+            assert(x >= 0.0 && x <= GLYPH_VIEW && y >= 0.0 && y <= GLYPH_VIEW, s"${what} stays in its box at ${x}, ${y}")
+end drawn_inside
+
+@test
+every_primitive_has_a_glyph_inside_its_box()
+    for p in PRIMITIVES
+        drawn_inside(primitive_glyph(p), primitive_name(p))
+
+@test
+no_two_primitives_share_a_glyph()
+    for i in 0..<PRIMITIVES.len
+        for j in i + 1..<PRIMITIVES.len
+            val a = primitive_glyph(PRIMITIVES[i])
+            val b = primitive_glyph(PRIMITIVES[j])
+            var same = a.len() == b.len()
+
+            if same
+                for k in 0..<a.len()
+                    if a[k].steps.view() != b[k].steps.view() then same = false
+
+            assert(!same, s"${primitive_name(PRIMITIVES[i])} and ${primitive_name(PRIMITIVES[j])} differ")
+
+@test
+every_toolbar_glyph_is_drawn_inside_its_box()
+    for (all, what) in [(undo_glyph(), "undo"), (redo_glyph(), "redo"), (grouping_glyph(), "group"),
+                        (ungrouping_glyph(), "ungroup"), (intersect_glyph(), "intersect"), (align_glyph(), "align"),
+                        (mirror_glyph(), "mirror"), (split_glyph(), "split"), (hollow_glyph(), "hollow"),
+                        (snap_glyph(), "snap"), (group_glyph(), "a group in the list")]
+        drawn_inside(all, what)
+
+@test
+outlines_share_one_weight_of_line()
+    for p in PRIMITIVES
+        for path in primitive_glyph(p).view()
+            assert_eq(path.width, GLYPH_LINE, primitive_name(p))

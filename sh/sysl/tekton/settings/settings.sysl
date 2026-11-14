@@ -1,0 +1,82 @@
+module sh.sysl.tekton.settings
+
+import sysl.fs.{config_dir, make_dir_all, read_text, write_text_atomic}
+import sysl.path.{join, parent}
+import sysl.text.{lines, parse_int}
+
+// What the window remembers between launches that is not part of any document: how wide the two side panels
+// were dragged, and how tall the object list.
+//
+// **A small text file of `key = value` lines**, `~/Library/Application Support/Tekton/settings` on macOS, so a
+// person can read it and delete it. **Nothing about it may stop the window opening**: a file that is missing,
+// unreadable or half-written gives the defaults, a line it does not understand is skipped, and a number out of
+// range is the default for that key alone.
+
+// The defaults, and the range each may be dragged within.
+const LIBRARY_WIDTH: int = 230
+const MIN_LIBRARY_WIDTH: int = 180
+const MAX_LIBRARY_WIDTH: int = 420
+
+const INSPECTOR_WIDTH: int = 260
+const MIN_INSPECTOR_WIDTH: int = 220
+const MAX_INSPECTOR_WIDTH: int = 480
+
+const OBJECTS_HEIGHT: int = 200
+const MIN_OBJECTS_HEIGHT: int = 80
+const MAX_OBJECTS_HEIGHT: int = 600
+
+struct Settings derives Eq
+    library_width: int
+    inspector_width: int
+    objects_height: int
+end Settings
+
+default_settings() -> Settings = Settings(LIBRARY_WIDTH, INSPECTOR_WIDTH, OBJECTS_HEIGHT)
+
+// Where the settings live, or nothing where the system names no place for them.
+settings_file() -> Option[string] = config_dir().map(d -> join(join(d, "Tekton"), "settings"))
+
+// What a settings file says, over the defaults.
+parse_settings(text: string) -> Settings
+    var s = default_settings()
+
+    for line in lines(text)
+        line.index_of("=") match
+            Some(at) ->
+                val key = line[0..<at].trim()
+                val n = parse_int(line[at + 1..<line.len].trim()).ok()
+
+                n match
+                    Some(v) ->
+                        if key == "library_width" && in_range(v, MIN_LIBRARY_WIDTH, MAX_LIBRARY_WIDTH)
+                            s.library_width = v
+                        elif key == "inspector_width" && in_range(v, MIN_INSPECTOR_WIDTH, MAX_INSPECTOR_WIDTH)
+                            s.inspector_width = v
+                        elif key == "objects_height" && in_range(v, MIN_OBJECTS_HEIGHT, MAX_OBJECTS_HEIGHT)
+                            s.objects_height = v
+                    None -> ()
+            None -> ()
+
+    s
+end parse_settings
+
+// The file's text for these settings.
+settings_text(s: Settings) -> string =
+    s"library_width = ${s.library_width}\ninspector_width = ${s.inspector_width}\nobjects_height = ${s.objects_height}\n"
+
+// The settings in this file, or the defaults where it cannot be read.
+load_settings(file: string) -> Settings =
+    read_text(file) match
+        Ok(text) -> parse_settings(text)
+        Err(_) -> default_settings()
+
+// Write the settings to this file, making its folder first. Says why where it could not.
+save_settings(file: string, s: Settings) -> Result[unit, string]
+    parent(file) match
+        Some(dir) -> if make_dir_all(dir).is_err() then return Err(s"Could not make ${dir}")
+        None -> ()
+
+    write_text_atomic(file, settings_text(s)).map_err(e -> s"Could not write ${file}")
+end save_settings
+
+private in_range(v: int, lo: int, hi: int) -> bool = v >= lo && v <= hi

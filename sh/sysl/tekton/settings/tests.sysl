@@ -1,0 +1,85 @@
+module sh.sysl.tekton.settings
+
+import sysl.fs.{make_temp_dir, remove_dir_all, write_text}
+import sysl.path.join
+
+@test
+the_defaults_are_the_layout_the_window_opens_with()
+    val s = default_settings()
+
+    assert_eq(s.library_width, 230)
+    assert_eq(s.inspector_width, 260)
+    assert_eq(s.objects_height, 200)
+
+@test
+written_settings_read_back_the_same()
+    val s = Settings(300, 340, 150)
+
+    assert(parse_settings(settings_text(s)) == s, "round trip")
+    assert_eq(settings_text(s), "library_width = 300\ninspector_width = 340\nobjects_height = 150\n")
+
+@test
+a_key_left_out_keeps_its_default()
+    val s = parse_settings("inspector_width = 300\n")
+
+    assert_eq(s.inspector_width, 300)
+    assert_eq(s.library_width, 230)
+    assert_eq(s.objects_height, 200)
+
+@test
+lines_it_does_not_understand_are_skipped()
+    val s = parse_settings("# a note\nlibrary_width: 300\ncolour = blue\nlibrary_width = wide\n  library_width=250  \n= 5\n")
+
+    assert_eq(s.library_width, 250)
+    assert(parse_settings("") == default_settings(), "empty")
+    assert(parse_settings("\u{0}\u{1}garbage") == default_settings(), "garbage")
+
+@test
+a_width_out_of_range_is_the_default_for_that_key_alone()
+    val s = parse_settings("library_width = 5\ninspector_width = 99999\nobjects_height = 300\n")
+
+    assert_eq(s.library_width, 230)
+    assert_eq(s.inspector_width, 260)
+    assert_eq(s.objects_height, 300)
+
+    val edges = parse_settings("library_width = 180\ninspector_width = 480\nobjects_height = -1\n")
+
+    assert_eq(edges.library_width, 180, "the least is allowed")
+    assert_eq(edges.inspector_width, 480, "the most is allowed")
+    assert_eq(edges.objects_height, 200, "negative")
+
+@test
+a_missing_or_unreadable_file_gives_the_defaults()
+    val dir = make_temp_dir("tekton-settings").unwrap()
+
+    assert(load_settings(join(dir, "none")) == default_settings(), "missing")
+    assert(load_settings(dir) == default_settings(), "a folder, not a file")
+    remove_dir_all(dir).unwrap()
+
+@test
+saving_makes_the_folder_and_loading_reads_it_back()
+    val dir = make_temp_dir("tekton-settings").unwrap()
+    val file = join(join(join(dir, "Application Support"), "Tekton"), "settings")
+    val s = Settings(200, 400, 120)
+
+    assert(save_settings(file, s).is_ok(), "saved")
+    assert(load_settings(file) == s, "read back")
+
+    assert(save_settings(file, default_settings()).is_ok(), "saved over")
+    assert(load_settings(file) == default_settings(), "the newer")
+    remove_dir_all(dir).unwrap()
+
+@test
+saving_where_no_folder_can_be_made_says_so()
+    val dir = make_temp_dir("tekton-settings").unwrap()
+    val blocker = join(dir, "file")
+
+    write_text(blocker, "not a folder").unwrap()
+    assert(save_settings(join(join(blocker, "Tekton"), "settings"), default_settings()).is_err(), "refused")
+    remove_dir_all(dir).unwrap()
+
+@test
+the_file_is_named_tekton_settings_under_the_config_folder()
+    settings_file() match
+        Some(f) -> assert(f.index_of("Tekton/settings").is_some(), f)
+        None -> ()

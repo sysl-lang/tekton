@@ -12,14 +12,17 @@ import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, Stroke, drag_body, 
 import sh.sysl.tekton.measure.{Mark, Measures, measures}
 import sh.sysl.tekton.picking.{box_pick, pick, pick_hit}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
+import sh.sysl.tekton.glyphs.*
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
+import sh.sysl.tekton.settings.{MAX_INSPECTOR_WIDTH, MAX_LIBRARY_WIDTH, MAX_OBJECTS_HEIGHT, MIN_INSPECTOR_WIDTH, MIN_LIBRARY_WIDTH,
+                                MIN_OBJECTS_HEIGHT, Settings, default_settings, save_settings}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
 import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, set_title, stop, viewport, viewport_depth_format, window}
 import sysl.buf.{Buf, buf}
 import sysl.math.{max, min}
 import sysl.path.file_name
-import sysl.text.{parse_real, split}
+import sysl.text.{parse_real, split, to_lower}
 
 // The window: a menu bar over a palette beside one viewport.
 //
@@ -53,6 +56,28 @@ const FIRST_FIELD_ID: int = 100
 
 const WRONG_INK: u32 = 0xD92D20u32
 
+// The theme the panels, the toolbar and the status line are drawn in, whose surfaces and rules they take.
+val CHROME = light()
+
+// How long a dragged panel width must stand before it is written to the settings file, in seconds.
+const SETTLE_SECONDS: real = 0.5
+
+// The steps a drag may snap to, in millimetres, as the toolbar offers them.
+val SNAP_STEPS = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+// How big a glyph is on a library tile, on the toolbar and in the object list, in points.
+const TILE_GLYPH: int = 28
+const TOOL_GLYPH: int = 18
+const ROW_GLYPH: int = 16
+
+// The library's two sections: what each is called, and its shapes in the order shown.
+val BASIC_SHAPES = [Primitive.Box, Primitive.Cylinder, Primitive.Sphere, Primitive.Cone, Primitive.Torus]
+val MORE_SHAPES = [Primitive.Wedge, Primitive.Pyramid, Primitive.Tube, Primitive.HalfSphere, Primitive.PolygonPrism]
+
+// What the status line says while nothing is wrong.
+val HINTS = ["Drag a shape to move it", "Drag empty space to orbit", "Right-drag to pan, wheel to zoom",
+             "Shift-click to select several", "Shift: no snapping", "Option: keep proportions"]
+
 // What an array lays its copies out as, in the order its panel offers them: the first three are lines along x, y
 // and z, and the last two rings about an upright axis.
 val ARRAY_KINDS = ["Line along X", "Line along Y", "Line along Z", "Ring about the middle", "Ring about the origin"]
@@ -73,8 +98,7 @@ const DISCARD_ANSWER: i32 = 2
 const CANCEL_ANSWER: i32 = 3
 const QUESTION_DETAIL: string = "They are lost if you don't."
 
-// How many characters of a file's name the panel has room for, and how many of a problem on one line.
-const NAME_ROOM: usize = 28
+// How many characters of a problem a dialog has room for on one line.
 const PROBLEM_ROOM: usize = 34
 
 // What was asked for that would lose unsaved changes, and goes on once they are answered for.
@@ -214,11 +238,36 @@ struct Workspace
     hollow_wall: &Signal[string]
     hollow_top: &Signal[int]
 
+    // How wide the library and the right-hand column are and how tall the object list, as dragged; the file they
+    // are remembered in, or nothing; what it was last written with, and how long they have stood changed since.
+    library_width: &Signal[int]
+    inspector_width: &Signal[int]
+    objects_height: &Signal[int]
+    settings_file: string
+    remembered: Settings
+    unsettled: real
+
+    // Which of the library's sections are open, and how far the object list and the inspector are scrolled.
+    basic_open: &Signal[bool]
+    more_open: &Signal[bool]
+    objects_offset: &Signal[int]
+    inspector_offset: &Signal[int]
+
+    // Which of the toolbar's choices is open.
+    align_open: &Signal[bool]
+    mirror_open: &Signal[bool]
+    split_open: &Signal[bool]
+    snap_open: &Signal[bool]
+
+    // The modifier keys as of the last frame, which a click on the object list reads.
+    held: Modifiers
+
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
     // Whether something is over the viewport that the pointer belongs to instead.
     private covered(&self) -> bool =
-        self.open_menu.read() != NO_MENU || self.in_dialog.read() || self.array_open.read() || self.hollow_open.read()
+        self.open_menu.read() != NO_MENU || self.in_dialog.read() || self.array_open.read() || self.hollow_open.read() ||
+            self.align_open.read() || self.mirror_open.read() || self.split_open.read() || self.snap_open.read()
 
     // Ask first if this would lose anything, and otherwise do it. A drag or an open dialog finishes first.
     private guarded(&self, intent: Intent)
@@ -247,7 +296,39 @@ struct Workspace
         val t = self.title()
 
         if t != self.titled && (self.retitle)(t) then self.titled = t
+
+        if self.layout_settings() == self.remembered
+            self.unsettled = 0.0
+        else
+            self.unsettled += seconds
+
+            if self.unsettled >= SETTLE_SECONDS then self.remember_layout()
     end next_frame
+
+    // The panels' sizes as they stand.
+    layout_settings(&self) -> Settings =
+        Settings(self.library_width.read(), self.inspector_width.read(), self.objects_height.read())
+
+    // Take these sizes, and remember them in this file from now on, or nowhere for an empty name.
+    use_settings(&self, s: Settings, file: string)
+        self.library_width.set(s.library_width)
+        self.inspector_width.set(s.inspector_width)
+        self.objects_height.set(s.objects_height)
+        self.settings_file = file
+        self.remembered = s
+        self.unsettled = 0.0
+    end use_settings
+
+    // Write the panels' sizes to the settings file if they have changed since it was written. A file that cannot
+    // be written is let go: it costs the next launch its layout, and nothing else.
+    remember_layout(&self)
+        val now = self.layout_settings()
+
+        if now != self.remembered && self.settings_file != "" then _ = save_settings(self.settings_file, now)
+
+        self.remembered = now
+        self.unsettled = 0.0
+    end remember_layout
 
     // What the window is called now.
     title(&self) -> string = window_title(self.file, self.doc.is_dirty())
@@ -1026,7 +1107,13 @@ struct Workspace
         val menus = self.menus()
 
         column([menu_bar(menus.view(), self.open_menu).restyle(t -> light()),
-                row([self.panel(), self.dimensioned().flex()]).flex()], 0)
+                column([self.toolbar(), divider(),
+                        split_row([sized(self.library(), self.library_width, MIN_LIBRARY_WIDTH, MAX_LIBRARY_WIDTH,
+                                         default_settings().library_width),
+                                   flexed(self.dimensioned().named("viewport"), 300),
+                                   sized(self.sidebar(), self.inspector_width, MIN_INSPECTOR_WIDTH, MAX_INSPECTOR_WIDTH,
+                                         default_settings().inspector_width)]).flex(),
+                        divider(), self.status_line()], 0).restyle(t -> CHROME).flex()], 0)
             .modal(self.array_open, self.array_panel())
             .modal(self.hollow_open, self.hollow_panel())
             .modal(self.in_dialog, spacer().frame(0, 0))
@@ -1162,43 +1249,195 @@ struct Workspace
         false
     end show_menu
 
-    private panel(&self) -> &View
-        var parts: Buf[&View] = buf()
+    // The shape library: a section of tiles for each kind of shape, a tap on a tile adding that shape.
+    private library(&self) -> &View
+        val body = column([section("Basic", self.basic_open, self.tiles(BASIC_SHAPES)),
+                           section("More", self.more_open, self.tiles(MORE_SHAPES)), spacer().flex()], 4)
 
-        parts.push(text("Tekton").font_size(22.0))
+        body.padding(8).background(CHROME.panel)
+    end library
 
-        if self.file != "" then parts.push(text(shortened(name_of(self.file))).font_size(11.0))
+    // Three tiles to a row, each a glyph over its name.
+    private tiles(&self, shapes: []const Primitive) -> &View
+        var all: Buf[&View] = buf()
 
-        parts.push(text("Shapes"))
+        for p in shapes
+            var words: Buf[&View] = buf()
 
-        // Two to a row, so ten shapes take the height of five.
-        for i in 0..<PRIMITIVES.len / 2
-            var pair: Buf[&View] = buf()
+            for word in tile_label(p)
+                words.push(row([spacer().flex(), text(word).text_style(TextStyle.Caption), spacer().flex()]))
 
-            for p in [PRIMITIVES[2 * i], PRIMITIVES[2 * i + 1]]
-                pair.push(button(if p == Primitive.PolygonPrism then "Polygon" else primitive_name(p), () -> self.add(p),
-                                 Role.Primary, Variant.Soft).named(s"palette.${primitive_key(p)}").frame(84, 33))
+            val face = column([icon(primitive_glyph(p).view(), TILE_GLYPH, GLYPH_VIEW), column(words.view(), 0)], 4)
 
-            parts.push(row(pair.view(), 6))
+            all.push(button_with(face, () -> self.add(p), Role.Primary, Variant.Soft).tooltip(s"Add a ${to_lower(primitive_name(p))}")
+                         .named(s"palette.${primitive_key(p)}").cell(8))
 
-        parts.push(row([self.small_button("Undo", () -> self.undo(), "undo", self.doc.can_undo).flex(),
-                        self.small_button("Redo", () -> self.redo(), "redo", self.doc.can_redo).flex()], 6))
-        parts.push(spacer().flex())
-        parts.push(self.selection_panel())
+        grid(all.view()).restyle(t -> t with { pad = 4 }).pad(top = 4, bottom = 8)
+    end tiles
 
-        for line in split(wrapped(self.problem.read(), PROBLEM_ROOM), "\n")
-            if line != "" then parts.push(text(line).font_size(11.0).foreground(WRONG_INK))
+    // The toolbar under the menus: undo and redo, grouping, arranging, and how a drag snaps.
+    private toolbar(&self) -> &View
+        val doc = self.doc
 
-        parts.push(column([text("Drag a shape to move it").font_size(11.0), text("Drag empty space to orbit").font_size(11.0),
-                           text("Right-drag to pan, wheel to zoom").font_size(11.0),
-                           text("Shift-click to select several").font_size(11.0),
-                           text("Shift: no snapping").font_size(11.0),
-                           text("Option: keep proportions").font_size(11.0),
-                           text("Cmd+G group, Cmd+Z undo").font_size(11.0)], 2))
+        row([self.tool(undo_glyph(), "", "Undo (Cmd+Z)", () -> self.undo(), doc.can_undo, "undo"),
+             self.tool(redo_glyph(), "", "Redo (Cmd+Shift+Z)", () -> self.redo(), doc.can_redo, "redo"),
+             rule(),
+             self.tool(grouping_glyph(), "Group", "Group (Cmd+G)", () -> self.group(), doc.can_group(), "toolbar.group"),
+             self.tool(ungrouping_glyph(), "Ungroup", "Ungroup (Cmd+Shift+G)", () -> self.ungroup(), doc.can_ungroup(),
+                       "toolbar.ungroup"),
+             self.tool(intersect_glyph(), "Intersect", "Keep only what the shapes share (Cmd+Shift+I)", () -> self.intersect(),
+                       doc.can_group(), "toolbar.intersect"),
+             rule(),
+             self.tool(align_glyph(), "Align", "Line the selection up", () -> self.align_open.set(true), doc.can_align,
+                       "toolbar.align").popover(self.align_open, self.align_choices()),
+             self.tool(mirror_glyph(), "Mirror", "Mirror the selection", () -> self.mirror_open.set(true), doc.can_arrange,
+                       "toolbar.mirror").popover(self.mirror_open, self.axis_choices(axis -> self.mirror(axis), self.mirror_open,
+                                                                                     "Mirror", "toolbar.mirror")),
+             self.tool(split_glyph(), "Split", "Cut the selection in two", () -> self.split_open.set(true), doc.can_arrange,
+                       "toolbar.split").popover(self.split_open, self.axis_choices(axis -> self.split(axis), self.split_open,
+                                                                                   "Split", "toolbar.split")),
+             self.tool(hollow_glyph(), "Hollow", "Hollow the selection out to a wall", () -> self.open_hollow(),
+                       doc.can_hollow(), "toolbar.hollow"),
+             rule(),
+             self.tool(snap_glyph(), s"Snap ${millimetres(self.grid)}", "How far a drag moves at a time",
+                       () -> self.snap_open.set(true), true, "toolbar.snap").popover(self.snap_open, self.snap_choices()),
+             spacer().flex()], 4).pad(top = 4, right = 8, bottom = 4, left = 8).background(CHROME.panel)
+    end toolbar
 
-        row([column(parts.view(), 10).padding(16).frame(206, 0).background(0xFFFFFFu32).restyle(t -> light()),
-             spacer().frame(1, 0).background(0xCBD2DCu32)])
-    end panel
+    // One of the toolbar's buttons: a glyph, a word beside it where it has one, and a tip naming its shortcut.
+    private tool(&self, glyph: Buf[Path], label: string, tip: string, tap: &Fn() -> unit, live: bool, name: string) -> &View
+        val mark = icon(glyph.view(), TOOL_GLYPH, GLYPH_VIEW)
+        val face: &View = if label == "" then mark else row([mark, text(label)], 6)
+
+        button_with(face, tap, Role.Primary, Variant.Soft, enabled = live,
+                    label = if label == "" then split(tip, " (")[0] else "").tooltip(tip).named(name)
+    end tool
+
+    // The nine ways the selection lines up, a row to an axis, each closing the choice once taken.
+    private align_choices(&self) -> &View
+        val names = [["Left", "Centre X", "Right"], ["Front", "Centre Y", "Back"], ["Bottom", "Centre Z", "Top"]]
+        val edges = [Edge.Min, Edge.Centre, Edge.Max]
+        var rows: Buf[&View] = buf()
+
+        for axis in 0..<3
+            var cells: Buf[&View] = buf()
+
+            for k in 0..<3
+                val edge = edges[k]
+
+                cells.push(button(names[axis][k], () -> self.choose(self.align_open, () -> self.align(axis, edge)),
+                                  Role.Primary, Variant.Soft).named(s"toolbar.align.${to_lower(names[axis][k])}").flex())
+
+            rows.push(row(cells.view(), 4))
+
+        choices(rows.view())
+    end align_choices
+
+    // X, Y and Z, each doing `run` along that axis and closing the choice.
+    private axis_choices(&self, run: &Fn(int) -> unit, open: &Signal[bool], verb: string, name: string) -> &View
+        var cells: Buf[&View] = buf()
+
+        for axis in 0..<3
+            val letter = ["X", "Y", "Z"][axis]
+
+            cells.push(button(s"${verb} ${letter}", () -> self.choose(open, () -> run(axis)), Role.Primary, Variant.Soft)
+                           .named(s"${name}.${to_lower(letter)}"))
+
+        choices(cells.view())
+    end axis_choices
+
+    // The steps a drag may snap to, the one in use filled.
+    private snap_choices(&self) -> &View
+        var cells: Buf[&View] = buf()
+
+        for step in SNAP_STEPS
+            cells.push(button(millimetres(step), () -> self.choose(self.snap_open, () -> self.set_grid(step)), Role.Primary,
+                              if step == self.grid then Variant.Filled else Variant.Soft)
+                           .named(s"toolbar.snap.${millimetres(step)}"))
+
+        choices(cells.view())
+    end snap_choices
+
+    // Close a choice and do what was chosen.
+    private choose(&self, open: &Signal[bool], run: &Fn() -> unit)
+        open.set(false)
+        run()
+        self.changed()
+    end choose
+
+    // The step a drag snaps to, in millimetres. A step the toolbar does not offer is refused.
+    set_grid(&self, step: real)
+        for s in SNAP_STEPS
+            if s == step
+                self.grid = step
+                self.changed()
+
+                return
+    end set_grid
+
+    // The right-hand column: the object list over the selection's properties, the line between them dragged.
+    private sidebar(&self) -> &View
+        val heading = text("Objects").text_style(TextStyle.Caption).foreground(CHROME.table.head_ink).pad(left = 4)
+        val listed = column([heading, scroll(self.objects(), self.objects_offset).flex()], 4).padding(8)
+        val inspector = scroll(self.inspector().padding(12), self.inspector_offset)
+
+        split_column([sized(listed, self.objects_height, MIN_OBJECTS_HEIGHT, MAX_OBJECTS_HEIGHT,
+                            default_settings().objects_height),
+                      flexed(inspector, 120)]).background(CHROME.panel)
+    end sidebar
+
+    // Every top-level item, a row each, the selected ones highlighted. A click selects one; Shift or Cmd adds it to
+    // the selection or takes it away.
+    private objects(&self) -> &View
+        val items = self.doc.items()
+        val names = object_names(items)
+        var rows: Buf[&View] = buf()
+
+        for k in 0..<items.len
+            val node = items[k]
+            val id = node.id
+            val glyph = node.operation match
+                Shape(p, _, _, _) -> primitive_glyph(p)
+                Group(_) -> group_glyph()
+            val name = names[k]
+            val chosen = self.doc.is_selected(id)
+
+            rows.push(reactive((i, t) -> object_row(glyph, name, chosen, i, t)).on_tap(() -> self.pick_object(id))
+                          .named(s"objects.${id}"))
+
+        if items.len == 0 then rows.push(text("Nothing here yet").text_style(TextStyle.Caption).pad(left = 4))
+
+        Held(self, column(rows.view(), 1))
+    end objects
+
+    // A click on an item of the object list.
+    pick_object(&self, id: int)
+        if self.is_editing() then return
+
+        if self.held.shift || self.held.cmd then self.doc.toggle_selected(id) else self.doc.select(Some(id))
+
+        self.open_menu.set(NO_MENU)
+        self.changed()
+    end pick_object
+
+    // The selection's properties, or a word on how to make one.
+    private inspector(&self) -> &View =
+        if self.doc.selection.len() == 0 then
+            column([text("Nothing selected").font_size(12.0),
+                    text("Click a shape to see its size and place,").text_style(TextStyle.Caption),
+                    text("or add one from the library.").text_style(TextStyle.Caption)], 4)
+        else self.selection_panel()
+
+    // The line along the bottom: what is wrong, or else what the pointer and the keys do.
+    private status_line(&self) -> &View
+        val said: &View = if self.problem.read() != "" then text(self.status()).foreground(WRONG_INK) else text(self.status())
+
+        said.text_style(TextStyle.Caption).pad(top = 4, right = 12, bottom = 4, left = 12).background(CHROME.panel)
+            .named("status")
+    end status_line
+
+    // What the status line says now.
+    status(&self) -> string = if self.problem.read() != "" then self.problem.read() else join_hints()
 
     // The nine number fields, the segments, clearance, edge radius, sides, tube wall and shell wall fields, made once,
     // because each remembers what is being typed in it.
@@ -1217,10 +1456,9 @@ struct Workspace
         self.fields.view()
     end number_fields
 
-    // A button that says whether it has anything to do: dashed when it has not. There is no disabled state to
-    // ask for, so a tap on one with nothing to do is a tap that does nothing.
+    // A quiet button that says whether it has anything to do: dimmed, and deaf to a tap, when it has not.
     private small_button(&self, label: string, tap: &Fn() -> unit, name: string, live: bool) -> &View =
-        button(label, tap, Role.Primary, if live then Variant.Soft else Variant.Dashed).named(name)
+        button(label, tap, Role.Primary, Variant.Soft, enabled = live).named(name)
 
     // Which of the two is on: filled, and the other quiet. With a mixed selection neither is.
     private solid_or_hole(&self) -> &View
@@ -1576,10 +1814,6 @@ private new_number_field(owner: &Workspace, q: Quantity, axis: int, id: int) -> 
 
 private name_of(file: string) -> string = file_name(file).unwrap_or(file)
 
-// A name short enough for the panel, keeping its end, which is what tells one file from the next.
-private shortened(name: string) -> string =
-    if name.len <= NAME_ROOM then name else "..." + name[name.len - (NAME_ROOM - 3)..<name.len]
-
 // Text broken into lines between its words, each within this room where a word lets it be.
 private wrapped(s: string, room: usize) -> string
     var out = ""
@@ -1598,6 +1832,85 @@ private wrapped(s: string, room: usize) -> string
 
     out
 end wrapped
+
+// What a shape's tile says, a line to an entry, so a two-word name stands as two short lines rather than being cut.
+tile_label(p: Primitive) -> Buf[string]
+    var lines: Buf[string] = buf()
+
+    for word in split(primitive_name(p), " ")
+        lines.push(word)
+
+    lines
+end tile_label
+
+// What the object list calls each of these items: its kind and how many of that kind come before it and it, so
+// the first box is "Box 1" and the second "Box 2".
+object_names(items: []const &Node) -> Buf[string]
+    var kinds: Buf[string] = buf()
+    var counts: Buf[int] = buf()
+    var names: Buf[string] = buf()
+
+    for node in items
+        val kind = node.operation match
+            Shape(p, _, _, _) -> primitive_name(p)
+            Group(i) -> if i then "Intersection" else "Group"
+        var at = kinds.len()
+
+        for k in 0..<kinds.len()
+            if kinds[k] == kind then at = k
+
+        if at == kinds.len()
+            kinds.push(kind)
+            counts.push(0)
+
+        counts[at] += 1
+        names.push(s"${kind} ${counts[at]}")
+
+    names
+end object_names
+
+// One row of the object list: a glyph and a name, on the selection's colour when chosen and lifted under the pointer.
+private object_row(glyph: Buf[Path], name: string, chosen: bool, i: Interaction, t: Theme) -> &View
+    val line = row([icon(glyph.view(), ROW_GLYPH, GLYPH_VIEW), text(name)], 8).pad(top = 4, right = 6, bottom = 4, left = 6)
+
+    if chosen then line.background(t.selection, t.radius)
+    elif i.hover > 0.5 then line.background(t.alt, t.radius)
+    else line
+end object_row
+
+// The rule between two of the toolbar's groups.
+private rule() -> &View = spacer().frame(1, 22).background(CHROME.edge).pad(left = 4, right = 4)
+
+// A toolbar choice's box: its buttons one under another on the ground, with an edge round it.
+private choices(cells: []const &View) -> &View =
+    column(cells, 4).padding(8).background(CHROME.ground, CHROME.radius).border(CHROME.edge, 1, CHROME.radius)
+
+// A length as the toolbar writes it: "0.1 mm", "1 mm".
+millimetres(v: real) -> string =
+    if v == v.floor() then s"${int(v)} mm" else s"${v} mm"
+
+// The status line's hints, one after another.
+private join_hints() -> string
+    var out = ""
+
+    for h in HINTS
+        out += if out == "" then h else " · " + h
+
+    out
+end join_hints
+
+// Paints its child after noting which modifier keys are held, which a tap inside it reads when it lands.
+private struct Held
+    owner: &Workspace
+    child: &View
+
+impl View for Held
+    measure(&self, c: *Canvas, avail: Size) -> Size = self.child.measure(c, avail)
+
+    paint(&self, c: *Canvas, r: Rect)
+        self.owner.held = c.modifiers()
+        self.child.paint(c, r)
+end Held
 
 private document_filters() -> Buf[FileFilter]
     var all: Buf[FileFilter] = buf()
@@ -1694,4 +2007,9 @@ new_workspace() -> &Workspace =
               (answer, parent) -> ask_save_file(answer, parent, three_mf_filters().view(), title = "Export 3MF"), false,
               () -> window(), title -> set_title(title), "", false, CORE_ONE, true, signal(false), signal(0), signal("3"),
               signal("25"), signal("90"), true, Measures(buf(), buf()), buf(), 0, None, signal(false), signal("2"),
-              signal(0))
+              signal(0),
+              signal(default_settings().library_width), signal(default_settings().inspector_width),
+              signal(default_settings().objects_height), "", default_settings(), 0.0,
+              signal(true), signal(true), signal(0), signal(0),
+              signal(false), signal(false), signal(false), signal(false),
+              no_modifiers())

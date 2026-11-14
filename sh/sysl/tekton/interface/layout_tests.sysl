@@ -1,0 +1,469 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.document.{Edge, PRIMITIVES, Primitive, Transform, primitive_key}
+import sh.sysl.tekton.settings.{Settings, default_settings, load_settings}
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+import sysl.fs.{make_temp_dir, remove_dir_all}
+import sysl.path.join
+
+// The window's layout: the library on the left, the toolbar along the top, the object list and the inspector on
+// the right, the status line along the bottom, and the panel sizes remembered between launches.
+
+private val SCREEN: Rect = Rect(0, 0, 1280, 800)
+
+private look(w: &Workspace, c: *Recorder, at: Rect) -> Snapshot
+    val v = w.tree()
+
+    render(v, c, at)
+    snapshot(v, c, at)
+end look
+
+// Tap a named control where a person would, holding these keys.
+private tap_with(w: &Workspace, c: *Recorder, name: string, keys: Modifiers)
+    val v = w.tree()
+
+    c.taps.reset()
+    render(v, c, SCREEN)
+
+    val (x, y) = snapshot(v, c, SCREEN).click_point(name).unwrap()
+
+    c.chord.keys = keys
+    render(w.tree(), c, SCREEN)
+    c.point(x, y, true)
+    render(w.tree(), c, SCREEN)
+    c.release(x, y)
+    render(w.tree(), c, SCREEN)
+    c.chord.keys = no_modifiers()
+end tap_with
+
+private tap(w: &Workspace, c: *Recorder, name: string) = tap_with(w, c, name, no_modifiers())
+
+private shows(w: &Workspace, c: *Recorder, name: string) -> bool = look(w, c, SCREEN).find(name).is_ok()
+
+private live(w: &Workspace, c: *Recorder, name: string) -> bool =
+    look(w, c, SCREEN).find(name).unwrap().marks.index_of("disabled").is_none()
+
+private shift_keys() -> Modifiers = Modifiers(true, false, false, false)
+private cmd_keys() -> Modifiers = Modifiers(false, false, false, true)
+
+// A box at the origin and a box at x = 60 and z = 30, the second selected.
+private apart() -> (&Workspace, int, int)
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+
+    w.doc.set_transform(a, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    w.doc.set_transform(b, Transform(Vec3(60.0, 0.0, 30.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    (w, a, b)
+end apart
+
+// ## The library
+
+@test
+every_shape_has_a_tile_in_the_library_and_a_tap_adds_it()
+    val w = new_workspace()
+    var c = recorder()
+
+    for p in PRIMITIVES
+        val before = w.doc.items().len
+
+        tap(w, &c, s"palette.${primitive_key(p)}")
+        assert_eq(w.doc.items().len, before + 1, primitive_key(p))
+
+@test
+a_closed_section_hides_its_tiles_and_opening_it_brings_them_back()
+    val w = new_workspace()
+    var c = recorder()
+
+    assert(shows(w, &c, "palette.box") && shows(w, &c, "palette.wedge"), "both open to begin with")
+
+    w.basic_open.set(false)
+    assert(!shows(w, &c, "palette.box"), "Basic closed")
+    assert(shows(w, &c, "palette.wedge"), "More still open")
+
+    w.more_open.set(false)
+    assert(!shows(w, &c, "palette.polygon_prism"), "More closed")
+
+    w.basic_open.set(true)
+    tap(w, &c, "palette.box")
+    assert_eq(w.doc.items().len, 1, "and a tile works again once open")
+
+@test
+a_two_word_shape_is_labelled_on_two_lines()
+    assert_eq(tile_label(Primitive.HalfSphere).len(), 2)
+    assert_eq(tile_label(Primitive.PolygonPrism)[1], "prism")
+    assert_eq(tile_label(Primitive.Cylinder).len(), 1)
+
+@test
+no_tile_is_cut_short_at_the_narrowest_library()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.library_width.set(1)
+
+    val s = look(w, &c, SCREEN)
+
+    for p in PRIMITIVES
+        val e = s.find(s"palette.${primitive_key(p)}").unwrap()
+
+        assert(e.shown == e.rect, s"${primitive_key(p)} is wholly shown")
+
+// ## The toolbar
+
+@test
+the_toolbar_offers_what_the_selection_can_do()
+    val (w, a, b) = apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    assert(live(w, &c, "undo"), "something to undo")
+    assert(!live(w, &c, "redo"), "nothing to redo")
+    assert(!live(w, &c, "toolbar.group"), "one shape: no group")
+    assert(!live(w, &c, "toolbar.align"), "nor align")
+    assert(live(w, &c, "toolbar.mirror") && live(w, &c, "toolbar.split"), "mirror and split")
+
+    w.doc.toggle_selected(b)
+    assert(live(w, &c, "toolbar.group") && live(w, &c, "toolbar.intersect") && live(w, &c, "toolbar.align"), "two")
+    assert(!live(w, &c, "toolbar.ungroup"), "no group to take apart")
+
+    w.doc.select(None)
+    assert(!live(w, &c, "toolbar.mirror") && !live(w, &c, "toolbar.hollow"), "nothing selected")
+
+@test
+the_toolbar_groups_ungroups_intersects_undoes_and_redoes()
+    val (w, a, b) = apart()
+    var c = recorder()
+
+    w.doc.toggle_selected(a)
+    tap(w, &c, "toolbar.group")
+    assert_eq(w.doc.items().len, 1, "grouped")
+
+    tap(w, &c, "toolbar.ungroup")
+    assert_eq(w.doc.items().len, 2, "apart again")
+
+    tap(w, &c, "undo")
+    assert_eq(w.doc.items().len, 1, "undone")
+    tap(w, &c, "redo")
+    assert_eq(w.doc.items().len, 2, "redone")
+
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+    tap(w, &c, "toolbar.intersect")
+    assert(w.doc.items()[0].intersects, "an intersection")
+
+@test
+a_disabled_tool_does_nothing_when_tapped()
+    val (w, a, _) = apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+
+    val v = w.tree()
+
+    render(v, &c, SCREEN)
+
+    val (x, y) = snapshot(v, &c, SCREEN).find("toolbar.group").unwrap().centre()
+
+    c.point(x, y, true)
+    render(w.tree(), &c, SCREEN)
+    c.release(x, y)
+    render(w.tree(), &c, SCREEN)
+    assert_eq(w.doc.items().len, 2, "nothing grouped")
+
+@test
+every_tool_says_what_it_does_and_its_shortcut()
+    val w = new_workspace()
+    var c = recorder()
+    val s = look(w, &c, SCREEN)
+
+    assert_eq(s.find("undo").unwrap().tip, "Undo (Cmd+Z)")
+    assert_eq(s.find("redo").unwrap().tip, "Redo (Cmd+Shift+Z)")
+    assert_eq(s.find("toolbar.group").unwrap().tip, "Group (Cmd+G)")
+    assert_eq(s.find("toolbar.ungroup").unwrap().tip, "Ungroup (Cmd+Shift+G)")
+
+    for name in ["toolbar.intersect", "toolbar.align", "toolbar.mirror", "toolbar.split", "toolbar.hollow", "toolbar.snap"]
+        assert(s.find(name).unwrap().tip != "", name)
+
+@test
+align_opens_its_choices_and_a_choice_aligns_and_closes_them()
+    val (w, a, b) = apart()
+    var c = recorder()
+
+    w.doc.toggle_selected(a)
+    tap(w, &c, "toolbar.align")
+    assert(w.align_open.read(), "open")
+
+    tap(w, &c, "toolbar.align.bottom")
+    assert(!w.align_open.read(), "closed")
+    assert_eq(w.doc.bounds_of(w.doc.find(b).unwrap()).min.z, w.doc.bounds_of(w.doc.find(a).unwrap()).min.z, "bottoms")
+
+    tap(w, &c, "undo")
+    assert(w.doc.bounds_of(w.doc.find(b).unwrap()).min.z > 0.0, "one undo step")
+
+@test
+mirror_and_split_open_their_axes()
+    val (w, a, _) = apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
+    tap(w, &c, "toolbar.mirror")
+    tap(w, &c, "toolbar.mirror.x")
+    assert(!w.mirror_open.read(), "closed")
+    assert(w.doc.find(a).unwrap().mirror.x, "mirrored along x")
+
+    tap(w, &c, "toolbar.split")
+    assert(shows(w, &c, "toolbar.split.z"), "the axes")
+    tap(w, &c, "toolbar.split.z")
+    assert_eq(w.doc.items().len, 3, "cut in two")
+
+@test
+a_tap_beside_an_open_choice_closes_it_and_reaches_nothing_else()
+    val (w, a, b) = apart()
+    var c = recorder()
+
+    w.doc.toggle_selected(a)
+    tap(w, &c, "toolbar.align")
+
+    val r = look(w, &c, SCREEN).find("viewport").unwrap().rect
+    val (x, y) = (r.x + r.w / 2, r.y + r.h - 10)
+
+    c.point(x, y, true)
+    render(w.tree(), &c, SCREEN)
+    c.release(x, y)
+    render(w.tree(), &c, SCREEN)
+    assert(!w.align_open.read(), "closed")
+    assert(w.doc.is_selected(a) && w.doc.is_selected(b), "the selection is as it was")
+
+@test
+the_snap_step_is_chosen_on_the_toolbar_and_a_drag_steps_by_it()
+    val w = new_workspace()
+    var c = recorder()
+
+    assert_eq(w.grid, 1.0, "a millimetre to begin with")
+    assert_eq(look(w, &c, SCREEN).find("toolbar.snap").unwrap().label, "Snap 1 mm")
+
+    tap(w, &c, "toolbar.snap")
+    tap(w, &c, "toolbar.snap.5 mm")
+    assert_eq(w.grid, 5.0, "five")
+    assert(!w.snap_open.read(), "closed")
+    assert_eq(look(w, &c, SCREEN).find("toolbar.snap").unwrap().label, "Snap 5 mm")
+
+    tap(w, &c, "toolbar.snap")
+    tap(w, &c, "toolbar.snap.0.1 mm")
+    assert_eq(w.grid, 0.1, "a tenth")
+
+    w.set_grid(3.0)
+    assert_eq(w.grid, 0.1, "a step not offered is refused")
+
+    val id = w.doc.add_shape(Primitive.Box)
+
+    w.set_grid(10.0)
+    w.duplicate()
+    assert(w.doc.items().len == 2 && !w.doc.is_selected(id), "a duplicate, placed a step along")
+
+@test
+millimetres_are_written_without_a_needless_point()
+    assert_eq(millimetres(1.0), "1 mm")
+    assert_eq(millimetres(10.0), "10 mm")
+    assert_eq(millimetres(0.5), "0.5 mm")
+
+// ## The object list
+
+@test
+the_object_list_names_each_item_by_its_kind_and_count()
+    val w = new_workspace()
+
+    w.doc.add_shape(Primitive.Box)
+    w.doc.add_shape(Primitive.Cylinder)
+    w.doc.add_shape(Primitive.Box)
+    w.doc.add_shape(Primitive.HalfSphere)
+
+    val names = object_names(w.doc.items())
+
+    assert_eq(names[0], "Box 1")
+    assert_eq(names[1], "Cylinder 1")
+    assert_eq(names[2], "Box 2")
+    assert_eq(names[3], "Half sphere 1")
+
+    w.doc.select(Some(w.doc.items()[0].id))
+    w.doc.toggle_selected(w.doc.items()[2].id)
+    w.group()
+    assert_eq(object_names(w.doc.items())[2], "Group 1", "a group, after what it did not take")
+
+    w.doc.select(Some(w.doc.items()[0].id))
+    w.doc.toggle_selected(w.doc.items()[1].id)
+    w.intersect()
+    assert_eq(object_names(w.doc.items())[1], "Intersection 1")
+
+@test
+a_click_on_the_list_selects_and_shift_or_cmd_adds_or_takes_away()
+    val (w, a, b) = apart()
+    var c = recorder()
+
+    tap(w, &c, s"objects.${a}")
+    assert(w.doc.selected == Some(a), "the one clicked")
+
+    tap_with(w, &c, s"objects.${b}", shift_keys())
+    assert(w.doc.is_selected(a) && w.doc.is_selected(b), "shift adds")
+
+    tap_with(w, &c, s"objects.${a}", cmd_keys())
+    assert(w.doc.selected == Some(b), "cmd takes away")
+
+    tap(w, &c, s"objects.${a}")
+    assert(w.doc.selected == Some(a) && !w.doc.is_selected(b), "a plain click is the one alone")
+
+@test
+the_list_follows_the_document_and_a_group_is_one_row()
+    val (w, a, b) = apart()
+    var c = recorder()
+
+    assert(shows(w, &c, s"objects.${a}") && shows(w, &c, s"objects.${b}"), "both")
+
+    w.doc.toggle_selected(a)
+    w.group()
+
+    val g = w.doc.items()[0].id
+
+    assert(shows(w, &c, s"objects.${g}"), "the group")
+    assert(!shows(w, &c, s"objects.${a}"), "and not its parts")
+
+    w.delete()
+    assert(!shows(w, &c, s"objects.${g}"), "gone with it")
+
+@test
+a_long_list_scrolls_and_a_row_scrolled_to_still_selects()
+    val w = new_workspace()
+    var c = recorder()
+
+    for i in 0..<40
+        w.doc.add_shape(Primitive.Box)
+
+    val last = w.doc.items()[39].id
+
+    w.doc.select(None)
+
+    val before = look(w, &c, SCREEN).find(s"objects.${last}").unwrap()
+
+    assert(before.shown.h == 0 || before.shown != before.rect, "below the list's bottom")
+
+    w.objects_offset.set(10000)
+
+    tap(w, &c, s"objects.${last}")
+    assert(w.doc.selected == Some(last), "scrolled to and clicked")
+
+// ## The inspector
+
+@test
+the_inspector_shows_a_hint_with_nothing_selected()
+    val w = new_workspace()
+    var c = recorder()
+
+    assert(!shows(w, &c, "panel.delete"), "no properties")
+    assert_eq(look(w, &c, SCREEN).find("panel.delete").is_ok(), false)
+
+@test
+a_hollow_tube_shows_every_field_whole_in_the_test_window()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.doc.add_shape(Primitive.Tube)
+    w.doc.hollow_selected(1.0, false).unwrap()
+
+    val s = look(w, &c, SCREEN)
+
+    for name in ["panel.solid", "panel.hole", "panel.tube_wall", "panel.wall", "panel.closed", "panel.open_top",
+                 "panel.delete"]
+        val e = s.find(name).unwrap()
+
+        assert(e.shown == e.rect, s"${name} is not cut off")
+
+    tap(w, &c, "panel.open_top")
+    assert(w.doc.items()[0].shell.open, "and the buttons work")
+
+// ## The status line
+
+@test
+the_status_line_gives_the_hints_or_what_went_wrong()
+    val w = new_workspace()
+
+    assert(w.status().index_of("Drag a shape to move it · ").is_some(), "hints, run together")
+    assert(w.status().index_of("Option: keep proportions").is_some(), "the last of them")
+
+    w.problem.set("Nothing to group")
+    assert_eq(w.status(), "Nothing to group")
+
+// ## The layout and its widths
+
+@test
+the_viewport_sits_between_the_panels_at_their_widths()
+    val w = new_workspace()
+    var c = recorder()
+    val r = look(w, &c, SCREEN).find("viewport").unwrap().rect
+
+    assert_eq(r.x, default_settings().library_width, "after the library")
+    assert_eq(SCREEN.w - (r.x + r.w), default_settings().inspector_width, "before the right-hand column")
+
+    w.use_settings(Settings(300, 320, 150), "")
+
+    val wider = look(w, &c, SCREEN).find("viewport").unwrap().rect
+
+    assert_eq(wider.x, 300)
+    assert_eq(SCREEN.w - (wider.x + wider.w), 320)
+
+@test
+a_narrow_window_takes_room_from_the_panels_before_the_viewport()
+    val w = new_workspace()
+    var c = recorder()
+    val small = Rect(0, 0, 1024, 700)
+    val r = look(w, &c, small).find("viewport").unwrap().rect
+
+    assert(r.w >= 300, "the viewport keeps its least")
+    assert(r.x > 0 && r.x + r.w < small.w, "and both panels are still there")
+
+    val s = look(w, &c, small)
+
+    for name in ["undo", "toolbar.snap", "palette.polygon_prism"]
+        val e = s.find(name).unwrap()
+
+        assert(e.shown == e.rect, s"${name} is whole at 1024 by 700")
+
+@test
+dragged_widths_are_written_once_they_settle_and_read_back()
+    val dir = make_temp_dir("tekton-layout").unwrap()
+    val file = join(join(dir, "Tekton"), "settings")
+    val w = new_workspace()
+
+    w.use_settings(default_settings(), file)
+    w.next_frame(1.0)
+    assert(load_settings(file) == default_settings(), "nothing changed, nothing written")
+
+    w.library_width.set(310)
+    w.next_frame(0.2)
+    assert_eq(load_settings(file).library_width, 230, "still being dragged")
+
+    w.inspector_width.set(300)
+    w.next_frame(0.2)
+    w.next_frame(0.2)
+    assert_eq(load_settings(file).library_width, 310, "written once it stood")
+    assert_eq(load_settings(file).inspector_width, 300)
+
+    w.objects_height.set(120)
+    w.remember_layout()
+    assert_eq(load_settings(file).objects_height, 120, "and on the way out")
+
+    val again = new_workspace()
+
+    again.use_settings(load_settings(file), file)
+    assert(again.layout_settings() == Settings(310, 300, 120), "the next launch opens as it was left")
+    remove_dir_all(dir).unwrap()
+
+@test
+a_workspace_with_no_settings_file_writes_nothing()
+    val w = new_workspace()
+
+    w.library_width.set(300)
+    w.next_frame(5.0)
+    assert(w.remembered == Settings(300, 260, 200), "taken as remembered, with nowhere to write it")

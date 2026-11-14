@@ -24,6 +24,7 @@ import sh.sysl.tekton.interface.new_workspace
 import sh.sysl.tekton.live.{routes as live_routes}
 import sh.sysl.tekton.options.parse_options
 import sh.sysl.tekton.scenes.{add_demo_scene, add_hole_scene}
+import sh.sysl.tekton.settings.{load_settings, settings_file}
 import sh.sysl.ui.signal
 import sh.sysl.ui_sdl.{app, run, save_frame, stop}
 import sysl.text.{parse_int, split}
@@ -78,7 +79,14 @@ main(args: []string) -> Result[unit, string]
 
     val routes: &Fn(Request) -> Routed = req -> live_routes(w, req)
 
-    run(app(w.title(), () -> w.tree(), () -> 0xDDE2E9u32, o.width, o.height, gpu = GPU_SHADERFORMAT_MSL,
+    // The panels open as wide as they were last left, except for a shot or a driven run, which always see the
+    // same window.
+    if shot == "" && o.control == ""
+        settings_file() match
+            Some(f) -> w.use_settings(load_settings(f), f)
+            None -> ()
+
+    val ran = run(app(w.title(), () -> w.tree(), () -> 0xDDE2E9u32, o.width, o.height, gpu = GPU_SHADERFORMAT_MSL,
             control = o.control, routes = routes, hidden = o.hidden, on_event = e ->
         e.kind() match
             Quit | WindowCloseRequested ->
@@ -96,4 +104,7 @@ main(args: []string) -> Result[unit, string]
             if frames.read() == SHOT_SETTLE then save_frame(shot)
             if frames.read() > SHOT_SETTLE + 1 then stop()
     ))
+
+    w.remember_layout()
+    ran
 end main

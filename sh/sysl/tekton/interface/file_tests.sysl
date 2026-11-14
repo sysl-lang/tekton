@@ -659,11 +659,14 @@ a_file_command_does_nothing_in_the_middle_of_a_drag()
 
     var c = recorder()
 
-    render(w.tree(), &c, WINDOW)
+    val v = w.tree()
+
+    render(v, &c, WINDOW)
 
     // The middle of the box, where the viewport shows it, pressed and carried a little way and held there.
-    val vx = WINDOW.w - w.width
-    val vy = WINDOW.h - w.height
+    val shown = snapshot(v, &c, WINDOW).find("viewport").unwrap().rect
+    val vx = shown.x
+    val vy = shown.y
     val (x, y) = w.camera.project(w.doc.bounds_of(w.doc.items()[0]).center(), real(w.width), real(w.height)).unwrap()
 
     c.point(vx + int(x), vy + int(y), true)
