@@ -1,0 +1,45 @@
+module sh.sysl.tekton.files
+@tests
+
+import sh.sysl.tekton.document.{Primitive, new_document}
+
+// Rigid in a file: written only when off, read back as written, and on in a file from before it was written at all.
+
+@test
+rigid_off_is_written_and_comes_back_off()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc.set_rigid(false)
+
+    val text = document_text(doc)
+
+    assert(text.contains("\nrigid = false\n"), text)
+
+    val back = document_from_text(text).unwrap()
+
+    assert(!back.rigid, "off again")
+    assert(!back.is_dirty(), "and that is what the file holds")
+    assert_eq(document_text(back), text, "the same text")
+end rigid_off_is_written_and_comes_back_off
+
+@test
+rigid_on_says_nothing_and_a_file_that_says_nothing_opens_with_it_on()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    assert(!document_text(doc).contains("rigid"), "on says nothing")
+
+    val old = "tekton = 2\nnext = 1\nnodes = []\n"
+
+    assert(document_from_text(old).unwrap().rigid, "a format 2 file opens with Rigid on")
+    assert(document_from_text("tekton = 3\nnext = 1\nrigid = true\nnodes = []\n").unwrap().rigid, "said on")
+end rigid_on_says_nothing_and_a_file_that_says_nothing_opens_with_it_on
+
+@test
+a_rigid_that_is_not_true_or_false_is_refused_on_its_line()
+    assert_eq(document_from_text("tekton = 3\nnext = 1\n\nrigid = 1\nnodes = []\n").unwrap_err(),
+              "line 4: `rigid` must be true or false", "a number")
+    assert_eq(document_from_text("tekton = 3\nnext = 1\nrigid = maybe\nnodes = []\n").unwrap_err(),
+              "line 3: `rigid` must be true or false", "a word")
+end a_rigid_that_is_not_true_or_false_is_refused_on_its_line

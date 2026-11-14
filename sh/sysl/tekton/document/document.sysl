@@ -440,6 +440,7 @@ struct DocumentState
     selection: Buf[int]
     last_placed: Option[int]
     next_id: int
+    rigid: bool
 
 // A model, what of it is selected, and how it came to be.
 struct Document
@@ -447,6 +448,10 @@ struct Document
     selection: Buf[int]
     last_placed: Option[int]
     next_id: int
+
+    // Whether a solid stops where it meets another instead of passing into it (`rigid.sysl`). It belongs to the
+    // document and is saved with it.
+    rigid: bool
 
     // How many times the kernel has been asked for a solid or its triangles on a node's behalf, so a test
     // can see a cache working.
@@ -466,6 +471,7 @@ struct Document
     saved_model: string
     checked_root: &Node
     checked_dirty: bool
+    saved_rigid: bool
 
     // Whether the tree differs from what was last saved. Undoing back to it is not a difference, and neither
     // is an edit that puts every number back.
@@ -474,7 +480,7 @@ struct Document
             self.checked_root = self.root
             self.checked_dirty = model_text(self.root) != self.saved_model
 
-        self.checked_dirty
+        self.checked_dirty || self.rigid != self.saved_rigid
     end is_dirty
 
     // This tree is what the file now holds.
@@ -482,6 +488,7 @@ struct Document
         self.saved_model = model_text(self.root)
         self.checked_root = self.root
         self.checked_dirty = false
+        self.saved_rigid = self.rigid
     end mark_saved
 
     // Why this tree could not stand as a document, and the node at fault: what a file is refused for, and what
@@ -557,13 +564,15 @@ struct Document
         false
     end is_selected
 
-    private state(&self) -> DocumentState = DocumentState(self.root, self.selection, self.last_placed, self.next_id)
+    private state(&self) -> DocumentState =
+        DocumentState(self.root, self.selection, self.last_placed, self.next_id, self.rigid)
 
     private restore(&self, s: DocumentState)
         self.root = s.root
         self.selection = s.selection
         self.last_placed = s.last_placed
         self.next_id = s.next_id
+        self.rigid = s.rigid
     end restore
 
     // Every command calls this before it changes anything.
@@ -647,8 +656,17 @@ struct Document
 
         for s in self.selection.view() do selected = s"${selected} ${s}"
 
-        s"${model_text(self.root)} selected:${selected} last:${self.last_placed} next:${self.next_id}"
+        s"${model_text(self.root)} selected:${selected} last:${self.last_placed} next:${self.next_id} rigid:${self.rigid}"
     end describe
+
+    // The command behind Arrange → Rigid: whether solids stop where they meet. A setting that changes nothing is
+    // not a step.
+    set_rigid(&self, on: bool)
+        if on == self.rigid then return
+
+        self.record()
+        self.rigid = on
+    end set_rigid
 
     private put_node(&self, node: &Node)
         self.root.replacing(node) match
@@ -674,8 +692,10 @@ struct Document
 
         for item in self.items() do items.push(item)
 
-        items.push(Node(id, Operation.Shape(p, ROUND_SEGMENTS, SHARP_EDGES), moved_to(at), NO_MIRROR, id - 1, false, 0.0, buf(),
-                        Derived(None, None), None, None))
+        val made: &Node = Node(id, Operation.Shape(p, ROUND_SEGMENTS, SHARP_EDGES), moved_to(at), NO_MIRROR, id - 1, false,
+                               0.0, buf(), Derived(None, None), None, None)
+
+        items.push(if self.rigid then made.with_transform(landed(self, made, made.transform)) else made)
         self.put_items(items)
         self.next_id += 1
         self.last_placed = Some(id)
@@ -1011,7 +1031,7 @@ struct Document
     end align_selected
 
     // The command behind Drop to Bed: what is selected moves straight down or up, as one, until its lowest point
-    // is on the ground.
+    // is on the ground; with Rigid on, until it stands on whatever solid is beneath it, if that comes first.
     drop_selected(&self) -> Result[unit, string]
         val chosen = self.selected_items()
 
@@ -1022,26 +1042,33 @@ struct Document
 
         for node in chosen.view() do changed.push(shifted(node, 2, -low))
 
+        if self.rigid
+            var motions: Buf[Motion] = buf()
+
+            for i in 0..<chosen.len() do motions.push(Motion(chosen[i], chosen[i].transform, changed[i].transform))
+
+            val ends = reached(self, motions.view())
+
+            for i in 0..<chosen.len() do changed[i] = chosen[i].with_transform(ends[i])
+
         self.put_arranged(changed)
         Ok(())
     end drop_selected
 
     // The command behind Duplicate: a copy of everything selected, a group with all of its parts, moved `step`
-    // along x, and the copies selected in place of what they copy.
+    // along x, and the copies selected in place of what they copy. With Rigid on, copies that would overlap a solid
+    // go on by more steps, together, until they are clear.
     duplicate_selected(&self, step: real) -> Result[unit, string]
         val chosen = self.selected_items()
 
         if chosen.len() == 0 then return Err("Nothing is selected")
 
-        var placed: Buf[Transform] = buf()
-
-        for node in chosen.view() do placed.push(shifted(node, 0, step).transform)
-
-        self.put_copies(chosen, placed)
+        self.put_copies(chosen, self.placements(chosen, 1, Pattern.Line(0, step), Vec3(0.0, 0.0, 0.0))?)
     end duplicate_selected
 
     // The command behind Array: `count` copies of everything selected, each a step further along `pattern` than
-    // the one before, standing as things of their own and selected in place of what they copy.
+    // the one before, standing as things of their own and selected in place of what they copy. With Rigid on, a
+    // set of copies that would overlap a solid goes on by more steps until it is clear, and the next follows it.
     array_selected(&self, count: int, pattern: Pattern) -> Result[unit, string]
         val chosen = self.selected_items()
 
@@ -1049,36 +1076,54 @@ struct Document
 
         if count < 1 || count > MAX_ARRAY_COPIES then return Err(s"An array makes 1 to ${MAX_ARRAY_COPIES} copies")
 
-        var placed: Buf[Transform] = buf()
+        var centre = Vec3(0.0, 0.0, 0.0)
 
         pattern match
-            Line(axis, spacing) ->
-                if !spacing.is_finite() then return Err("Spacing must be a number of millimetres")
-
-                for k in 1..count
-                    for node in chosen.view() do placed.push(shifted(node, axis, real(k) * spacing).transform)
+            Line(_, spacing) -> if !spacing.is_finite() then return Err("Spacing must be a number of millimetres")
             Ring(about_origin, degrees) ->
                 if !degrees.is_finite() then return Err("The angle must be a number of degrees")
 
                 val middle = self.extent(chosen.view()).center()
-                val centre = if about_origin then Vec3(0.0, 0.0, 0.0) else Vec3(middle.x, middle.y, 0.0)
 
-                for k in 1..count
-                    val turn = Quaternion.from_axis_angle([0.0, 0.0, 1.0], real(k) * degrees * real.pi() / 180.0)
+                if !about_origin then centre = Vec3(middle.x, middle.y, 0.0)
 
-                    for node in chosen.view()
-                        val t = node.transform
-                        val moved = centre + vec3(turn.rotate((t.translation - centre).array()))
-
-                        val q = turn * t.rotation
-
-                        placed.push(Transform(Vec3(settled(moved.x, 1.0e9), settled(moved.y, 1.0e9), t.translation.z),
-                                              positive_zeros(Quaternion(settled(q.w, 1.0e12), settled(q.x, 1.0e12),
-                                                                        settled(q.y, 1.0e12), settled(q.z, 1.0e12))),
-                                              t.scale))
-
-        self.put_copies(chosen, placed)
+        self.put_copies(chosen, self.placements(chosen, count, pattern, centre)?)
     end array_selected
+
+    // Where `count` sets of copies of `chosen` stand, each set a step on from the one before, by `pattern` about
+    // `centre`. With Rigid on, a set that would overlap a solid on the ground or an earlier set is moved on a step
+    // at a time until it is clear, and refused where no step would clear it.
+    private placements(&self, chosen: Buf[&Node], count: int, pattern: Pattern, centre: Vec3) -> Result[Buf[Transform], string]
+        var placed: Buf[Transform] = buf()
+        var earlier: Buf[(&Node, Transform)] = buf()
+        var step = 0
+
+        for _ in 0..<count
+            var set: Buf[(&Node, Transform)] = buf()
+            var pushes = 0
+
+            loop
+                step += 1
+                set = buf()
+
+                for node in chosen.view() do set.push((node, stepped(node, pattern, centre, step)))
+
+                if !self.rigid || !overlaps_any(self, set.view(), earlier.view()) || beyond_limit(set.view()) then break
+
+                pushes += 1
+
+                val round = pattern match
+                    Line(_, spacing) -> spacing == 0.0
+                    Ring(_, degrees) -> degrees == 0.0 || real(step) * degrees.abs() >= 360.0
+
+                if round || pushes > MAX_COPY_PUSHES then return Err("No clear place for a copy:\nturn off Arrange → Rigid")
+
+            for (node, t) in set.view()
+                placed.push(t)
+                earlier.push((node, t))
+
+        Ok(placed)
+    end placements
 
     // A copy of each of `chosen` at each of `placed`, taken in turn, as one step: the copies join the things on
     // the ground and are selected. Refused, leaving the document as it was, where one would stand out of bounds.
@@ -1207,7 +1252,7 @@ struct Document
         node.with_mirror(placed, node.mirror.flipped(nearest))
     end reflected
 
-    // The command behind a typed position.
+    // The command behind a typed position. With Rigid on, a solid goes only as far as it can toward it.
     move_to(&self, id: int, p: Vec3) -> Result[unit, string]
         val node = self.find(id).ok_or("nothing selected")?
 
@@ -1216,11 +1261,12 @@ struct Document
 
         val t = node.transform
 
-        self.set_transform(id, Transform(p, t.rotation, t.scale))
+        self.set_transform(id, self.rigidly(node, Transform(p, t.rotation, t.scale)))
         Ok(())
     end move_to
 
-    // The command behind a typed rotation: the shape turns about its own middle, which stays where it is.
+    // The command behind a typed rotation: the shape turns about its own middle, which stays where it is. With
+    // Rigid on, a solid turns only as far as it can toward it.
     rotate_to(&self, id: int, q: Quaternion[real]) -> Result[unit, string]
         val node = self.find(id).ok_or("nothing selected")?
         val t = node.transform
@@ -1228,12 +1274,41 @@ struct Document
 
         if !turned.is_usable() then return Err("Rotation must be a number of degrees")
 
-        self.set_transform(id, keeping(turned, self.local_bounds(node).center(), t))
+        self.set_transform(id, self.rigidly(node, keeping(turned, self.local_bounds(node).center(), t)))
         Ok(())
     end rotate_to
 
+    // Where `node` ends up when asked to go to `t`: there, or with Rigid on, as far toward it as it can go.
+    private rigidly(&self, node: &Node, t: Transform) -> Transform =
+        if self.rigid then reached(self, [Motion(node, node.transform, t)])[0] else t
+
+    // The command behind a drag: each of these things to its transform, as one body. With Rigid on and `free`
+    // false, the body goes only as far toward them as no solid of it presses into another, sliding along what it
+    // meets where it only moves. One command of a drag that is one step.
+    move_together(&self, targets: []const (int, Transform), free: bool)
+        var motions: Buf[Motion] = buf()
+
+        for (id, t) in targets
+            if t.is_usable()
+                self.find(id) match
+                    Some(node) -> motions.push(Motion(node, node.transform, t))
+                    None -> ()
+
+        if !self.rigid || free
+            for m in motions.view() do self.set_transform(m.node.id, m.to)
+
+            return
+
+        val ends = reached(self, motions.view())
+
+        for i in 0..<motions.len() do self.set_transform(motions[i].node.id, ends[i])
+    end move_together
+
+    // A node's solid placed by `t` in the space of the ground, as a moving solid is asked about.
+    private[document] placed_solid(&self, node: &Node, t: Transform) -> &Manifold = transformed(self.local_of(node), t)
+
     // The command behind a typed size: the sides along the shape's own axes, in millimetres, growing from
-    // its own origin.
+    // its own origin. With Rigid on, a solid grows or shrinks only as far as it can toward it.
     resize_to(&self, id: int, size: Vec3) -> Result[unit, string]
         val node = self.find(id).ok_or("nothing selected")?
 
@@ -1245,7 +1320,7 @@ struct Document
 
         val t = node.transform
 
-        self.set_transform(id, Transform(t.translation, t.rotation, scale_for(self.local_bounds(node), size)))
+        self.set_transform(id, self.rigidly(node, Transform(t.translation, t.rotation, scale_for(self.local_bounds(node), size))))
         Ok(())
     end resize_to
 
@@ -1465,18 +1540,20 @@ struct Document
     end solid_bounds
 end Document
 
-new_document(next_revision: int = 1) -> &Document = restored_document(buf(), 1, None, next_revision)
+new_document(next_revision: int = 1, rigid: bool = true) -> &Document =
+    restored_document(buf(), 1, None, next_revision, rigid)
 
-// A document holding these things on the ground, with no history, nothing selected, and nothing to save.
+// A document holding these things on the ground, with no history, nothing selected, and nothing to save. Rigid is
+// on unless it is said to be off.
 //
 // **`next_revision` goes on from the document this one replaces**, because a renderer knows a mesh by its node's
 // id and its revision, and a new document's first shape has the id an old one's did.
-restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], next_revision: int) -> &Document
+restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], next_revision: int, rigid: bool = true) -> &Document
     val root = Node(0, Operation.Group, identity_transform(), NO_MIRROR, 0, false, 0.0, items, Derived(None, None),
                     None, None)
 
-    Document(root, buf(), last_placed, next_id, 0, next_revision, buf(), buf(), false, None, HISTORY_MESH_BYTES,
-             model_text(root), root, false)
+    Document(root, buf(), last_placed, next_id, rigid, 0, next_revision, buf(), buf(), false, None, HISTORY_MESH_BYTES,
+             model_text(root), root, false, rigid)
 end restored_document
 
 // A shape as a file says it.
@@ -1543,6 +1620,35 @@ private shifted(node: &Node, axis: int, by: real) -> &Node
     val t = node.transform
 
     node.with_transform(Transform(t.translation.with_axis(axis, t.translation.axis(axis) + by), t.rotation, t.scale))
+
+// How many steps further than its own a set of copies may be moved on, with Rigid on, to find a clear place.
+const MAX_COPY_PUSHES: int = 400
+
+// Where the copy of `node` that is `step` steps along `pattern` stands; a ring turns about `centre`.
+private stepped(node: &Node, pattern: Pattern, centre: Vec3, step: int) -> Transform =
+    pattern match
+        Line(axis, spacing) -> shifted(node, axis, real(step) * spacing).transform
+        Ring(_, degrees) ->
+            val t = node.transform
+            val turn = Quaternion.from_axis_angle([0.0, 0.0, 1.0], real(step) * degrees * real.pi() / 180.0)
+            val moved = centre + vec3(turn.rotate((t.translation - centre).array()))
+            val q = turn * t.rotation
+
+            Transform(Vec3(settled(moved.x, 1.0e9), settled(moved.y, 1.0e9), t.translation.z),
+                      positive_zeros(Quaternion(settled(q.w, 1.0e12), settled(q.x, 1.0e12), settled(q.y, 1.0e12),
+                                                settled(q.z, 1.0e12))),
+                      t.scale)
+
+// Whether a copy among these would stand where no copy may.
+private beyond_limit(set: []const (&Node, Transform)) -> bool
+    for (_, t) in set
+        val p = t.translation
+
+        if !t.is_usable() || p.x.abs() > POSITION_LIMIT || p.y.abs() > POSITION_LIMIT || p.z.abs() > POSITION_LIMIT
+            return true
+
+    false
+end beyond_limit
 
 private unit_axis(axis: int) -> Vec3 = Vec3(0.0, 0.0, 0.0).with_axis(axis, 1.0)
 

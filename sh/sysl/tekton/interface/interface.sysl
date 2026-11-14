@@ -123,6 +123,9 @@ struct Workspace
     // The rest of what a drag on one of several selected shapes carries along, where each began.
     carried: Buf[(int, Transform)]
 
+    // What the pointer last asked of the drag in progress, and whether Shift was held, or nothing yet.
+    aimed: Option[(Transform, bool)]
+
     // Whether a field has the keyboard, as of the last frame. A shortcut leaves the document alone then, since
     // what is half typed into a field was written against the document as it stands.
     typing: bool
@@ -417,6 +420,9 @@ struct Workspace
 
     drop_to_bed(&self) = if !self.is_editing() then self.answer(self.doc.drop_selected())
 
+    // Let solids pass into each other if they stop where they meet, and stop them if they pass.
+    toggle_rigid(&self) = if !self.is_editing() then self.answer(Ok(self.doc.set_rigid(!self.doc.rigid)))
+
     // A copy of the selection one grid step to the right, selected.
     duplicate(&self) = if !self.is_editing() then self.answer(self.doc.duplicate_selected(self.grid))
 
@@ -622,30 +628,33 @@ struct Workspace
                     None -> ()
 
         self.carried = carried
+        self.aimed = None
         self.gesture = Gesture.Edit(d)
         self.doc.begin_step()
     end start_edit
 
-    // Bring the shape to where the pointer has it now, and whatever it carries by as much. Nothing is told if
-    // that is where it already is, so a pointer held still costs no rebuild.
+    // Bring the shape to where the pointer has it now, and whatever it carries by as much, as one body: with Rigid
+    // on, only as far as it goes before it meets a solid, unless Shift is held. Nothing is told if the pointer asks
+    // for what it asked last, so a pointer held still costs no rebuild and no search.
     private follow(&self, d: Drag, c: *Canvas, r: Rect)
         val (x, y) = c.pointer()
         val keys = c.modifiers()
         val t = d.transform_at(self.camera, real(r.w), real(r.h), real(x - r.x), real(y - r.y),
                                DragKeys(self.grid, keys.shift, keys.alt))
 
-        self.doc.find(d.id) match
-            Some(node) ->
-                if node.transform != t
-                    self.doc.set_transform(d.id, t)
+        if self.aimed == Some((t, keys.shift)) then return
 
-                    val by = t.translation - d.start.translation
+        self.aimed = Some((t, keys.shift))
 
-                    for (id, was) in self.carried.view()
-                        self.doc.set_transform(id, Transform(was.translation + by, was.rotation, was.scale))
+        val by = t.translation - d.start.translation
+        var targets: Buf[(int, Transform)] = buf()
 
-                    self.changed()
-            None -> ()
+        targets.push((d.id, t))
+
+        for (id, was) in self.carried.view() do targets.push((id, Transform(was.translation + by, was.rotation, was.scale)))
+
+        self.doc.move_together(targets.view(), keys.shift)
+        self.changed()
     end follow
 
     is_editing(&self) -> bool =
@@ -854,7 +863,9 @@ struct Workspace
                                   separator(),
                                   item("Drop to Bed", () -> self.drop_to_bed(), "Cmd+B", enabled = doc.can_arrange),
                                   separator(),
-                                  item("Array…", () -> self.open_array(), enabled = doc.can_arrange)]))
+                                  item("Array…", () -> self.open_array(), enabled = doc.can_arrange),
+                                  separator(),
+                                  toggle("Rigid", () -> self.toggle_rigid(), doc.rigid)]))
         all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0),
                                toggle("Build Volume", () -> self.toggle_volume(), self.show_volume),
                                toggle("Dimensions", () -> self.toggle_dimensions(), self.show_dimensions)]))
@@ -898,7 +909,7 @@ struct Workspace
         parts.push(column([text("Drag a shape to move it").font_size(11.0), text("Drag empty space to orbit").font_size(11.0),
                            text("Right-drag to pan, wheel to zoom").font_size(11.0),
                            text("Shift-click to select several").font_size(11.0),
-                           text("Shift: no snapping").font_size(11.0),
+                           text("Shift: no snapping or collision").font_size(11.0),
                            text("Option: keep proportions").font_size(11.0),
                            text("Cmd+G group, Cmd+Z undo").font_size(11.0)], 2))
 
@@ -1301,7 +1312,7 @@ unsaved_answer(r: Result[Option[i32], string]) -> Unsaved =
 
 new_workspace() -> &Workspace =
     Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
-              layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), false, signal(NO_MENU), false,
+              layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), None, false, signal(NO_MENU), false,
               () -> stop(), "",
               (title, parent) -> ask(title, QUESTION_DETAIL, question_buttons().view(), MessageKind.Warning, parent),
               signal(false),

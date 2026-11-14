@@ -57,7 +57,7 @@ private an_empty_document_reports_nothing_in_it()
     val c = new_camera()
 
     assert_eq(state_json(d, c, "", false),
-              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":null,\"dirty\":false,\"outside_volume\":false,\"measure\":null}")
+              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":null,\"dirty\":false,\"rigid\":true,\"outside_volume\":false,\"measure\":null}")
 end an_empty_document_reports_nothing_in_it
 
 @test
@@ -70,7 +70,7 @@ private a_small_document_reports_exactly_this()
     w.file = "/tmp/part.tekton"
 
     assert_eq(report(w),
-              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0],\"segments\":64}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":\"/tmp/part.tekton\",\"dirty\":true,\"outside_volume\":false,\"measure\":{\"size\":[40,40,40],\"gaps\":null}}")
+              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0],\"segments\":64}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":\"/tmp/part.tekton\",\"dirty\":true,\"rigid\":true,\"outside_volume\":false,\"measure\":{\"size\":[40,40,40],\"gaps\":null}}")
     assert_eq(a, 1)
 end a_small_document_reports_exactly_this
 
@@ -413,3 +413,12 @@ private the_state_route_reports_outside_volume()
     assert(body.contains("\"outside_volume\":true"), body)
     assert(sysl.encoding.json.parse(body).is_ok(), "still JSON")
 end the_state_route_reports_outside_volume
+
+@test
+private the_state_reports_whether_rigid_is_on()
+    val w = new_workspace()
+
+    assert(report(w).contains("\"dirty\":false,\"rigid\":true,"), report(w))
+    w.toggle_rigid()
+    assert(report(w).contains("\"dirty\":true,\"rigid\":false,"), report(w))
+end the_state_reports_whether_rigid_is_on

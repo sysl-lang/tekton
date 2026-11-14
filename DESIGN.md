@@ -39,14 +39,15 @@ group a hole cuts at any depth, grown by its clearance.
 
 ## Files
 
-A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 2`, the format
+A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 3`, the format
 version, read by itself before anything else, so a newer format is told "too new" whatever else it holds. It
 holds the tree, `next` (the id the next node gets) and `last` (what the next shape is placed beside). Meshes are
 derived, and the selection and the history belong to a session. Every number is written as the shortest text
 that reads back as the same value, so a saved document comes back bit for bit. A round shape writes its
 `segments`; format 2 added them, and a format 1 file still opens, its round shapes at the default 64. A shape
 with a hole clearance writes `clearance` in millimetres, and one without says nothing. A box or cylinder with
-finished edges writes `edge_radius` in millimetres and, when chamfered, `edge_style = chamfer`.
+finished edges writes `edge_radius` in millimetres and, when chamfered, `edge_style = chamfer`. A document with Rigid
+off writes `rigid = false`; format 3 added it, and a file that does not say opens with Rigid on.
 
 A bad file is refused with its line and the problem, and whatever is open stays as it was. That covers more than
 syntax: an id used twice, a transform no edit could make, groups nested past 128, a group the kernel cannot
@@ -131,7 +132,7 @@ Everything runs without a window, so a test or an agent can use the application 
     `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, for a round shape
     its `segments`, for one with a hole clearance its `clearance`, for a box or cylinder with finished edges its
     `edge_radius` and (chamfered) `edge_style`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
-    `fov`), `file` (the path, or `null`) and `dirty`. A number JSON cannot spell is `null`.
+    `fov`), `file` (the path, or `null`), `dirty` and `rigid`. A number JSON cannot spell is `null`.
   - `POST /tekton/quit` quits at once, asking nothing about unsaved changes, so a session nobody can answer
     can be ended; the answer is sent, and the program exits on the next frame. A `GET` of it is refused.
     The window's own close still asks.
@@ -201,6 +202,19 @@ their own tests, so most changes never need the whole application linked or a wi
      new shape and Drop to Bed land on whatever is beneath them, so things stack. Holes pass through solids,
      since cutting is their job, and the members of one group do not collide with each other. Shift, which
      already means no snapping, also means no collision for that drag. Off, everything behaves as before.
+     **Done** (`document/rigid.sysl`): a body drag, the arrows, the size handles, the arcs and the panel's typed
+     numbers all stop at contact; touching is allowed, overlapping (an intersection volume above 10⁻⁴ mm³) is not.
+     A motion is followed from where it starts, never judged only where it ends: the kernel's `min_gap` says how
+     far nothing can meet, so a step ends at a contact and never past one, and things already touching go on in
+     0.25 mm steps checked by volume, so even a 1 mm wall turned 45° stops a fast drag. Boxes are compared before
+     the kernel is asked, so a face sliding along a face costs nothing. A move that meets something slides on
+     along each axis in turn. A selection moves as one body. Things that already overlap (an old file, or made
+     with Rigid off) may move as long as no overlap grows along the way, so they can be pulled apart but not
+     pushed further in. Duplicate and Array push a set of copies that would overlap on by further steps (a grid
+     step, the spacing, the angle) until clear, and the next set follows it; where no step clears it (no
+     spacing, or a ring turning a thing in its own place) the command is refused and says to turn Rigid off.
+     Mirror and Align, being explicit, may overlap, as may turning a hole back into a solid. Toggling Rigid is
+     one undo step, a change to save, and `/tekton/state` says `rigid`.
    - **Editing**: Cut, Copy, Paste (Cmd+X/C/V; a paste lands beside the original, a second paste beside that),
      Select All (Cmd+A), arrow keys nudge the selection one grid step in the plan (Shift: one millimetre; Up and
      Down with Cmd: along z), and Shift+drag on empty space selects every item its rectangle touches.

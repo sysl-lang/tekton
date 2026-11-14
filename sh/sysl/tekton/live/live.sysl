@@ -65,8 +65,8 @@ outside_volume(doc: &Document, printer: Printer) -> bool =
         None -> false
 
 // The whole report, on one line: the tree, the selected ids in the order they were chosen, the camera, the file
-// (or `null` before there is one), whether anything is unsaved, and whether a part sticks out of the printer's
-// build volume.
+// (or `null` before there is one), whether anything is unsaved, whether Rigid is on, and whether a part sticks out
+// of the printer's build volume.
 state_json(doc: &Document, camera: &Camera, file: string, dirty: bool, printer: Printer = CORE_ONE) -> string
     var out = "{\"items\":["
 
@@ -86,7 +86,7 @@ state_json(doc: &Document, camera: &Camera, file: string, dirty: bool, printer: 
 
     out = out + s"],\"camera\":{\"target\":${vector(camera.target)},\"distance\":${number(camera.distance)},"
     out = out + s"\"yaw\":${number(camera.turn)},\"tilt\":${number(camera.tilt)},\"fov\":${number(camera.fov)}},"
-    out = out + s"\"file\":${if file == "" then "null" else quoted(file)},\"dirty\":${dirty},"
+    out = out + s"\"file\":${if file == "" then "null" else quoted(file)},\"dirty\":${dirty},\"rigid\":${doc.rigid},"
     out = out + s"\"outside_volume\":${outside_volume(doc, printer)},\"measure\":${measure_json(doc)}}"
     out
 end state_json

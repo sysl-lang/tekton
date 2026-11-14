@@ -173,7 +173,7 @@ end an_empty_document_comes_back_empty_and_a_gone_last_is_not_written
 the_first_line_is_the_version()
     val text = document_text(new_document())
 
-    assert(text.starts_with("tekton = 2\n"), text)
+    assert(text.starts_with("tekton = 3\n"), text)
 end the_first_line_is_the_version
 
 @test
@@ -203,7 +203,7 @@ end a_loaded_documents_meshes_go_on_from_the_revision_asked_for
 // Each way a first line can be wrong, each on line 1.
 @test
 a_wrong_first_line_is_refused_on_line_1()
-    val not_ours = "line 1: not a Tekton document: the first line must be `tekton = 2`"
+    val not_ours = "line 1: not a Tekton document: the first line must be `tekton = 3`"
 
     assert_eq(refusal(""), "line 1: the file is empty", "empty")
     assert_eq(refusal("hello there"), not_ours, "prose")
@@ -213,10 +213,10 @@ a_wrong_first_line_is_refused_on_line_1()
     assert_eq(refusal("tekton = -1\n"), not_ours, "negative")
     assert_eq(refusal("tekton = one\n"), not_ours, "a word")
     assert_eq(refusal("tekton = 1 next = 2\n"), not_ours, "more on the line")
-    assert_eq(refusal("tekton = 3\nnext = \"anything {[\n"),
-              "line 1: this file is format 3, from a newer Tekton; this one reads up to format 2", "too new")
+    assert_eq(refusal("tekton = 4\nnext = \"anything {[\n"),
+              "line 1: this file is format 4, from a newer Tekton; this one reads up to format 3", "too new")
     assert_eq(refusal("tekton = 99999999999999999999999\n"),
-              "line 1: this file is format 99999999999999999999999, from a newer Tekton; this one reads up to format 2",
+              "line 1: this file is format 99999999999999999999999, from a newer Tekton; this one reads up to format 3",
               "too new to count")
 end a_wrong_first_line_is_refused_on_line_1
 
@@ -662,7 +662,7 @@ an_old_format_file_opens_with_the_default_segments()
 
     assert(GROUP_FILE.starts_with("tekton = 1\n"), "a format 1 file")
     assert_eq(cylinder.segments, Some(64), "the sides a round shape always had")
-    assert(document_text(doc).starts_with("tekton = 2\n"), "and saved again it is format 2")
+    assert(document_text(doc).starts_with("tekton = 3\n"), "and saved again it is the current format")
     assert(document_text(doc).contains("segments = 64"), "saying so")
 
 @test
@@ -765,7 +765,7 @@ a_clearance_comes_back_and_only_a_shape_with_one_writes_it()
     assert_eq(back.find(plain).unwrap().clearance, 0.0, "none")
     assert(text.contains("    clearance = 0.2\n"), text)
     assert_eq(replace_all(text, "clearance", "").len, text.len - 2 * "clearance".len, "written by the two that have one")
-    assert(text.starts_with("tekton = 2\n"), "still format 2")
+    assert(text.starts_with("tekton = 3\n"), "the current format")
 end a_clearance_comes_back_and_only_a_shape_with_one_writes_it
 
 @test
@@ -833,7 +833,7 @@ edges_come_back_and_only_a_shape_with_them_writes_them()
     assert(text.contains("    edge_radius = 2.0\n    edge_style = chamfer\n"), text)
     assert_eq(replace_all(text, "edge_radius", "").len, text.len - 2 * "edge_radius".len, "a radius written by two")
     assert_eq(replace_all(text, "edge_style", "").len, text.len - 2 * "edge_style".len, "a chamfer written by two")
-    assert(text.starts_with("tekton = 2\n"), "still format 2")
+    assert(text.starts_with("tekton = 3\n"), "the current format")
     assert_eq(document_text(back), text, "and the text is stable")
     assert(back.solid_of(back.find(chamfered).unwrap()).volume() == doc.solid_of(doc.find(chamfered).unwrap()).volume(),
            "the same solid comes back")
