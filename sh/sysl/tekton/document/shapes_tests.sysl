@@ -1,0 +1,300 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.manifold.Status
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.Vec3
+import sysl.math.{pi}
+
+// The wedge, pyramid, tube, half sphere and polygon prism: what the kernel makes of each, the two numbers that
+// are their own, and how they meet holes, groups and mirroring.
+
+private near(a: real, b: real, tolerance: real) -> bool = (a - b).abs() <= tolerance
+
+private regular_area(r: real, n: int) -> real = 0.5 * real(n) * r * r * (2.0 * pi / real(n)).sin()
+
+private volume_of(doc: &Document, id: int) -> real = doc.mesh_of(doc.find(id).unwrap()).volume()
+
+private fresh(p: Primitive) -> (&Document, int)
+    val doc = new_document()
+
+    (doc, doc.add_shape(p))
+end fresh
+
+private hole_of(p: Primitive, size: Vec3) -> (&Document, int)
+    val (doc, id) = fresh(p)
+
+    doc.resize_to(id, size).unwrap()
+    doc.set_hole(true).unwrap()
+    (doc, id)
+end hole_of
+
+private cut_size(doc: &Document, id: int) -> Vec3
+    val b = doc.solid_of(doc.find(id).unwrap()).bounding_box()
+
+    Vec3(b.max().x - b.min().x, b.max().y - b.min().y, b.max().z - b.min().z)
+end cut_size
+
+private all_shapes() -> []const Primitive =
+    [Primitive.Wedge, Primitive.Pyramid, Primitive.Tube, Primitive.HalfSphere, Primitive.PolygonPrism]
+
+// ## The solids
+
+@test
+the_palette_lists_the_new_shapes_after_the_torus()
+    assert_eq(PRIMITIVES.len, 10, "ten shapes")
+    assert_eq(PRIMITIVES[4], Primitive.Torus, "the torus is still fifth")
+
+    for i in 0..<5 do assert_eq(PRIMITIVES[5 + i], all_shapes()[i], "in the order they were asked for")
+
+    assert_eq(primitive_key(Primitive.HalfSphere), "half_sphere", "one word for a file")
+    assert_eq(primitive_key(Primitive.PolygonPrism), "polygon_prism", "one word for a file")
+    assert_eq(primitive_key(Primitive.Wedge), "wedge", "and a plain one")
+
+@test
+every_new_shape_is_a_valid_solid_standing_on_the_ground_within_the_palette_box()
+    for p in all_shapes()
+        val (doc, id) = fresh(p)
+        val b = doc.bounds_of(doc.find(id).unwrap())
+
+        assert(doc.mesh_of(doc.find(id).unwrap()).triangle_count() > 0, s"${primitive_name(p)} has triangles")
+        assert(near(b.min.z, 0.0, 1.0e-9), s"${primitive_name(p)} stands on the bed")
+        assert(b.size().x <= 20.0 + 1.0e-9 && b.size().y <= 20.0 + 1.0e-9 && b.size().z <= 20.0 + 1.0e-9,
+               s"${primitive_name(p)} fits the 20 mm box")
+
+@test
+a_wedge_is_half_a_box_cut_diagonally_rising_along_plus_x()
+    val (doc, id) = fresh(Primitive.Wedge)
+    val solid = primitive_solid(Primitive.Wedge)
+
+    assert(near(volume_of(doc, id), 4000.0, 1.0e-6), "a right triangular prism: 20 x 20 x 20 / 2")
+    assert(near(solid.trim_by_plane(1.0, 0.0, 0.0, 0.0).volume(), 3000.0, 1.0e-6), "three quarters of it is toward +x")
+    assert(near(solid.trim_by_plane(-1.0, 0.0, 0.0, 0.0).volume(), 1000.0, 1.0e-6), "a quarter toward -x")
+
+    val b = doc.bounds_of(doc.find(id).unwrap())
+
+    assert(near(b.size().x, 20.0, 1.0e-9) && near(b.size().y, 20.0, 1.0e-9) && near(b.size().z, 20.0, 1.0e-9),
+           "in the whole box")
+
+@test
+a_pyramid_is_a_third_of_its_box_with_its_apex_over_the_middle()
+    val (doc, id) = fresh(Primitive.Pyramid)
+    val solid = primitive_solid(Primitive.Pyramid)
+
+    assert(near(volume_of(doc, id), 20.0 * 20.0 * 20.0 / 3.0, 1.0e-6), "base x height / 3")
+
+    val top = solid.bounding_box().max()
+    val low = solid.bounding_box().min()
+
+    assert(near(top.z, 20.0, 1.0e-9) && near(low.x, -10.0, 1.0e-9) && near(top.y, 10.0, 1.0e-9), "a square base 20 across")
+    assert(near(solid.trim_by_plane(1.0, 0.0, 0.0, 0.0).volume(), volume_of(doc, id) / 2.0, 1.0e-6), "apex over the middle")
+    assert(near(solid.trim_by_plane(0.0, 1.0, 0.0, 0.0).volume(), volume_of(doc, id) / 2.0, 1.0e-6), "in both directions")
+
+@test
+a_tube_is_a_cylinder_with_a_coaxial_bore_through_it()
+    val (doc, id) = fresh(Primitive.Tube)
+    val ring = regular_area(10.0, ROUND_SEGMENTS) - regular_area(8.0, ROUND_SEGMENTS)
+
+    assert(near(volume_of(doc, id), ring * 20.0, 1.0e-2), "a 2 mm wall, 20 mm tall")
+
+    doc.set_wall(id, 5.0).unwrap()
+    assert(near(volume_of(doc, id), (regular_area(10.0, ROUND_SEGMENTS) - regular_area(5.0, ROUND_SEGMENTS)) * 20.0, 1.0e-2),
+           "a thicker wall")
+    assert(near(doc.bounds_of(doc.find(id).unwrap()).size().z, 20.0, 1.0e-9), "as tall as before")
+
+@test
+a_half_sphere_is_the_top_of_a_sphere_with_its_flat_face_on_the_bed()
+    val (doc, id) = fresh(Primitive.HalfSphere)
+    val exact = 2.0 / 3.0 * pi * 1000.0
+    val b = doc.bounds_of(doc.find(id).unwrap())
+
+    assert(volume_of(doc, id) < exact && volume_of(doc, id) > exact * 0.99, "half of a sphere, within a percent")
+    assert(near(b.min.z, 0.0, 1.0e-9) && near(b.max.z, 10.0, 1.0e-9), "10 mm tall")
+    assert(near(b.size().x, 20.0, 1.0e-9), "20 mm across")
+
+    doc.set_segments(id, 12).unwrap()
+    assert(doc.mesh_of(doc.find(id).unwrap()).triangle_count() < 200, "its segments are its own")
+
+@test
+a_polygon_prism_is_a_regular_polygon_extruded_with_six_sides_to_begin_with()
+    val (doc, id) = fresh(Primitive.PolygonPrism)
+
+    assert_eq(doc.find(id).unwrap().sides, Some(6), "six sides")
+    assert(near(volume_of(doc, id), regular_area(10.0, 6) * 20.0, 1.0e-2), "a hexagonal prism")
+
+    doc.set_sides(id, 3).unwrap()
+    assert(near(volume_of(doc, id), regular_area(10.0, 3) * 20.0, 1.0e-2), "a triangular one")
+    doc.set_sides(id, 64).unwrap()
+    assert(near(volume_of(doc, id), regular_area(10.0, 64) * 20.0, 1.0e-2), "and the 64-sided one")
+
+// ## The numbers that are a shape's own
+
+@test
+sides_are_held_between_three_and_sixty_four_and_are_one_step_each()
+    val (doc, id) = fresh(Primitive.PolygonPrism)
+
+    for (asked, kept) in [(2, 3), (3, 3), (100, 64), (-5, 3), (8, 8), (64, 64)]
+        doc.set_sides(id, asked).unwrap()
+        assert_eq(doc.find(id).unwrap().sides, Some(kept), s"set ${asked}")
+
+    val steps = doc.undos.len()
+
+    doc.set_sides(id, 9).unwrap()
+    assert_eq(doc.undos.len(), steps + 1, "one step")
+    doc.set_sides(id, 9).unwrap()
+    assert_eq(doc.undos.len(), steps + 1, "none for the number it already has")
+    assert(doc.undo(), "undone")
+    assert_eq(doc.find(id).unwrap().sides, Some(64), "to what it was")
+    assert(doc.redo(), "redone")
+    assert_eq(doc.find(id).unwrap().sides, Some(9), "to what it became")
+
+@test
+only_a_polygon_prism_has_sides_and_only_a_tube_has_a_wall()
+    val doc = new_document()
+
+    for p in PRIMITIVES
+        val id = doc.add_shape(p)
+        val node = doc.find(id).unwrap()
+
+        assert_eq(node.sides.is_some(), p == Primitive.PolygonPrism, s"${primitive_name(p)} sides")
+        assert_eq(node.wall.is_some(), p == Primitive.Tube, s"${primitive_name(p)} wall")
+        assert_eq(doc.set_sides(id, 5).is_ok(), p == Primitive.PolygonPrism, s"${primitive_name(p)} set_sides")
+        assert_eq(doc.set_wall(id, 3.0).is_ok(), p == Primitive.Tube, s"${primitive_name(p)} set_wall")
+
+    assert(doc.set_sides(99, 5).is_err(), "nothing there")
+
+@test
+a_polygon_prisms_sides_are_not_segments_and_a_wedge_has_none()
+    val doc = new_document()
+    val prism = doc.add_shape(Primitive.PolygonPrism)
+
+    assert_eq(doc.find(prism).unwrap().segments, None, "a polygon prism has sides, not segments")
+    assert(doc.set_segments(prism, 12).is_err(), "so segments are refused")
+
+    for p in [Primitive.Wedge, Primitive.Pyramid]
+        assert_eq(doc.find(doc.add_shape(p)).unwrap().segments, None, s"${primitive_name(p)} has no round")
+
+    for p in [Primitive.Tube, Primitive.HalfSphere]
+        assert_eq(doc.find(doc.add_shape(p)).unwrap().segments, Some(ROUND_SEGMENTS), s"${primitive_name(p)} is round")
+
+@test
+a_tubes_wall_is_held_so_that_its_bore_stays_at_least_two_tenths_of_a_millimetre()
+    val (doc, id) = fresh(Primitive.Tube)
+
+    assert_eq(doc.find(id).unwrap().wall, Some(2.0), "two millimetres to begin with")
+
+    for (asked, kept) in [(50.0, 9.8), (10.0, 9.8), (0.0, 0.2), (-3.0, 0.2), (4.5, 4.5)]
+        doc.set_wall(id, asked).unwrap()
+        assert(near(doc.find(id).unwrap().wall.unwrap(), kept, 1.0e-12), s"set ${asked}")
+
+    doc.set_wall(id, 1000.0).unwrap()
+
+    val solid = doc.solid_of(doc.find(id).unwrap())
+
+    assert(solid.status() == Status.NoError, "still a valid solid")
+    assert(near(volume_of(doc, id), (regular_area(10.0, ROUND_SEGMENTS) - regular_area(0.2, ROUND_SEGMENTS)) * 20.0, 1.0e-2),
+           "with a bore of 0.2 mm radius")
+    assert(doc.set_wall(id, 0.0 / 0.0).is_err(), "not a number is refused")
+
+@test
+a_wall_is_one_step_and_a_wall_that_changes_nothing_is_none()
+    val (doc, id) = fresh(Primitive.Tube)
+    val steps = doc.undos.len()
+
+    doc.set_wall(id, 3.0).unwrap()
+    assert_eq(doc.undos.len(), steps + 1, "one step")
+    doc.set_wall(id, 3.0).unwrap()
+    doc.set_wall(id, 3000.0).unwrap()
+    assert_eq(doc.undos.len(), steps + 2, "none for the same number, one for the next")
+    assert(doc.undo(), "undone")
+    assert_eq(doc.find(id).unwrap().wall, Some(3.0), "to the step before")
+    assert(doc.undo(), "and again")
+    assert_eq(doc.find(id).unwrap().wall, Some(2.0), "to the default")
+
+@test
+a_tubes_wall_scales_with_the_shape_like_every_palette_number()
+    val (doc, id) = fresh(Primitive.Tube)
+
+    doc.resize_to(id, Vec3(40.0, 40.0, 20.0)).unwrap()
+    assert(near(cut_size(doc, id).x, 40.0, 1.0e-9), "twice as wide")
+    assert(near(doc.solid_of(doc.find(id).unwrap()).volume(), 4.0 * (regular_area(10.0, ROUND_SEGMENTS) - regular_area(8.0, ROUND_SEGMENTS)) * 20.0, 1.0),
+           "its wall twice as thick")
+
+// ## Neighbours
+
+@test
+a_wedge_pyramid_half_sphere_and_polygon_prism_take_a_clearance_and_a_tube_does_not()
+    for p in [Primitive.Wedge, Primitive.Pyramid, Primitive.HalfSphere, Primitive.PolygonPrism]
+        val (doc, id) = hole_of(p, Vec3(10.0, 10.0, 10.0))
+        val before = cut_size(doc, id)
+
+        assert(doc.find(id).unwrap().takes_clearance, s"${primitive_name(p)} takes one")
+        doc.set_clearance(id, 0.25).unwrap()
+
+        val grown = cut_size(doc, id)
+
+        assert(near(grown.x - before.x, 0.5, 1.0e-6) && near(grown.y - before.y, 0.5, 1.0e-6)
+               && near(grown.z - before.z, 0.5, 1.0e-6), s"${primitive_name(p)} grows by the clearance on each side")
+
+    val (doc, id) = hole_of(Primitive.Tube, Vec3(10.0, 10.0, 10.0))
+
+    assert(!doc.find(id).unwrap().takes_clearance, "a tube cannot: stretching it widens its bore")
+    assert(doc.set_clearance(id, 0.2).is_err(), "and refuses one")
+
+@test
+a_hole_of_each_new_shape_cuts_the_solid_it_is_grouped_with()
+    for p in all_shapes()
+        val doc = new_document()
+        val block = doc.add_shape(Primitive.Box)
+        val cut = doc.add_shape(p)
+
+        doc.resize_to(block, Vec3(40.0, 40.0, 40.0)).unwrap()
+        doc.resize_to(cut, Vec3(10.0, 10.0, 60.0)).unwrap()
+        doc.move_to(cut, doc.find(block).unwrap().transform.translation - Vec3(0.0, 0.0, 10.0)).unwrap()
+        doc.set_hole(true).unwrap()
+        doc.select(Some(block))
+        doc.toggle_selected(cut)
+
+        val whole = doc.solid_of(doc.find(block).unwrap()).volume()
+
+        assert(doc.group_selected().is_ok(), s"${primitive_name(p)} grouped")
+
+        val group = doc.items()[0]
+
+        assert(doc.solid_of(group).volume() < whole - 1.0, s"a ${primitive_name(p)} hole takes material away")
+
+@test
+a_mirrored_wedge_keeps_its_box_and_swaps_its_slope()
+    val (doc, id) = fresh(Primitive.Wedge)
+    val before = doc.bounds_of(doc.find(id).unwrap())
+
+    doc.select(Some(id))
+    doc.mirror_selected(0).unwrap()
+
+    val after = doc.bounds_of(doc.find(id).unwrap())
+
+    assert(near(after.size().x, before.size().x, 1.0e-9) && near(after.min.x, before.min.x, 1.0e-9), "where it stood")
+    assert(near(doc.solid_of(doc.find(id).unwrap()).trim_by_plane(1.0, 0.0, 0.0, 0.0).volume(), 1000.0, 1.0e-6),
+           "now rising toward -x")
+
+@test
+a_new_shape_is_placed_clear_of_what_is_there_by_its_own_default_size()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.PolygonPrism)
+    val b = doc.add_shape(Primitive.Wedge)
+    val one = doc.bounds_of(doc.find(a).unwrap())
+    val two = doc.bounds_of(doc.find(b).unwrap())
+
+    assert(!one.overlaps_plan(two), "not on top of each other")
+
+@test
+each_new_shape_survives_the_commands_that_move_it()
+    for p in all_shapes()
+        val (doc, id) = fresh(p)
+        val (plain, plain_id) = fresh(p)
+
+        doc.rotate_to(id, Quaternion.from_axis_angle([0.0, 0.0, 1.0], 0.5)).unwrap()
+        doc.resize_to(id, Vec3(30.0, 12.0, 7.0)).unwrap()
+        assert(doc.mesh_of(doc.find(id).unwrap()).triangle_count() > 0, s"${primitive_name(p)} resized and turned")
+        assert(doc.undo() && doc.undo(), s"${primitive_name(p)} undone")
+        assert(near(volume_of(doc, id), volume_of(plain, plain_id), 1.0e-6), s"${primitive_name(p)} back as added")

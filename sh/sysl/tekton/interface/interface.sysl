@@ -4,7 +4,7 @@ import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
 import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
                      ask_save_file, message_button}
-import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_name}
+import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_key, primitive_name}
 import sh.sysl.tekton.export.{export_3mf, export_stl}
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
@@ -17,7 +17,7 @@ import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, set_title, stop, viewpor
 import sysl.buf.{Buf, buf}
 import sysl.math.{max, min}
 import sysl.path.file_name
-import sysl.text.{parse_real, split, to_lower}
+import sysl.text.{parse_real, split}
 
 // The window: a menu bar over a palette beside one viewport.
 //
@@ -95,6 +95,8 @@ enum Quantity
     Segments
     Clearance
     EdgeRadius
+    Sides
+    Wall
 
 // A click selected or cleared the selection, or the palette added a shape. What a document's panel
 // shows follows this.
@@ -885,7 +887,7 @@ struct Workspace
 
         for p in PRIMITIVES
             parts.push(button(primitive_name(p), () -> self.add(p), Role.Primary, Variant.Soft)
-                .named(s"palette.${to_lower(primitive_name(p))}"))
+                .named(s"palette.${primitive_key(p)}"))
 
         parts.push(row([self.small_button("Undo", () -> self.undo(), "undo", self.doc.can_undo).flex(),
                         self.small_button("Redo", () -> self.redo(), "redo", self.doc.can_redo).flex()], 6))
@@ -916,7 +918,7 @@ struct Workspace
 
                     self.fields.push(new_number_field(self, q, axis, id))
 
-            for q in [Quantity.Segments, Quantity.Clearance, Quantity.EdgeRadius]
+            for q in [Quantity.Segments, Quantity.Clearance, Quantity.EdgeRadius, Quantity.Sides, Quantity.Wall]
                 self.fields.push(new_number_field(self, q, 0, FIRST_FIELD_ID + int(self.fields.len())))
 
         self.fields.view()
@@ -960,7 +962,7 @@ struct Workspace
         self.doc.selected.and_then(id -> self.doc.find(id)) match
             Some(node) ->
                 val name = node.operation match
-                    Shape(p, _, _) -> primitive_name(p)
+                    Shape(p, _, _, _) -> primitive_name(p)
                     Group -> "Group"
                 val fields = self.number_fields()
 
@@ -974,6 +976,14 @@ struct Workspace
                 if node.segments.is_some()
                     parts.push(text("Segments").font_size(11.0))
                     parts.push(row([fields[9].view().named("panel.segments")], 3))
+
+                if node.sides.is_some()
+                    parts.push(text("Sides").font_size(11.0))
+                    parts.push(row([fields[12].view().named("panel.sides")], 3))
+
+                if node.wall.is_some()
+                    parts.push(text("Wall, mm").font_size(11.0))
+                    parts.push(row([fields[13].view().named("panel.wall")], 3))
 
                 if node.hole && node.takes_clearance
                     parts.push(text("Clearance, mm").font_size(11.0))
@@ -1011,7 +1021,9 @@ struct Workspace
             Rotation -> euler_degrees(node.transform.rotation)[axis]
             Segments -> real(node.segments?)
             Clearance -> node.clearance
-            EdgeRadius -> node.edges?.radius)
+            EdgeRadius -> node.edges?.radius
+            Sides -> real(node.sides?)
+            Wall -> node.wall?)
     end number
 
     // The command behind a number typed into a field.
@@ -1028,6 +1040,12 @@ struct Workspace
                 else
                     // Held to what an int holds; the document holds it to what a shape may have.
                     self.doc.set_segments(id, int(value.clamp(-1.0e6, 1.0e6)))
+            Sides ->
+                if !value.is_finite() || value != value.round()
+                    Err("Sides must be a whole number")
+                else
+                    self.doc.set_sides(id, int(value.clamp(-1.0e6, 1.0e6)))
+            Wall -> self.doc.set_wall(id, value)
             Clearance -> self.doc.set_clearance(id, value)
             EdgeRadius -> self.doc.set_edge_radius(id, value)
             Rotation ->

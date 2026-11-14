@@ -44,14 +44,15 @@ private assert_same_node(a: &Node, b: &Node)
     assert_same_transform(a.transform, b.transform)
 
     a.operation match
-        Shape(p, n, e) ->
+        Shape(p, n, e, w) ->
             b.operation match
-                Shape(q, m, f) ->
+                Shape(q, m, f, x) ->
                     assert_eq(p, q, "primitive")
                     assert_eq(a.segments, b.segments, "segments")
                     assert_eq(n, m, "the number the kernel is given")
                     same_number(e.radius, f.radius, "edge radius")
                     assert_eq(e.chamfer, f.chamfer, "edge style")
+                    same_number(w, x, "tube wall")
                 Group -> assert(false, "a shape came back a group")
         Group -> ()
 

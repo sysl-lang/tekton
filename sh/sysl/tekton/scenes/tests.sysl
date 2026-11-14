@@ -13,7 +13,7 @@ end demo
 
 private kind(node: &Node) -> string =
     node.operation match
-        Shape(p, _, _) -> primitive_name(p)
+        Shape(p, _, _, _) -> primitive_name(p)
         _ -> "not a shape"
 
 @test
