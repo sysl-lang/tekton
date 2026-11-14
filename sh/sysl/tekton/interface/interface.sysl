@@ -1,7 +1,8 @@
 module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
-import sh.sysl.tekton.camera.{Camera, new_camera}
+import sh.sysl.tekton.camera.{Camera, NamedView, new_camera}
+import sh.sysl.tekton.cube.view_cube
 import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
                      ask_save_file, message_button}
 import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_name}
@@ -34,6 +35,10 @@ const CLICK_SLOP: int = 3
 const DEFAULT_GRID: real = 1.0
 
 const RADIANS_PER_DEGREE: real = real.pi() / 180.0
+
+// The named views in the order of the View menu, which is also the digit each is on with Cmd: Home on 0.
+val VIEW_KEYS: [6]NamedView = [NamedView.Home, NamedView.Top, NamedView.Front, NamedView.Right, NamedView.Back,
+                               NamedView.Left]
 
 // How wide each of a row of three number fields is, and the keyboard id of the first.
 const NUMBER_WIDTH: int = 52
@@ -206,9 +211,11 @@ struct Workspace
         self.changed()
     end guarded
 
-    // Once a frame: the window's title follows the file and its unsaved mark, and a close may be asked about again.
-    next_frame(&self)
+    // Once a frame, `seconds` after the last: the window's title follows the file and its unsaved mark, a close may
+    // be asked about again, and a view on its way moves along.
+    next_frame(&self, seconds: real = 0.0)
         self.quit_asked = false
+        self.camera.advance(seconds)
 
         val t = self.title()
 
@@ -490,6 +497,21 @@ struct Workspace
         self.changed()
     end frame_all
 
+    // Turn to a named view, keeping what is in the middle of it and how far away. Not while a shape is being
+    // dragged: the view holding still is what keeps the shape under the pointer.
+    look_from(&self, v: NamedView)
+        if self.is_editing() then return
+
+        self.camera.go_to(v)
+        self.changed()
+
+    // Switch between perspective and orthographic, under the same rule.
+    toggle_orthographic(&self)
+        if self.is_editing() then return
+
+        self.camera.toggle_orthographic()
+        self.changed()
+
     // Show the build volume's outline if it is hidden, and hide it if it shows.
     toggle_volume(&self)
         self.show_volume = !self.show_volume
@@ -508,6 +530,7 @@ struct Workspace
         self.measured = if self.show_dimensions then measures(self.doc, self.camera, w, h) else Measures(buf(), buf())
 
         for s in self.measured.strokes.view() do self.overlay.strokes.push(s)
+        for s in view_cube(self.camera, w, h).strokes.view() do self.overlay.strokes.push(s)
     end lay_out
 
     // A key the toolkit does not see, as the window reports it: `code` is the layout's own, so the letters are
@@ -556,6 +579,16 @@ struct Workspace
 
             return true
 
+        if code >= u32(u8('0')) && code < u32(u8('0')) + u32(VIEW_KEYS.len)
+            if !repeat then self.look_from(VIEW_KEYS[code - u32(u8('0'))])
+
+            return true
+
+        if code == u32(u8('p'))
+            if !repeat then self.toggle_orthographic()
+
+            return true
+
         false
     end shortcut
 
@@ -565,6 +598,17 @@ struct Workspace
     click(&self, x: int, y: int, r: Rect, adding: bool = false)
         val lx = real(x - r.x)
         val ly = real(y - r.y)
+
+        // A click on the view cube is the cube's, drawn over everything else: on a face it turns to that view,
+        // and beside one it does nothing.
+        val cube = view_cube(self.camera, real(r.w), real(r.h))
+
+        if cube.holds(lx, ly)
+            cube.face_at(lx, ly) match
+                Some(v) -> self.look_from(v)
+                None -> ()
+
+            return
 
         if layout(self.doc, self.camera, real(r.w), real(r.h)).grip_at(lx, ly).is_some() then return
 
@@ -578,13 +622,19 @@ struct Workspace
         self.changed()
     end click
 
-    // A drag has just begun at this point. A handle of the selection comes first, whatever stands in front
-    // of it, then the nearest shape, which it selects, and failing both the view.
+    // A drag has just begun at this point. On the view cube it turns the view; otherwise a handle of the
+    // selection comes first, whatever stands in front of it, then the nearest shape, which it selects, and
+    // failing both the view.
     private begin(&self, x: int, y: int, r: Rect)
         val lx = real(x - r.x)
         val ly = real(y - r.y)
         val w = real(r.w)
         val h = real(r.h)
+
+        if view_cube(self.camera, w, h).holds(lx, ly)
+            self.gesture = Gesture.Orbit
+
+            return
 
         layout(self.doc, self.camera, w, h).grip_at(lx, ly) match
             Some(grip) ->
@@ -856,6 +906,15 @@ struct Workspace
                                   separator(),
                                   item("Array…", () -> self.open_array(), enabled = doc.can_arrange)]))
         all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0),
+                               separator(),
+                               item("Home", () -> self.look_from(NamedView.Home), "Cmd+0"),
+                               item("Top", () -> self.look_from(NamedView.Top), "Cmd+1"),
+                               item("Front", () -> self.look_from(NamedView.Front), "Cmd+2"),
+                               item("Right", () -> self.look_from(NamedView.Right), "Cmd+3"),
+                               item("Back", () -> self.look_from(NamedView.Back), "Cmd+4"),
+                               item("Left", () -> self.look_from(NamedView.Left), "Cmd+5"),
+                               toggle("Orthographic", () -> self.toggle_orthographic(), self.camera.orthographic, "Cmd+P"),
+                               separator(),
                                toggle("Build Volume", () -> self.toggle_volume(), self.show_volume),
                                toggle("Dimensions", () -> self.toggle_dimensions(), self.show_dimensions)]))
         all
@@ -1183,8 +1242,11 @@ const MARK_BACK: u32 = 0xFFFFFFu32
 const MARK_EDGE: u32 = 0xC9D1DCu32
 const MARK_INK: u32 = 0x1F2937u32
 
-// The viewport with the selection's marks written over it, each on a light label of its own. They are painted
-// after the viewport, so they land on its picture rather than in the hole cut for it.
+// The type the view cube's faces are named in, in points.
+const CUBE_FONT: real = 10.0
+
+// The viewport with the view cube's names and the selection's marks written over it, each mark on a light label
+// of its own. They are painted after the viewport, so they land on its picture rather than in the hole cut for it.
 struct Dimensioned
     owner: &Workspace
     inner: &Viewport
@@ -1194,6 +1256,18 @@ impl View for Dimensioned
 
     paint(&self, c: *Canvas, r: Rect)
         self.inner.paint(c, r)
+        c.clip(r)
+        c.push_font_size(CUBE_FONT)
+        c.ink(MARK_INK)
+
+        for l in view_cube(self.owner.camera, real(r.w), real(r.h)).labels.view()
+            val size = c.text_size(l.words)
+
+            c.text(Rect(r.x + int(l.x) - size.w / 2, r.y + int(l.y) - size.h / 2, size.w, size.h), l.words)
+
+        c.unink()
+        c.pop_font_size()
+        c.unclip()
 
         if !self.owner.show_dimensions then return
 

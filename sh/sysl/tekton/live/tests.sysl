@@ -2,7 +2,7 @@ module sh.sysl.tekton.live
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.control.{Pass, Request, Respond, Routed}
-import sh.sysl.tekton.camera.new_camera
+import sh.sysl.tekton.camera.{NamedView, new_camera}
 import sh.sysl.tekton.document.{Primitive, Transform, new_document}
 import sh.sysl.tekton.interface.{Workspace, new_workspace}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
@@ -57,7 +57,7 @@ private an_empty_document_reports_nothing_in_it()
     val c = new_camera()
 
     assert_eq(state_json(d, c, "", false),
-              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":null,\"dirty\":false,\"outside_volume\":false,\"measure\":null}")
+              "{\"items\":[],\"selection\":[],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7,\"projection\":\"perspective\",\"view\":\"home\"},\"file\":null,\"dirty\":false,\"outside_volume\":false,\"measure\":null}")
 end an_empty_document_reports_nothing_in_it
 
 @test
@@ -70,9 +70,25 @@ private a_small_document_reports_exactly_this()
     w.file = "/tmp/part.tekton"
 
     assert_eq(report(w),
-              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0],\"segments\":64}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7},\"file\":\"/tmp/part.tekton\",\"dirty\":true,\"outside_volume\":false,\"measure\":{\"size\":[40,40,40],\"gaps\":null}}")
+              "{\"items\":[{\"id\":1,\"kind\":\"box\",\"hole\":false,\"position\":[1,2,3],\"size\":[20,20,20],\"rotation\":[1,0,0,0]},{\"id\":2,\"kind\":\"sphere\",\"hole\":false,\"position\":[10,0,0],\"size\":[40,40,40],\"rotation\":[1,0,0,0],\"segments\":64}],\"selection\":[2],\"camera\":{\"target\":[0,0,8],\"distance\":150,\"yaw\":0.3,\"tilt\":0.5,\"fov\":0.7,\"projection\":\"perspective\",\"view\":\"home\"},\"file\":\"/tmp/part.tekton\",\"dirty\":true,\"outside_volume\":false,\"measure\":{\"size\":[40,40,40],\"gaps\":null}}")
     assert_eq(a, 1)
 end a_small_document_reports_exactly_this
+
+@test
+private the_report_names_the_projection_and_the_view()
+    val w = new_workspace()
+
+    w.look_from(NamedView.Top)
+    assert(report(w).contains("\"projection\":\"perspective\",\"view\":\"top\""), "top, while still turning there")
+
+    w.next_frame(1.0)
+    w.toggle_orthographic()
+    assert(report(w).contains("\"tilt\":1.5707963267948966"), "straight down")
+    assert(report(w).contains("\"projection\":\"orthographic\",\"view\":\"top\""), "orthographic from the top")
+
+    w.camera.orbit(5.0, 0.0)
+    assert(report(w).contains("\"view\":\"custom\""), "and turned by hand, no name")
+    assert(sysl.encoding.json.parse(report(w)).is_ok(), "still JSON")
 
 @test
 private a_clearance_is_reported_only_where_there_is_one()

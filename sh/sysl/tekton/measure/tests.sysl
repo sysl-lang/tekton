@@ -286,3 +286,29 @@ an_empty_viewport_measures_nothing()
     put(doc, Vec3(0.0, 0.0, 0.0), Vec3(10.0, 10.0, 10.0))
     assert_eq(measures(doc, new_camera(), 0.0, 0.0).marks.len(), 0, "nothing to place them in")
 end an_empty_viewport_measures_nothing
+
+@test
+orthographic_labels_the_same_sizes_beside_the_box_on_the_screen()
+    val doc = new_document()
+
+    put(doc, Vec3(0.0, 0.0, 0.0), Vec3(20.4, 1.25, 7.0))
+
+    val camera = new_camera()
+    val perspective = measures(doc, camera, W, H)
+
+    camera.toggle_orthographic()
+
+    val m = measures(doc, camera, W, H)
+    val sizes = size_marks(m)
+
+    assert_eq(m.marks.len(), perspective.marks.len(), "as many marks")
+    assert(near(sizes[0], 20.4) && near(sizes[1], 1.25) && near(sizes[2], 7.0), "the same sizes")
+
+    for i in 0..<m.marks.len()
+        val a = m.marks[i]
+        val b = perspective.marks[i]
+
+        assert(a.axis == b.axis, "each on the same edge")
+        assert((a.x - b.x).abs() < 40.0 && (a.y - b.y).abs() < 40.0, "near where perspective puts it")
+        assert(a.x > 0.0 && a.x < W && a.y > 0.0 && a.y < H, "and on the screen")
+end orthographic_labels_the_same_sizes_beside_the_box_on_the_screen

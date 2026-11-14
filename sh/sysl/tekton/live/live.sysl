@@ -5,7 +5,7 @@ module sh.sysl.tekton.live
 // Only reachable over that socket; without `--control` nothing listens.
 
 import sh.sysl.sdl3.control.{Pass, Request, Respond, Routed, error_response, json}
-import sh.sysl.tekton.camera.Camera
+import sh.sysl.tekton.camera.{Camera, view_name}
 import sh.sysl.tekton.document.{Document, Node, Operation, primitive_name}
 import sh.sysl.tekton.interface.Workspace
 import sh.sysl.tekton.measure.{gaps, selection_box}
@@ -64,7 +64,8 @@ outside_volume(doc: &Document, printer: Printer) -> bool =
         Some(b) -> !printer.holds(b)
         None -> false
 
-// The whole report, on one line: the tree, the selected ids in the order they were chosen, the camera, the file
+// The whole report, on one line: the tree, the selected ids in the order they were chosen, the camera (with its
+// projection and the named view it is at or going to, or `custom`), the file
 // (or `null` before there is one), whether anything is unsaved, and whether a part sticks out of the printer's
 // build volume.
 state_json(doc: &Document, camera: &Camera, file: string, dirty: bool, printer: Printer = CORE_ONE) -> string
@@ -85,7 +86,9 @@ state_json(doc: &Document, camera: &Camera, file: string, dirty: bool, printer: 
         out = out + s"${doc.selection[i]}"
 
     out = out + s"],\"camera\":{\"target\":${vector(camera.target)},\"distance\":${number(camera.distance)},"
-    out = out + s"\"yaw\":${number(camera.turn)},\"tilt\":${number(camera.tilt)},\"fov\":${number(camera.fov)}},"
+    out = out + s"\"yaw\":${number(camera.turn)},\"tilt\":${number(camera.tilt)},\"fov\":${number(camera.fov)},"
+    out = out + s"\"projection\":\"${if camera.orthographic then "orthographic" else "perspective"}\","
+    out = out + s"\"view\":\"${camera.named_view().map(view_name).unwrap_or("custom")}\"},"
     out = out + s"\"file\":${if file == "" then "null" else quoted(file)},\"dirty\":${dirty},"
     out = out + s"\"outside_volume\":${outside_volume(doc, printer)},\"measure\":${measure_json(doc)}}"
     out

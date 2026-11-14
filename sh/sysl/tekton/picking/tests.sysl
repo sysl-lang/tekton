@@ -1,7 +1,7 @@
 module sh.sysl.tekton.picking
 @tests
 
-import sh.sysl.tekton.camera.new_camera
+import sh.sysl.tekton.camera.{NamedView, new_camera, view_name}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.document.{Primitive, Transform, moved_to, new_document}
 import sh.sysl.tekton.space.{Ray, Vec3}
@@ -155,3 +155,65 @@ picking_does_not_recompute_a_cached_mesh()
 
     pick(doc, looking_along_x(0.0, 10.0))
     assert_eq(doc.builds, before, "the second click used what the first left")
+
+// ## Under each view and projection
+
+@test
+a_click_finds_what_is_under_it_in_every_view_and_both_projections()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Sphere)
+
+    // Apart along both axes, so neither stands in front of the other from any side.
+    doc.set_transform(b, moved_to(Vec3(40.0, 40.0, 0.0)))
+
+    for v in [NamedView.Home, NamedView.Top, NamedView.Front, NamedView.Right, NamedView.Back, NamedView.Left]
+        for ortho in [false, true]
+            val camera = new_camera()
+
+            camera.frame(doc)
+            camera.go_to(v)
+            camera.advance(1.0)
+            camera.orthographic = ortho
+
+            for id in [a, b]
+                val centre = doc.bounds_of(doc.find(id).unwrap()).center()
+                val (x, y) = camera.project(centre, 900.0, 600.0).unwrap()
+
+                assert(pick(doc, camera.ray(x, y, 900.0, 600.0)) == Some(id), s"shape ${id} from the ${view_name(v)}, ortho ${ortho}")
+
+            assert(pick(doc, camera.ray(2.0, 2.0, 900.0, 600.0)).is_none(), "a corner of the view is empty")
+
+@test
+an_orthographic_click_takes_the_nearer_of_two_in_line()
+    val doc = new_document()
+    val back = doc.add_shape(Primitive.Box)
+    val front = doc.add_shape(Primitive.Box)
+    val camera = new_camera()
+
+    doc.set_transform(back, moved_to(Vec3(0.0, 40.0, 0.0)))
+    doc.set_transform(front, moved_to(Vec3(0.0, -40.0, 0.0)))
+    camera.target = Vec3(0.0, 0.0, 10.0)
+    camera.go_to(NamedView.Front)
+    camera.advance(1.0)
+    camera.orthographic = true
+
+    assert(pick(doc, camera.ray(450.0, 300.0, 900.0, 600.0)) == Some(front), "the one in front, from the front")
+
+    camera.go_to(NamedView.Back)
+    camera.advance(1.0)
+    assert(pick(doc, camera.ray(450.0, 300.0, 900.0, 600.0)) == Some(back), "and the other from the back")
+
+@test
+a_click_part_way_to_a_view_finds_what_is_drawn_there()
+    val doc = new_document()
+    val id = doc.add_shape(Primitive.Box)
+    val camera = new_camera()
+
+    camera.go_to(NamedView.Top)
+    camera.advance(0.1)
+    assert(camera.moving(), "on the way")
+
+    val (x, y) = camera.project(doc.bounds_of(doc.find(id).unwrap()).center(), 900.0, 600.0).unwrap()
+
+    assert(pick(doc, camera.ray(x, y, 900.0, 600.0)) == Some(id), "the ray and the picture agree on the way")
