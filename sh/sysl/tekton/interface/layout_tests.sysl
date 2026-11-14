@@ -94,9 +94,9 @@ a_closed_section_hides_its_tiles_and_opening_it_brings_them_back()
 
 @test
 a_two_word_shape_is_labelled_on_two_lines()
-    assert_eq(tile_label(Primitive.HalfSphere).len(), 2)
-    assert_eq(tile_label(Primitive.PolygonPrism)[1], "prism")
-    assert_eq(tile_label(Primitive.Cylinder).len(), 1)
+    assert_eq(tile_label(Primitive.HalfSphere), "Half\nsphere")
+    assert_eq(tile_label(Primitive.PolygonPrism), "Polygon\nprism")
+    assert_eq(tile_label(Primitive.Cylinder), "Cylinder")
 
 @test
 no_tile_is_cut_short_at_the_narrowest_library()

@@ -1115,17 +1115,18 @@ struct Workspace
 
         val menus = self.menus()
 
-        column([menu_bar(menus.view(), self.open_menu).restyle(t -> light()),
+        column([menu_bar(menus.view(), self.open_menu),
                 column([self.toolbar(), divider(),
                         split_row([sized(self.library(), self.library_width, MIN_LIBRARY_WIDTH, MAX_LIBRARY_WIDTH,
                                          default_settings().library_width),
                                    flexed(self.dimensioned().named("viewport"), 300),
                                    sized(self.sidebar(), self.inspector_width, MIN_INSPECTOR_WIDTH, MAX_INSPECTOR_WIDTH,
                                          default_settings().inspector_width)]).flex(),
-                        divider(), self.status_line()], 0).restyle(t -> CHROME).flex()], 0)
+                        divider(), self.status_line()], 0).flex()], 0)
             .modal(self.array_open, self.array_panel())
             .modal(self.hollow_open, self.hollow_panel())
             .modal(self.in_dialog, spacer().frame(0, 0))
+            .restyle(t -> CHROME)
     end tree
 
     // The array panel: what kind of array, how many copies, how far apart, and OK or Cancel.
@@ -1155,7 +1156,7 @@ struct Workspace
         parts.push(row([button("Cancel", () -> self.cancel_array(), Role.Primary, Variant.Soft).named("array.cancel").flex(),
                         button("OK", () -> self.accept_array(), Role.Primary, Variant.Filled).named("array.ok").flex()], 6))
 
-        column(parts.view(), 6).padding(16).background(0xFFFFFFu32, 8).border(0xCBD2DCu32, 1, 8).restyle(t -> light())
+        column(parts.view(), 6).padding(16).ground(t -> t.ground, 8).border(0xCBD2DCu32, 1, 8)
     end array_panel
 
     // The hollow panel: how thick the walls are, closed or open at the top, and OK or Cancel.
@@ -1174,7 +1175,7 @@ struct Workspace
         parts.push(row([button("Cancel", () -> self.cancel_hollow(), Role.Primary, Variant.Soft).named("hollow.cancel").flex(),
                         button("OK", () -> self.accept_hollow(), Role.Primary, Variant.Filled).named("hollow.ok").flex()], 6))
 
-        column(parts.view(), 6).padding(16).background(0xFFFFFFu32, 8).border(0xCBD2DCu32, 1, 8).restyle(t -> light())
+        column(parts.view(), 6).padding(16).ground(t -> t.ground, 8).border(0xCBD2DCu32, 1, 8)
     end hollow_panel
 
     // The menus, each row live only where its command would do something now.
@@ -1265,7 +1266,7 @@ struct Workspace
         val body = column([section("Basic", self.basic_open, self.tiles(BASIC_SHAPES)),
                            section("More", self.more_open, self.tiles(MORE_SHAPES)), spacer().flex()], 4)
 
-        body.padding(8).background(CHROME.panel)
+        body.padding(8).panel(0)
     end library
 
     // Three tiles to a row, each a glyph over its name.
@@ -1273,12 +1274,8 @@ struct Workspace
         var all: Buf[&View] = buf()
 
         for p in shapes
-            var words: Buf[&View] = buf()
-
-            for word in tile_label(p)
-                words.push(row([spacer().flex(), text(word).text_style(TextStyle.Caption), spacer().flex()]))
-
-            val face = column([icon(primitive_glyph(p).view(), TILE_GLYPH, GLYPH_VIEW), column(words.view(), 0)], 4)
+            val face = column([icon(primitive_glyph(p).view(), TILE_GLYPH, GLYPH_VIEW),
+                               paragraph(tile_label(p), Align.Centre).text_style(TextStyle.Caption)], 4)
 
             all.push(button_with(face, () -> self.add(p), Role.Primary, Variant.Soft).tooltip(s"Add a ${to_lower(primitive_name(p))}")
                          .named(s"palette.${primitive_key(p)}").cell(8))
@@ -1313,7 +1310,7 @@ struct Workspace
              self.rigid_tool(),
              self.tool(snap_glyph(), s"Snap ${millimetres(self.grid)}", "How far a drag moves at a time",
                        () -> self.snap_open.set(true), true, "toolbar.snap").popover(self.snap_open, self.snap_choices()),
-             spacer().flex()], 4).pad(top = 4, right = 8, bottom = 4, left = 8).background(CHROME.panel)
+             spacer().flex()], 4).pad(top = 4, right = 8, bottom = 4, left = 8).panel(0)
     end toolbar
 
     // Rigid, filled while it is on: the same setting as the Arrange menu's row.
@@ -1399,13 +1396,13 @@ struct Workspace
 
     // The right-hand column: the object list over the selection's properties, the line between them dragged.
     private sidebar(&self) -> &View
-        val heading = text("Objects").text_style(TextStyle.Caption).foreground(CHROME.table.head_ink).pad(left = 4)
+        val heading = reactive((i, t) -> text("Objects").text_style(TextStyle.Caption).foreground(t.table.head_ink)).pad(left = 4)
         val listed = column([heading, scroll(self.objects(), self.objects_offset).flex()], 4).padding(8)
         val inspector = scroll(self.inspector().padding(12), self.inspector_offset)
 
         split_column([sized(listed, self.objects_height, MIN_OBJECTS_HEIGHT, MAX_OBJECTS_HEIGHT,
                             default_settings().objects_height),
-                      flexed(inspector, 120)]).background(CHROME.panel)
+                      flexed(inspector, 120)]).panel(0)
     end sidebar
 
     // Every top-level item, a row each, the selected ones highlighted. A click selects one; Shift or Cmd adds it to
@@ -1452,9 +1449,10 @@ struct Workspace
 
     // The line along the bottom: what is wrong, or else what the pointer and the keys do.
     private status_line(&self) -> &View
-        val said: &View = if self.problem.read() != "" then text(self.status()).foreground(WRONG_INK) else text(self.status())
+        val said: &View = if self.problem.read() != "" then paragraph(self.status()).foreground(WRONG_INK)
+                          else paragraph(self.status())
 
-        said.text_style(TextStyle.Caption).pad(top = 4, right = 12, bottom = 4, left = 12).background(CHROME.panel)
+        said.text_style(TextStyle.Caption).pad(top = 4, right = 12, bottom = 4, left = 12).panel(0)
             .named("status")
     end status_line
 
@@ -1855,14 +1853,16 @@ private wrapped(s: string, room: usize) -> string
     out
 end wrapped
 
-// What a shape's tile says, a line to an entry, so a two-word name stands as two short lines rather than being cut.
-tile_label(p: Primitive) -> Buf[string]
-    var lines: Buf[string] = buf()
+// What a shape's tile says, a word to a line, so a two-word name stands as two short lines rather than being cut.
+tile_label(p: Primitive) -> string
+    var out = ""
 
     for word in split(primitive_name(p), " ")
-        lines.push(word)
+        if out != "" then out += "\n"
 
-    lines
+        out += word
+
+    out
 end tile_label
 
 // What the object list calls each of these items: its kind and how many of that kind come before it and it, so
@@ -1901,11 +1901,11 @@ private object_row(glyph: Buf[Path], name: string, chosen: bool, i: Interaction,
 end object_row
 
 // The rule between two of the toolbar's groups.
-private rule() -> &View = spacer().frame(1, 22).background(CHROME.edge).pad(left = 4, right = 4)
+private rule() -> &View = spacer().frame(1, 22).ground(t -> t.edge).pad(left = 4, right = 4)
 
 // A toolbar choice's box: its buttons one under another on the ground, with an edge round it.
 private choices(cells: []const &View) -> &View =
-    column(cells, 4).padding(8).background(CHROME.ground, CHROME.radius).border(CHROME.edge, 1, CHROME.radius)
+    column(cells, 4).padding(8).ground(t -> t.ground, CHROME.radius).border(CHROME.edge, 1, CHROME.radius)
 
 // A length as the toolbar writes it: "0.1 mm", "1 mm".
 millimetres(v: real) -> string =
