@@ -209,6 +209,11 @@ their own tests, so most changes never need the whole application linked or a wi
      given wall thickness, open at the top or closed.
    - **Shapes**: wedge, pyramid, tube (wall thickness), half sphere, polygon prism (3–64 sides), each with the
      fields its shape needs, and text (a line of characters, font size, depth) once its kerning is settled.
+   - **Interface redesign**: the shape library on the left as icon tiles (a drawn glyph and a short label)
+     in collapsible groups — Basic, More, Threads & Text, Imported; on the right the object list above the
+     selection's properties; along the top, under the menus, a toolbar of icon buttons with tooltips (undo,
+     redo, group, ungroup, align, mirror, Rigid, snap step); a status line along the bottom for the hints the
+     panel prints today. Both side panels' widths are dragged, and remembered. The viewport keeps the middle.
    - **Object list**: a panel naming every top-level item (renamable), with hide, show and lock; a hidden item
      is not drawn, picked or exported; a locked one cannot be selected by a click in the viewport.
    - **Workplane**: a new shape is placed on the face under the pointer, standing on it; a Workplane tool
@@ -218,7 +223,29 @@ their own tests, so most changes never need the whole application linked or a wi
    - **Views**: Top, Front, Right and Home views, perspective or orthographic, and a view cube in the corner.
    - **Files**: import STL, OBJ and 3MF as mesh shapes (moved, turned, scaled, grouped and cut like any
      other), import an SVG's outlines extruded to a depth, export OBJ, and a colour per item carried into 3MF.
-   - **Sketching**: on the workplane, draw a closed profile from lines, rectangles, circles and arcs with
-     typed lengths; Extrude it to a height or Revolve it about an axis by an angle. The result is a shape like
-     any other that keeps its profile, so it can be opened and edited again.
+   - **Threads**: a thread shape, outside (a bolt, a bottle's neck) or inside (a nut, a lid), from a diameter,
+     a pitch, a length and a profile (ISO metric, or a rounder container thread), with a clearance so a lid
+     printed with an inside thread fits a neck printed with the matching outside one. It is a shape like any
+     other, so it is grouped with a cylinder to make a neck, or with a hole to make a lid.
+   - **Section view**: View → Section cuts the view (not the model) along a plane the user drags, so the walls,
+     the fit of a lid and the inside of a hollow are seen in cross-section, the cut faces filled.
+   - **Push/pull**: dragging a flat face of a shape moves that face along its normal, lengthening or
+     shortening the shape on that side only, the opposite face staying where it was.
+   - **Printability check**: View → Check for Printing marks walls thinner than the nozzle allows, overhangs
+     steeper than the printer bridges without support, and parts too small to print, from the `Printer` value.
+   - **Sketching**: on the workplane, draw a closed profile from lines, rectangles, circles, arcs and spline
+     curves with typed lengths; Extrude it to a height (straight or tapered) or Revolve it about an axis by an
+     angle, or Loft between two profiles on parallel planes. The result is a shape like any other that keeps
+     its profiles, so it can be opened and edited again. **Edit Profile** turns a round shape (cylinder, cone,
+     sphere, half sphere, tube, polygon prism) into the sketch that makes it, so a body started from the palette
+     can be given a curved, waisted or flared side without being rebuilt.
+   - **Edit Mesh**: any item (a shape, a group, an import) can be turned into an editable mesh, a kind of item
+     like any other: grouped, cut by holes, arrayed, mirrored, saved. Opened for editing, its vertices, edges
+     and faces are selected and moved with the same handles, snapping and typed values as items, and faces are
+     extruded and inset, edge loops cut, and edges bevelled. **It stays printable by construction**: every edit
+     is checked for a closed, non-self-intersecting surface, and one that would break it is refused with the
+     reason, rather than left for the slicer to find.
+   - **Smooth**: an editable mesh can be smoothed by subdivision (levels 0–4), its edited cage staying the
+     thing that is edited, so organic shapes, a grip that fits a hand, are made by shaping a rough cage. Edges
+     can be marked sharp so a smooth body keeps a crisp rim.
 8. nex scripting.
