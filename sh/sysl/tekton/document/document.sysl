@@ -467,6 +467,11 @@ struct Document
     checked_root: &Node
     checked_dirty: bool
 
+    // The tree the last nudge made and what was selected then, so a nudge that follows it with nothing between
+    // joins its step.
+    nudged: Option[&Node]
+    nudged_of: Buf[int]
+
     // Whether the tree differs from what was last saved. Undoing back to it is not a difference, and neither
     // is an edit that puts every number back.
     is_dirty(&self) -> bool
@@ -1040,6 +1045,83 @@ struct Document
         self.put_copies(chosen, placed)
     end duplicate_selected
 
+    // What Copy and Cut keep: everything selected on the ground, a group with all of its parts. Nodes are never
+    // changed in place, so these stay as they are whatever happens to the document, and can be put in another.
+    copy_selected(&self) -> Result[Buf[&Node], string]
+        val chosen = self.selected_items()
+
+        if chosen.len() == 0 then return Err("Nothing is selected")
+
+        Ok(chosen)
+    end copy_selected
+
+    // The command behind Paste: copies of these, the `times`th time along, which is `times` steps beside where they
+    // were copied from; the copies are selected in place of what was. Every node of them has an id of its own.
+    paste(&self, kept: []const &Node, times: int, step: real) -> Result[unit, string]
+        if kept.len == 0 then return Err("Nothing has been copied")
+
+        var from: Buf[&Node] = buf()
+        var placed: Buf[Transform] = buf()
+
+        for node in kept
+            from.push(node)
+            placed.push(shifted(node, 0, step * real(times)).transform)
+
+        self.put_copies(from, placed)
+    end paste
+
+    // The command behind Select All: everything on the ground.
+    select_all(&self)
+        var chosen: Buf[int] = buf()
+
+        for item in self.items() do chosen.push(item.id)
+
+        self.selection = chosen
+    end select_all
+
+    // The command behind the arrow keys: everything selected moves by `by`, as one step; and one that follows with
+    // nothing between, on the same selection, is the same step, so a key held down is one.
+    nudge_selected(&self, by: Vec3) -> Result[unit, string]
+        if self.selection.len() == 0 then return Err("Nothing is selected")
+
+        var placed: Buf[(int, Transform)] = buf()
+
+        for id in self.selection.view()
+            val t = self.find(id).ok_or("nothing selected")?.transform
+            val p = t.translation + by
+
+            if !p.is_finite() || p.x.abs() > POSITION_LIMIT || p.y.abs() > POSITION_LIMIT || p.z.abs() > POSITION_LIMIT
+                return Err(s"Position is limited to ${POSITION_LIMIT.round()} mm")
+
+            placed.push((id, Transform(p, t.rotation, t.scale)))
+
+        var joins = false
+
+        self.nudged match
+            Some(r) -> joins = r === self.root && self.nudged_of == self.selection
+            None -> ()
+
+        val before = self.root
+
+        self.begin_step()
+
+        if joins then self.step_start = Some(self.state())
+
+        for (id, t) in placed.view() do self.set_transform(id, t)
+
+        if joins
+            self.in_step = false
+            self.step_start = None
+        else
+            self.end_step()
+
+        if self.root !== before
+            self.nudged = Some(self.root)
+            self.nudged_of = self.selection
+
+        Ok(())
+    end nudge_selected
+
     // The command behind Array: `count` copies of everything selected, each a step further along `pattern` than
     // the one before, standing as things of their own and selected in place of what they copy.
     array_selected(&self, count: int, pattern: Pattern) -> Result[unit, string]
@@ -1263,6 +1345,17 @@ struct Document
         self.selection = chosen
     end select
 
+    // The box selection: these join the selection, those already in it staying.
+    select_more(&self, ids: Buf[int])
+        var chosen: Buf[int] = buf()
+
+        for s in self.selection.view() do chosen.push(s)
+
+        for id in ids.view() do if !self.is_selected(id) then chosen.push(id)
+
+        self.selection = chosen
+    end select_more
+
     // The shift-click: this node joins the selection, or leaves it if it was already in.
     toggle_selected(&self, id: int)
         var chosen: Buf[int] = buf()
@@ -1476,7 +1569,7 @@ restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], nex
                     None, None)
 
     Document(root, buf(), last_placed, next_id, 0, next_revision, buf(), buf(), false, None, HISTORY_MESH_BYTES,
-             model_text(root), root, false)
+             model_text(root), root, false, None, buf())
 end restored_document
 
 // A shape as a file says it.

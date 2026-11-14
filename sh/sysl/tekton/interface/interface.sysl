@@ -2,16 +2,17 @@ module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.camera.{Camera, new_camera}
-import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
+import sh.sysl.sdl3.{DialogResult, FileFilter, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
                      ask_save_file, message_button}
-import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_name}
+import sh.sysl.tekton.document.{Document, Edge, Node, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_name}
 import sh.sysl.tekton.export.{export_3mf, export_stl}
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
-import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
+import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, Stroke, drag_body, drag_grip, layout}
 import sh.sysl.tekton.measure.{Mark, Measures, measures}
-import sh.sysl.tekton.picking.{pick, pick_hit}
+import sh.sysl.tekton.picking.{box_pick, pick, pick_hit}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
+import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
 import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, set_title, stop, viewport, viewport_depth_format, window}
 import sysl.buf.{Buf, buf}
@@ -32,6 +33,12 @@ const CLICK_SLOP: int = 3
 
 // The grid a drag snaps to unless told otherwise, in millimetres.
 const DEFAULT_GRID: real = 1.0
+
+// A box selection's colours, those of a selected shape, and its fill's band and outline's radius in points.
+val BOX_INK: [4]f32 = [0.04, 0.48, 1.0, 1.0]
+val BOX_FILL: [4]f32 = [0.04, 0.48, 1.0, 0.16]
+const BOX_BAND: real = 8.0
+const BOX_LINE: real = 0.75
 
 const RADIANS_PER_DEGREE: real = real.pi() / 180.0
 
@@ -86,6 +93,7 @@ enum Gesture
     Idle
     Orbit
     Edit(drag: Drag)
+    Box(x: real, y: real)
 
 // Which of the selection's numbers a field shows.
 enum Quantity
@@ -182,6 +190,12 @@ struct Workspace
     // Whether the selection's sizes and gaps show over the viewport, and what they were as last painted.
     show_dimensions: bool
     measured: &Measures
+
+    // What Copy and Cut kept, how many times it has been pasted since, and the rectangle being dragged over the
+    // viewport, as two corners in its points. The clipboard outlives a document: it is the window's.
+    clipboard: Buf[&Node]
+    pastes: int
+    box: Option[(real, real, real, real)]
 
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
@@ -420,6 +434,58 @@ struct Workspace
     // A copy of the selection one grid step to the right, selected.
     duplicate(&self) = if !self.is_editing() then self.answer(self.doc.duplicate_selected(self.grid))
 
+    // Keep a copy of everything selected for Paste, which the window holds across New and Open.
+    copy(&self)
+        if self.is_editing() then return
+
+        self.doc.copy_selected() match
+            Ok(kept) ->
+                self.clipboard = kept
+                self.pastes = 0
+                self.answer(Ok(()))
+            Err(why) -> self.answer(Err(why))
+    end copy
+
+    // Copy, and then delete: one step.
+    cut(&self)
+        if self.is_editing() then return
+
+        self.doc.copy_selected() match
+            Ok(kept) ->
+                self.clipboard = kept
+                self.pastes = 0
+                self.answer(self.doc.delete_selected())
+            Err(why) -> self.answer(Err(why))
+    end cut
+
+    // What was copied, one grid step along x further for each time it is pasted, selected.
+    paste(&self)
+        if self.is_editing() || self.clipboard.len() == 0 then return
+
+        val made = self.doc.paste(self.clipboard.view(), self.pastes + 1, self.grid)
+
+        made match
+            Ok(_) -> self.pastes += 1
+            Err(_) -> ()
+
+        self.answer(made)
+    end paste
+
+    select_all(&self)
+        if self.is_editing() then return
+
+        self.doc.select_all()
+        self.problem.set("")
+        self.changed()
+    end select_all
+
+    // The selection moved by this many of the grid's steps along an axis, or this many millimetres.
+    nudge(&self, by: Vec3)
+        if self.is_editing() || self.doc.selection.len() == 0 then return
+
+        self.answer(self.doc.nudge_selected(by))
+    end nudge
+
     // Put up the array panel over everything, with nothing typing anywhere else.
     open_array(&self)
         if self.is_editing() then return
@@ -508,6 +574,10 @@ struct Workspace
         self.measured = if self.show_dimensions then measures(self.doc, self.camera, w, h) else Measures(buf(), buf())
 
         for s in self.measured.strokes.view() do self.overlay.strokes.push(s)
+
+        self.box match
+            Some((ax, ay, bx, by)) -> for s in box_strokes(ax, ay, bx, by) do self.overlay.strokes.push(s)
+            None -> ()
     end lay_out
 
     // A key the toolkit does not see, as the window reports it: `code` is the layout's own, so the letters are
@@ -515,12 +585,29 @@ struct Workspace
     shortcut(&self, code: u32, mods: u16, repeat: bool) -> bool
         if self.in_dialog.read() then return true
 
+        val shift = (mods & KMOD_SHIFT) != 0u16
+
+        // An arrow moves the selection, unless the keyboard is a field's or a menu is open over it. With Command
+        // it goes up and down, with Shift a millimetre, and otherwise a grid step along the ground.
+        if code == KEY_LEFT || code == KEY_RIGHT || code == KEY_UP || code == KEY_DOWN
+            if self.typing || self.covered() then return false
+
+            val step = if shift then 1.0 else self.grid
+            val sign = if code == KEY_LEFT || code == KEY_DOWN then -1.0 else 1.0
+
+            if (mods & KMOD_GUI) != 0u16
+                if code == KEY_UP || code == KEY_DOWN then self.nudge(Vec3(0.0, 0.0, sign * step))
+            elif code == KEY_LEFT || code == KEY_RIGHT
+                self.nudge(Vec3(sign * step, 0.0, 0.0))
+            else
+                self.nudge(Vec3(0.0, sign * step, 0.0))
+
+            return true
+
         if (mods & KMOD_GUI) == 0u16 || self.typing then return false
 
         // The array panel is answered before anything else is asked for.
         if self.array_open.read() then return true
-
-        val shift = (mods & KMOD_SHIFT) != 0u16
 
         if code == u32(u8('n')) || code == u32(u8('o')) || code == u32(u8('s'))
             if !repeat
@@ -556,6 +643,19 @@ struct Workspace
 
             return true
 
+        if code == u32(u8('x')) || code == u32(u8('c')) || code == u32(u8('v')) || code == u32(u8('a'))
+            if !repeat
+                if code == u32(u8('x'))
+                    self.cut()
+                elif code == u32(u8('c'))
+                    self.copy()
+                elif code == u32(u8('v'))
+                    self.paste()
+                else
+                    self.select_all()
+
+            return true
+
         false
     end shortcut
 
@@ -580,7 +680,7 @@ struct Workspace
 
     // A drag has just begun at this point. A handle of the selection comes first, whatever stands in front
     // of it, then the nearest shape, which it selects, and failing both the view.
-    private begin(&self, x: int, y: int, r: Rect)
+    private begin(&self, x: int, y: int, r: Rect, adding: bool)
         val lx = real(x - r.x)
         val ly = real(y - r.y)
         val w = real(r.w)
@@ -608,8 +708,19 @@ struct Workspace
                 drag_body(self.doc, p.id, ray.at(p.distance), lx, ly) match
                     Some(d) -> self.start_edit(d)
                     None -> ()
-            None -> self.gesture = Gesture.Orbit
+            None -> self.gesture = if adding then Gesture.Box(lx, ly) else Gesture.Orbit
     end begin
+
+    // The rectangle is let go: everything whose projection touches it joins the selection.
+    private finish_box(&self, w: real, h: real)
+        self.box match
+            Some((ax, ay, bx, by)) -> self.doc.select_more(box_pick(self.doc, self.camera, w, h, ax, ay, bx, by))
+            None -> ()
+
+        self.box = None
+        self.problem.set("")
+        self.changed()
+    end finish_box
 
     // However many frames it takes, a drag is one undo step.
     private start_edit(&self, d: Drag)
@@ -689,13 +800,17 @@ struct Workspace
                 Idle ->
                     val (bx, by) = c.press_origin()
 
-                    self.begin(bx, by, r)
+                    self.begin(bx, by, r, c.modifiers().shift)
                 _ -> ()
 
         self.gesture match
             Idle -> ()
             Orbit -> if ox != 0 || oy != 0 then self.camera.orbit(real(ox), real(oy))
             Edit(d) -> self.follow(d, c, r)
+            Box(sx, sy) ->
+                val (px, py) = c.pointer()
+
+                self.box = Some((sx, sy, real(px - r.x), real(py - r.y)))
 
         // The other buttons and the wheel are still read while a shape is being dragged, so they are taken
         // from whatever would have them, and do nothing: the view holding still is what keeps the shape
@@ -710,6 +825,10 @@ struct Workspace
         if wheel != 0 && !self.is_editing() then self.camera.zoom(real(wheel))
 
         if !c.held(PointerButton.Primary)
+            self.gesture match
+                Box(_, _) -> self.finish_box(real(r.w), real(r.h))
+                _ -> ()
+
             if self.is_editing()
                 self.doc.end_step()
                 self.changed()
@@ -741,6 +860,7 @@ struct Workspace
         self.gesture match
             Edit(d) -> return d.grip
             Orbit -> return None
+            Box(_, _) -> return None
             Idle -> ()
 
         val (x, y) = c.pointer()
@@ -829,6 +949,11 @@ struct Workspace
                                item("Quit", () -> self.request_quit())]))
         all.push(menu("Edit", [item("Undo", () -> self.undo(), "Cmd+Z", enabled = doc.can_undo),
                                item("Redo", () -> self.redo(), "Cmd+Shift+Z", enabled = doc.can_redo),
+                               separator(),
+                               item("Cut", () -> self.cut(), "Cmd+X", enabled = doc.can_delete),
+                               item("Copy", () -> self.copy(), "Cmd+C", enabled = doc.can_delete),
+                               item("Paste", () -> self.paste(), "Cmd+V", enabled = self.clipboard.len() > 0),
+                               item("Select All", () -> self.select_all(), "Cmd+A", enabled = doc.items().len > 0),
                                separator(),
                                item("Delete", () -> self.delete(), "Delete", enabled = doc.can_delete),
                                item("Duplicate", () -> self.duplicate(), "Cmd+D", enabled = doc.can_arrange),
@@ -1299,6 +1424,40 @@ unsaved_answer(r: Result[Option[i32], string]) -> Unsaved =
         Ok(None) -> Unsaved.Stay("")
         Err(why) -> Unsaved.Stay(s"Could not ask about the unsaved changes: ${why}")
 
+// The rectangle of a box selection: a translucent fill and a thin outline, in the colour a selected shape has.
+//
+// The fill is a run of thick strokes laid side by side along the rectangle's longer side, each as wide as the
+// pitch, so their soft edges meet and the colour is even, and each stops a radius short of the ends the
+// outline covers.
+box_strokes(ax: real, ay: real, bx: real, by: real) -> Buf[Stroke]
+    var out: Buf[Stroke] = buf()
+    val left = ax.min(bx)
+    val right = ax.max(bx)
+    val top = ay.min(by)
+    val bottom = ay.max(by)
+    val across = (right - left).min(bottom - top)
+    val bands = int((across / BOX_BAND).ceil())
+
+    if bands >= 1 && across >= 1.0
+        val pitch = across / real(bands)
+        val wide = right - left >= bottom - top
+
+        for i in 0..<bands
+            val at = (real(i) + 0.5) * pitch
+            val inset = pitch * 0.5
+
+            if wide
+                out.push(Stroke(left + inset, top + at, right - inset, top + at, inset, BOX_FILL))
+            else
+                out.push(Stroke(left + at, top + inset, left + at, bottom - inset, inset, BOX_FILL))
+
+    out.push(Stroke(left, top, right, top, BOX_LINE, BOX_INK))
+    out.push(Stroke(right, top, right, bottom, BOX_LINE, BOX_INK))
+    out.push(Stroke(right, bottom, left, bottom, BOX_LINE, BOX_INK))
+    out.push(Stroke(left, bottom, left, top, BOX_LINE, BOX_INK))
+    out
+end box_strokes
+
 new_workspace() -> &Workspace =
     Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
               layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), false, signal(NO_MENU), false,
@@ -1310,4 +1469,4 @@ new_workspace() -> &Workspace =
               (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"),
               (answer, parent) -> ask_save_file(answer, parent, three_mf_filters().view(), title = "Export 3MF"), false,
               () -> window(), title -> set_title(title), "", false, CORE_ONE, true, signal(false), signal(0), signal("3"),
-              signal("25"), signal("90"), true, Measures(buf(), buf()))
+              signal("25"), signal("90"), true, Measures(buf(), buf()), buf(), 0, None)

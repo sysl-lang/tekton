@@ -3,7 +3,8 @@ module sh.sysl.tekton.picking
 
 import sh.sysl.tekton.camera.new_camera
 import sh.sysl.quaternion.Quaternion
-import sh.sysl.tekton.document.{Primitive, Transform, moved_to, new_document}
+import sh.sysl.tekton.camera.Camera
+import sh.sysl.tekton.document.{Document, Primitive, Transform, moved_to, new_document}
 import sh.sysl.tekton.space.{Ray, Vec3}
 
 // A box 20 across from (-10, -10, 0) to (10, 10, 20), which is where the first shape lands.
@@ -155,3 +156,55 @@ picking_does_not_recompute_a_cached_mesh()
 
     pick(doc, looking_along_x(0.0, 10.0))
     assert_eq(doc.builds, before, "the second click used what the first left")
+
+// ## Box selection
+
+// Where a box's middle lands in a viewport of 900 by 600 as the default camera sees it.
+private middle_of(doc: &Document, id: int, camera: &Camera) -> (real, real)
+    camera.project(doc.bounds_of(doc.find(id).unwrap()).center(), 900.0, 600.0).unwrap()
+
+@test
+a_rectangle_over_a_shape_touches_it_and_one_beside_it_does_not()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val camera = new_camera()
+    val (x, y) = middle_of(doc, a, camera)
+
+    assert_eq(box_pick(doc, camera, 900.0, 600.0, x - 2.0, y - 2.0, x + 2.0, y + 2.0).len(), 1, "a small one inside")
+    assert_eq(box_pick(doc, camera, 900.0, 600.0, 0.0, 0.0, 900.0, 600.0).len(), 1, "one over everything")
+    assert_eq(box_pick(doc, camera, 900.0, 600.0, 0.0, 0.0, 5.0, 5.0).len(), 0, "one in a corner of the view")
+
+@test
+a_rectangle_in_either_corner_order_picks_alike_and_one_touching_an_edge_picks()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val camera = new_camera()
+    val (x, y) = middle_of(doc, a, camera)
+
+    assert(box_pick(doc, camera, 900.0, 600.0, x + 3.0, y + 3.0, x - 3.0, y - 3.0) ==
+           box_pick(doc, camera, 900.0, 600.0, x - 3.0, y - 3.0, x + 3.0, y + 3.0), "either way round")
+    assert_eq(box_pick(doc, camera, 900.0, 600.0, 0.0, 0.0, x, y).len(), 1, "a rectangle ending in the middle")
+
+@test
+a_rectangle_picks_each_thing_it_touches_in_the_order_they_stand()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+    val camera = new_camera()
+
+    doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    doc.set_transform(b, moved_to(Vec3(60.0, 0.0, 0.0)))
+
+    val (ax, ay) = middle_of(doc, a, camera)
+    val (bx, _) = middle_of(doc, b, camera)
+    val both = box_pick(doc, camera, 900.0, 600.0, ax.min(bx) - 5.0, 0.0, ax.max(bx) + 5.0, 600.0)
+
+    assert(both.len() == 2 && both[0] == a && both[1] == b, "both, in order")
+    assert_eq(box_pick(doc, camera, 900.0, 600.0, ax - 5.0, ay - 5.0, ax + 5.0, ay + 5.0).len(), 1, "only the near one")
+
+@test
+a_rectangle_of_no_viewport_picks_nothing()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    assert_eq(box_pick(doc, new_camera(), 0.0, 0.0, 0.0, 0.0, 10.0, 10.0).len(), 0, "no area")
