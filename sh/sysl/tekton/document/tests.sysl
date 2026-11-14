@@ -768,6 +768,38 @@ ungroup_undoes_to_the_group_and_redoes_to_the_parts()
     assert_eq(doc.describe(), parts, "to the parts")
 end ungroup_undoes_to_the_group_and_redoes_to_the_parts
 
+// Every state of a group and an ungroup is held exactly, however far the history is walked and from whichever
+// side, and an edit made on a state reached by undo changes nothing that came before it.
+@test
+group_and_ungroup_walk_back_and_forth_through_exact_states()
+    val doc = two_selected()
+    val loose = doc.describe()
+
+    doc.group_selected().unwrap()
+
+    val grouped = doc.describe()
+
+    doc.ungroup_selected().unwrap()
+
+    val parts = doc.describe()
+
+    for round in 0..<2
+        assert(doc.undo() && doc.undo(), s"${round}: back twice")
+        assert_eq(doc.describe(), loose, s"${round}: to the loose things")
+        assert(doc.redo(), s"${round}: forward")
+        assert_eq(doc.describe(), grouped, s"${round}: to the group")
+        assert(doc.redo(), s"${round}: forward again")
+        assert_eq(doc.describe(), parts, s"${round}: to the parts")
+
+    assert(doc.undo(), "back to the group")
+    doc.ungroup_selected().unwrap()
+    assert_eq(doc.describe(), parts, "ungrouped again, the same parts")
+    assert(doc.undo(), "back")
+    assert_eq(doc.describe(), grouped, "the group is as it was committed")
+    assert(doc.undo(), "back")
+    assert_eq(doc.describe(), loose, "and so are the loose things")
+end group_and_ungroup_walk_back_and_forth_through_exact_states
+
 @test
 undo_with_nothing_to_undo_and_redo_with_nothing_to_redo_change_nothing()
     val doc = new_document()

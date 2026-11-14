@@ -238,6 +238,35 @@ split_cuts_a_box_in_two_halves_that_stand_as_things_of_their_own()
         assert(doc.find(box).is_some(), "the first half keeps the box itself")
 end split_cuts_a_box_in_two_halves_that_stand_as_things_of_their_own
 
+// A split is redone to exactly the halves it made, and an edit of a half changes neither the halves the
+// history holds nor the whole thing before them.
+@test
+a_split_redoes_to_the_same_halves_and_editing_a_half_leaves_the_history_alone()
+    val doc = new_document()
+
+    placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+
+    val whole = doc.describe()
+
+    doc.split_selected(0).unwrap()
+
+    val halves = doc.describe()
+
+    assert(doc.undo(), "back")
+    assert_eq(doc.describe(), whole, "whole")
+    assert(doc.redo(), "forward")
+    assert_eq(doc.describe(), halves, "the same halves")
+
+    doc.select(Some(doc.items()[0].id))
+    doc.ungroup_selected().unwrap()
+    assert(doc.describe() != halves, "a half ungrouped to the thing and its cutter")
+    assert(doc.undo(), "back")
+    assert_eq(doc.describe(), halves, "the halves as the split made them")
+    assert(doc.undo(), "back")
+    assert_eq(doc.describe(), whole, "and the whole thing before them")
+    assert(close(total(doc), 8000.0, 1.0e-6), "all of it")
+end a_split_redoes_to_the_same_halves_and_editing_a_half_leaves_the_history_alone
+
 @test
 each_half_is_a_group_of_the_thing_and_a_cutter_and_ungroups_to_them()
     val doc = new_document()
