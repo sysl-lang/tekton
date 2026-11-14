@@ -209,6 +209,11 @@ their own tests, so most changes never need the whole application linked or a wi
      given wall thickness, open at the top or closed.
    - **Shapes**: wedge, pyramid, tube (wall thickness), half sphere, polygon prism (3–64 sides), each with the
      fields its shape needs, and text (a line of characters, font size, depth) once its kerning is settled.
+   - **Interface redesign**: the shape library on the left as icon tiles (a drawn glyph and a short label)
+     in collapsible groups — Basic, More, Threads & Text, Imported; on the right the object list above the
+     selection's properties; along the top, under the menus, a toolbar of icon buttons with tooltips (undo,
+     redo, group, ungroup, align, mirror, Rigid, snap step); a status line along the bottom for the hints the
+     panel prints today. Both side panels' widths are dragged, and remembered. The viewport keeps the middle.
    - **Object list**: a panel naming every top-level item (renamable), with hide, show and lock; a hidden item
      is not drawn, picked or exported; a locked one cannot be selected by a click in the viewport.
    - **Workplane**: a new shape is placed on the face under the pointer, standing on it; a Workplane tool
@@ -231,7 +236,9 @@ their own tests, so most changes never need the whole application linked or a wi
    - **Sketching**: on the workplane, draw a closed profile from lines, rectangles, circles, arcs and spline
      curves with typed lengths; Extrude it to a height (straight or tapered) or Revolve it about an axis by an
      angle, or Loft between two profiles on parallel planes. The result is a shape like any other that keeps
-     its profiles, so it can be opened and edited again.
+     its profiles, so it can be opened and edited again. **Edit Profile** turns a round shape (cylinder, cone,
+     sphere, half sphere, tube, polygon prism) into the sketch that makes it, so a body started from the palette
+     can be given a curved, waisted or flared side without being rebuilt.
    - **Edit Mesh**: any item (a shape, a group, an import) can be turned into an editable mesh, a kind of item
      like any other: grouped, cut by holes, arrayed, mirrored, saved. Opened for editing, its vertices, edges
      and faces are selected and moved with the same handles, snapping and typed values as items, and faces are
