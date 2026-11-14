@@ -88,7 +88,7 @@ each_new_shape_clears_every_shape_already_placed()
             for i in 0..<items.len - 1
                 assert(!fresh.overlaps_plan(doc.bounds_of(items[i])), s"shape ${id} clear of ${items[i].id}")
 
-    assert_eq(doc.items().len, 40usize, "all of them are in the document")
+    assert_eq(doc.items().len, 8 * PRIMITIVES.len, "all of them are in the document")
 
 @test
 placement_goes_past_a_shape_standing_in_the_way()
@@ -383,6 +383,25 @@ a_node_made_from_a_committed_one_cannot_change_it()
     assert(doc.undo() && doc.redo(), "through an undo and a redo")
     assert_eq(doc.describe(), before, "the history holds it unchanged")
 end a_node_made_from_a_committed_one_cannot_change_it
+
+@test
+a_hole_cuts_only_once_it_is_grouped_and_ungrouping_frees_it_to_cut_nothing()
+    val (doc, _, hole) = box_and_hole()
+    val whole = box_volume(20.0, 20.0, 20.0)
+    val cut = whole - polygon_area(5.0, 64) * 20.0
+
+    assert(near(doc.final_solid().unwrap().volume(), whole, 1.0e-3), "loose, the hole cuts nothing")
+    doc.group_selected().unwrap()
+    assert(near(doc.final_solid().unwrap().volume(), cut, 1.0e-3), "grouped, it cuts")
+    doc.ungroup_selected().unwrap()
+    assert(doc.find(hole).unwrap().hole, "freed, it is still a hole")
+    assert_eq(doc.items().len, 2, "standing loose")
+    assert(near(doc.final_solid().unwrap().volume(), whole, 1.0e-3), "and cuts nothing again")
+    assert(doc.undo(), "the ungroup undone")
+    assert(near(doc.final_solid().unwrap().volume(), cut, 1.0e-3), "brings the cut back")
+    assert(doc.redo(), "and redone")
+    assert(near(doc.final_solid().unwrap().volume(), whole, 1.0e-3), "takes it away")
+end a_hole_cuts_only_once_it_is_grouped_and_ungrouping_frees_it_to_cut_nothing
 
 @test
 a_group_joins_overlapping_solids_counting_the_overlap_once()

@@ -1,7 +1,9 @@
 module sh.sysl.tekton.picking
 
+import sh.sysl.tekton.camera.Camera
 import sh.sysl.tekton.document.{Document, Mesh}
 import sh.sysl.tekton.space.{Ray, Vec3}
+import sysl.buf.{Buf, buf}
 
 // Which shape a ray meets first, against the triangles the kernel made.
 
@@ -85,3 +87,39 @@ end pick_hit
 
 // The id of the nearest thing on the ground this ray meets, if any.
 pick(doc: &Document, ray: Ray) -> Option[int] = pick_hit(doc, ray).map(p -> p.id)
+
+// The things on the ground whose projection touches a rectangle of the viewport, in the order they stand. A
+// thing's projection is taken as the rectangle round its box's eight corners where they land on the screen, so
+// a rectangle that meets any part of that touches it; a corner behind the camera does not land anywhere and is
+// left out. The rectangle's corners may come in either order.
+box_pick(doc: &Document, camera: &Camera, width: real, height: real, ax: real, ay: real, bx: real, by: real) -> Buf[int]
+    var out: Buf[int] = buf()
+
+    if width <= 0.0 || height <= 0.0 then return out
+
+    val left = ax.min(bx)
+    val right = ax.max(bx)
+    val top = ay.min(by)
+    val bottom = ay.max(by)
+
+    for item in doc.items()
+        val b = doc.bounds_of(item)
+        var lo = (1.0e30, 1.0e30)
+        var hi = (-1.0e30, -1.0e30)
+        var seen = false
+
+        for corner in 0..<8
+            val p = Vec3(if (corner & 1) == 0 then b.min.x else b.max.x, if (corner & 2) == 0 then b.min.y else b.max.y,
+                         if (corner & 4) == 0 then b.min.z else b.max.z)
+
+            camera.project(p, width, height) match
+                Some((x, y)) ->
+                    seen = true
+                    lo = (lo.0.min(x), lo.1.min(y))
+                    hi = (hi.0.max(x), hi.1.max(y))
+                None -> ()
+
+        if seen && lo.0 <= right && hi.0 >= left && lo.1 <= bottom && hi.1 >= top then out.push(item.id)
+
+    out
+end box_pick

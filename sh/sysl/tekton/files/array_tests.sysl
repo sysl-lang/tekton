@@ -9,7 +9,7 @@ import sysl.fs.{make_temp_dir, remove_dir_all}
 
 @test
 an_array_of_a_group_saves_and_opens_as_it_was()
-    val doc = new_document()
+    val doc = new_document(rigid = false)
     val a = doc.add_shape(Primitive.Box)
     val b = doc.add_shape(Primitive.Cone)
 

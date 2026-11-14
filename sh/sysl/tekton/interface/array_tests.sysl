@@ -46,10 +46,13 @@ private row_live(w: &Workspace, c: *Recorder, title: string, label: string) -> b
     row.marks.index_of("disabled").is_none()
 end row_live
 
-// A cylinder at (30, 0, 0), selected, with the array panel put up through the Arrange menu.
+// A cylinder at (30, 0, 0), selected, with the array panel put up through the Arrange menu. Rigid is off, so the
+// copies stand exactly where the fields put them even where they overlap.
 private with_panel(c: *Recorder) -> &Workspace
     val w = new_workspace()
     val id = w.doc.add_shape(Primitive.Cylinder)
+
+    w.doc.rigid = false
 
     w.doc.set_transform(id, moved_to(Vec3(30.0, 0.0, 0.0)))
     tap(w, c, "menu.Arrange")
@@ -85,7 +88,12 @@ command_d_duplicates_the_selection_one_grid_step_along_x()
     w.doc.set_transform(id, moved_to(Vec3(10.0, 0.0, 0.0)))
     assert(w.shortcut(u32(u8('d')), KMOD_GUI, false), "taken")
     assert_eq(w.doc.items().len, 2, "a copy")
-    assert_eq(w.doc.find(w.doc.selection[0]).unwrap().transform.translation.x, 10.0 + w.grid, "a grid step along")
+    assert_eq(w.doc.find(w.doc.selection[0]).unwrap().transform.translation.x, 10.0 + 20.0,
+              "grid steps along, with Rigid on as many as clear the 20 mm original")
+    w.doc.undo()
+    w.doc.rigid = false
+    assert(w.shortcut(u32(u8('d')), KMOD_GUI, false), "taken with Rigid off")
+    assert_eq(w.doc.find(w.doc.selection[0]).unwrap().transform.translation.x, 10.0 + w.grid, "one grid step along")
     assert(w.shortcut(u32(u8('d')), KMOD_GUI, true), "a held key is taken")
     assert_eq(w.doc.items().len, 2, "and makes no more")
     assert(!w.shortcut(u32(u8('d')), 0u16, false), "not without command")

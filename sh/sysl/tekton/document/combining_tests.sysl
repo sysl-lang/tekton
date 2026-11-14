@@ -1,0 +1,600 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.{Aabb, Vec3}
+import sysl.buf.{Buf, buf}
+import sysl.math.pi
+
+// Intersection groups, Split and Hollow, measured on the solids the kernel joins and cuts with.
+
+private close(a: real, b: real, tolerance: real) -> bool = (a - b).abs() <= tolerance
+
+private volume(doc: &Document, id: int) -> real = doc.solid_of(doc.find(id).unwrap()).volume()
+
+private total(doc: &Document) -> real = doc.final_solid().unwrap().volume()
+
+// A shape of this kind standing at `at`, selected alone.
+private placed(doc: &Document, p: Primitive, at: Vec3) -> int
+    val id = doc.add_shape(p)
+
+    doc.set_transform(id, moved_to(at))
+    id
+end placed
+
+private select_all(doc: &Document, ids: []const int)
+    doc.select(Some(ids[0]))
+
+    for i in 1..<ids.len do doc.toggle_selected(ids[i])
+end select_all
+
+// Two 20 mm boxes overlapping by half along x.
+private overlapping(doc: &Document) -> (int, int)
+    val a = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+    val b = placed(doc, Primitive.Box, Vec3(10.0, 0.0, 0.0))
+
+    select_all(doc, [a, b])
+    (a, b)
+end overlapping
+
+// The area of a regular polygon of `n` sides inscribed in a circle of radius `r`.
+private polygon(r: real, n: int) -> real = real(n) / 2.0 * r * r * (2.0 * pi / real(n)).sin()
+
+// -- Intersection --------------------------------------------------------------------------------------------------
+
+@test
+an_intersection_keeps_only_what_its_solids_share()
+    val doc = new_document()
+
+    overlapping(doc)
+
+    val before = doc.describe()
+    val id = doc.group_selected(intersect = true).unwrap()
+    val group = doc.find(id).unwrap()
+
+    assert(group.intersects, "an intersection")
+    assert_eq(doc.items().len, 1, "one thing")
+    assert(close(total(doc), 10.0 * 20.0 * 20.0, 1.0e-6), s"the shared half: ${total(doc)}")
+
+    val b = doc.bounds_of(group)
+
+    assert(close(b.min.x, 0.0, 1.0e-9) && close(b.max.x, 10.0, 1.0e-9), "its box is the overlap's")
+    assert(doc.undo(), "one step back")
+    assert_eq(doc.describe(), before, "as it was")
+    assert(doc.redo(), "and forward")
+    assert(doc.find(id).unwrap().intersects, "an intersection again")
+end an_intersection_keeps_only_what_its_solids_share
+
+@test
+an_intersection_of_solids_that_share_nothing_is_refused()
+    val doc = new_document()
+    val a = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+    val b = placed(doc, Primitive.Box, Vec3(40.0, 0.0, 0.0))
+
+    select_all(doc, [a, b])
+
+    val before = doc.describe()
+    val steps = doc.undos.len()
+
+    doc.group_selected(intersect = true) match
+        Ok(_) -> assert(false, "refused")
+        Err(why) -> assert(why.contains("share nothing"), why)
+
+    assert_eq(doc.describe(), before, "nothing changed")
+    assert_eq(doc.undos.len(), steps, "no step")
+    assert(doc.group_selected().is_ok(), "a union of them is fine")
+end an_intersection_of_solids_that_share_nothing_is_refused
+
+@test
+an_intersections_holes_cut_what_its_solids_share()
+    val doc = new_document()
+    val (a, b) = overlapping(doc)
+    val hole = placed(doc, Primitive.Box, Vec3(5.0, 0.0, 0.0))
+
+    doc.resize_to(hole, Vec3(4.0, 4.0, 40.0)).unwrap()
+    doc.move_to(hole, Vec3(5.0, 0.0, -10.0)).unwrap()
+    select_all(doc, [hole])
+    doc.set_hole(true).unwrap()
+    select_all(doc, [a, b, hole])
+    doc.group_selected(intersect = true).unwrap()
+    assert(close(total(doc), 4000.0 - 4.0 * 4.0 * 20.0, 1.0e-6), s"the shared half, cut through: ${total(doc)}")
+end an_intersections_holes_cut_what_its_solids_share
+
+@test
+holes_that_cut_all_an_intersection_shares_are_refused_as_holes()
+    val doc = new_document()
+    val (a, b) = overlapping(doc)
+    val hole = placed(doc, Primitive.Box, Vec3(5.0, 0.0, 0.0))
+
+    select_all(doc, [hole])
+    doc.set_hole(true).unwrap()
+    select_all(doc, [a, b, hole])
+
+    doc.group_selected(intersect = true) match
+        Ok(_) -> assert(false, "refused")
+        Err(why) -> assert(why.contains("holes"), why)
+end holes_that_cut_all_an_intersection_shares_are_refused_as_holes
+
+@test
+a_groups_mode_switches_between_union_and_intersection_as_one_step_each()
+    val doc = new_document()
+
+    overlapping(doc)
+
+    val id = doc.group_selected().unwrap()
+
+    assert(close(total(doc), 30.0 * 20.0 * 20.0, 1.0e-6), "joined")
+    doc.set_group_mode(id, true).unwrap()
+    assert(close(total(doc), 4000.0, 1.0e-6), "shared")
+
+    val steps = doc.undos.len()
+
+    doc.set_group_mode(id, true).unwrap()
+    assert_eq(doc.undos.len(), steps, "the same mode is no step")
+    doc.undo()
+    assert(!doc.find(id).unwrap().intersects, "union again")
+    assert(close(total(doc), 12000.0, 1.0e-6), "joined again")
+    doc.redo()
+    assert(close(total(doc), 4000.0, 1.0e-6), "shared again")
+
+    val shape = doc.add_shape(Primitive.Box)
+
+    assert(doc.set_group_mode(shape, true).is_err(), "a shape has no mode")
+end a_groups_mode_switches_between_union_and_intersection_as_one_step_each
+
+@test
+switching_a_group_of_apart_solids_to_intersection_is_refused()
+    val doc = new_document()
+    val a = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+    val b = placed(doc, Primitive.Box, Vec3(40.0, 0.0, 0.0))
+
+    select_all(doc, [a, b])
+
+    val id = doc.group_selected().unwrap()
+    val before = doc.describe()
+
+    assert(doc.set_group_mode(id, true).is_err(), "refused")
+    assert_eq(doc.describe(), before, "still a union")
+end switching_a_group_of_apart_solids_to_intersection_is_refused
+
+@test
+a_tree_holding_an_empty_intersection_has_a_problem_naming_it()
+    var parts: Buf[&Node] = buf()
+
+    parts.push(restored_shape(1, Primitive.Box, moved_to(Vec3(0.0, 0.0, 0.0)), 0, false))
+    parts.push(restored_shape(2, Primitive.Box, moved_to(Vec3(50.0, 0.0, 0.0)), 1, false))
+
+    var items: Buf[&Node] = buf()
+
+    items.push(restored_group(3, moved_to(Vec3(0.0, 0.0, 0.0)), 0, false, parts, intersect = true))
+
+    val doc = restored_document(items, 4, None, 1)
+
+    assert_eq(doc.problem(), Some((3, "The solids in this intersection share nothing")), "named")
+    assert(doc.final_solid().is_err(), "nothing to export")
+end a_tree_holding_an_empty_intersection_has_a_problem_naming_it
+
+@test
+an_intersection_nested_in_a_union_mirrored_and_copied_keeps_its_mode()
+    val doc = new_document()
+
+    overlapping(doc)
+
+    val inner = doc.group_selected(intersect = true).unwrap()
+    val other = placed(doc, Primitive.Box, Vec3(60.0, 0.0, 0.0))
+
+    select_all(doc, [inner, other])
+
+    val outer = doc.group_selected().unwrap()
+
+    assert(close(total(doc), 4000.0 + 8000.0, 1.0e-6), s"the shared half and a box: ${total(doc)}")
+    doc.mirror_selected(0).unwrap()
+    doc.duplicate_selected(200.0).unwrap()
+    assert(close(total(doc), 2.0 * 12000.0, 1.0e-6), s"twice: ${total(doc)}")
+
+    val copy = doc.find(doc.selection[0]).unwrap()
+
+    assert(copy.children[0].intersects, "the copy's part still intersects")
+    assert(!doc.find(outer).unwrap().intersects, "the outer stays a union")
+end an_intersection_nested_in_a_union_mirrored_and_copied_keeps_its_mode
+
+@test
+ungrouping_an_intersection_gives_back_its_whole_parts()
+    val doc = new_document()
+
+    overlapping(doc)
+    doc.group_selected(intersect = true).unwrap()
+    doc.ungroup_selected().unwrap()
+    assert_eq(doc.items().len, 2, "both parts")
+    assert(close(total(doc), 12000.0, 1.0e-6), "whole again")
+end ungrouping_an_intersection_gives_back_its_whole_parts
+
+// -- Split ---------------------------------------------------------------------------------------------------------
+
+@test
+split_cuts_a_box_in_two_halves_that_stand_as_things_of_their_own()
+    for axis in 0..<3
+        val doc = new_document()
+        val box = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+        val before = doc.describe()
+
+        doc.split_selected(axis).unwrap()
+        assert_eq(doc.items().len, 2, s"${axis}: two halves")
+        assert_eq(doc.selection.len(), 2, s"${axis}: both selected")
+
+        for id in doc.selection.view()
+            assert(close(volume(doc, id), 4000.0, 1.0e-6), s"${axis}: half the box: ${volume(doc, id)}")
+
+            val b = doc.bounds_of(doc.find(id).unwrap())
+
+            assert(close(b.size().axis(axis), 10.0, 1.0e-9), s"${axis}: half as long")
+
+        assert(close(total(doc), 8000.0, 1.0e-6), s"${axis}: nothing lost")
+        assert(doc.problem().is_none(), "a document that saves")
+        assert(doc.undo(), "one step")
+        assert_eq(doc.describe(), before, s"${axis}: whole again, ids and all")
+        doc.redo()
+        assert_eq(doc.items().len, 2, "split again")
+        assert(doc.find(box).is_some(), "the first half keeps the box itself")
+end split_cuts_a_box_in_two_halves_that_stand_as_things_of_their_own
+
+@test
+each_half_is_a_group_of_the_thing_and_a_cutter_and_ungroups_to_them()
+    val doc = new_document()
+    val box = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+
+    doc.split_selected(0).unwrap()
+
+    val low = doc.items()[0]
+    val high = doc.items()[1]
+
+    assert(low.is_group && high.is_group, "groups")
+    assert(!low.children[0].hole && low.children[1].hole, "the thing, and a hole")
+    assert(low.children[0].id == box, "the low half holds the box itself")
+    assert(high.children[0].id != box, "the high half a copy of its own")
+
+    var ids: Buf[int] = buf()
+
+    for item in doc.items()
+        ids.push(item.id)
+
+        for part in item.children.view() do ids.push(part.id)
+
+    for i in 0..<ids.len()
+        for j in 0..<i do assert(ids[i] != ids[j], "every id its own")
+        assert(ids[i] < doc.next_id, "every id below next")
+
+    select_all(doc, [low.id])
+    doc.ungroup_selected().unwrap()
+    assert_eq(doc.items().len, 3, "the box, its cutter and the other half")
+end each_half_is_a_group_of_the_thing_and_a_cutter_and_ungroups_to_them
+
+@test
+split_through_the_middle_of_a_selection_leaves_things_it_misses_whole()
+    val doc = new_document()
+    val a = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+    val b = placed(doc, Primitive.Box, Vec3(30.0, 0.0, 0.0))
+
+    select_all(doc, [a, b])
+
+    val before = doc.describe()
+
+    assert(doc.split_selected(0).is_err(), "the middle, x = 15, passes between them")
+    assert_eq(doc.describe(), before, "nothing changed, the ids included")
+
+    val c = placed(doc, Primitive.Box, Vec3(15.0, 30.0, 0.0))
+
+    select_all(doc, [a, b, c])
+    doc.split_selected(0).unwrap()
+    assert_eq(doc.items().len, 4, "only the one across the middle")
+    assert_eq(doc.selection.len(), 4, "all still selected")
+    assert(!doc.find(a).unwrap().is_group, "a whole")
+
+    select_all(doc, [a, b])
+    doc.split_selected(1).unwrap()
+    assert_eq(doc.items().len, 6, "across y both are halved")
+    assert(close(total(doc), 3.0 * 8000.0, 1.0e-6), "nothing lost")
+end split_through_the_middle_of_a_selection_leaves_things_it_misses_whole
+
+@test
+splitting_a_group_with_holes_halves_its_result()
+    val doc = new_document()
+    val box = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+    val hole = placed(doc, Primitive.Cylinder, Vec3(0.0, 0.0, -5.0))
+
+    doc.resize_to(hole, Vec3(8.0, 8.0, 30.0)).unwrap()
+    select_all(doc, [hole])
+    doc.set_hole(true).unwrap()
+    select_all(doc, [box, hole])
+    doc.group_selected().unwrap()
+
+    val whole = total(doc)
+
+    doc.split_selected(1).unwrap()
+    assert(close(total(doc), whole, 1.0e-6), s"the halves add up: ${total(doc)} against ${whole}")
+
+    for id in doc.selection.view() do assert(close(volume(doc, id), whole / 2.0, 1.0e-6), "each half of it")
+end splitting_a_group_with_holes_halves_its_result
+
+@test
+a_split_hole_cuts_as_the_hole_did_clearance_and_all()
+    for split in [false, true]
+        val doc = new_document()
+        val box = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+        val hole = placed(doc, Primitive.Cylinder, Vec3(0.0, 0.0, -5.0))
+
+        doc.resize_to(hole, Vec3(8.0, 8.0, 30.0)).unwrap()
+        select_all(doc, [hole])
+        doc.set_hole(true).unwrap()
+        doc.set_clearance(hole, 0.5).unwrap()
+
+        if split
+            doc.split_selected(2).unwrap()
+
+            for id in doc.selection.view() do assert(doc.find(id).unwrap().hole, "each half a hole")
+
+        var all: Buf[int] = buf()
+
+        for item in doc.items() do all.push(item.id)
+
+        select_all(doc, all.view())
+        doc.group_selected().unwrap()
+
+        // The cylinder's 9 mm, grown by the clearance, cut through the 20 mm box.
+        val want = 8000.0 - polygon(4.5, ROUND_SEGMENTS) * 20.0
+
+        assert(close(total(doc), want, 1.0e-6), s"split ${split}: ${total(doc)} against ${want}")
+end a_split_hole_cuts_as_the_hole_did_clearance_and_all
+
+@test
+split_halves_turned_rounded_hollow_and_intersected_things_without_loss()
+    val doc = new_document()
+    val turned = placed(doc, Primitive.Cylinder, Vec3(0.0, 0.0, 0.0))
+    val rounded = placed(doc, Primitive.Box, Vec3(0.0, 40.0, 0.0))
+    val shell = placed(doc, Primitive.Box, Vec3(0.0, 80.0, 0.0))
+
+    doc.rotate_to(turned, Quaternion.from_euler(0.3, 0.2, 0.1)).unwrap()
+    doc.set_edge_radius(rounded, 4.0).unwrap()
+    select_all(doc, [shell])
+    doc.hollow_selected(2.0, true).unwrap()
+
+    val a = placed(doc, Primitive.Sphere, Vec3(0.0, 120.0, 0.0))
+    val b = placed(doc, Primitive.Sphere, Vec3(8.0, 120.0, 0.0))
+
+    select_all(doc, [a, b])
+    doc.group_selected(intersect = true).unwrap()
+
+    val whole = total(doc)
+    var all: Buf[int] = buf()
+
+    for item in doc.items() do all.push(item.id)
+
+    select_all(doc, all.view())
+    doc.split_selected(0).unwrap()
+    assert_eq(doc.items().len, 8, "each halved")
+    assert(close(total(doc), whole, whole * 1.0e-6), s"the halves add up: ${total(doc)} against ${whole}")
+    assert(doc.problem().is_none(), "a document that saves")
+end split_halves_turned_rounded_hollow_and_intersected_things_without_loss
+
+// -- Hollow --------------------------------------------------------------------------------------------------------
+
+@test
+a_hollow_box_has_walls_of_the_thickness_asked_for_closed_or_open()
+    for open in [false, true]
+        val doc = new_document()
+        val id = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+        val before = doc.describe()
+
+        doc.hollow_selected(2.0, open).unwrap()
+        assert(doc.find(id).unwrap().shell == Shell(2.0, open), "the shell is the node's")
+
+        val cavity = if open then 16.0 * 16.0 * 18.0 else 16.0 * 16.0 * 16.0
+
+        assert(close(volume(doc, id), 8000.0 - cavity, 1.0e-6), s"open ${open}: ${volume(doc, id)}")
+        assert(close(doc.size_of(doc.find(id).unwrap()).x, 20.0, 1.0e-9), "the same size")
+
+        // Resized, the walls keep their thickness.
+        doc.resize_to(id, Vec3(40.0, 20.0, 10.0)).unwrap()
+
+        val resized = if open then 36.0 * 16.0 * 8.0 else 36.0 * 16.0 * 6.0
+
+        assert(close(volume(doc, id), 8000.0 - resized, 1.0e-6), s"resized, open ${open}: ${volume(doc, id)}")
+        doc.undo()
+        doc.undo()
+        assert_eq(doc.describe(), before, "two steps back, solid again")
+end a_hollow_box_has_walls_of_the_thickness_asked_for_closed_or_open
+
+@test
+an_open_box_is_open_at_its_own_top_and_a_mirror_puts_the_opening_below()
+    val doc = new_document()
+    val id = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+
+    doc.hollow_selected(2.0, true).unwrap()
+
+    val section = (z: real) -> doc.solid_of(doc.find(id).unwrap()).slice(z).area()
+
+    assert(close(section(19.5), 400.0 - 256.0, 1.0e-6), "only walls at the top")
+    assert(close(section(0.5), 400.0, 1.0e-6), "a floor at the bottom")
+    doc.mirror_selected(2).unwrap()
+    assert(close(section(19.5), 400.0, 1.0e-6), "the floor is on top")
+    assert(close(section(0.5), 144.0, 1.0e-6), "and the opening below")
+end an_open_box_is_open_at_its_own_top_and_a_mirror_puts_the_opening_below
+
+@test
+a_hollow_cylinder_sphere_and_cone_lose_exactly_their_moved_in_selves()
+    val n = ROUND_SEGMENTS
+    val doc = new_document()
+    val cylinder = placed(doc, Primitive.Cylinder, Vec3(0.0, 0.0, 0.0))
+    val cone = placed(doc, Primitive.Cone, Vec3(40.0, 0.0, 0.0))
+    val sphere = placed(doc, Primitive.Sphere, Vec3(80.0, 0.0, 0.0))
+
+    for id in [cylinder, cone, sphere] do doc.resize_to(id, Vec3(40.0, 40.0, 30.0)).unwrap()
+
+    val solid_cone = volume(doc, cone)
+    val solid_sphere = volume(doc, sphere)
+
+    select_all(doc, [cylinder, cone, sphere])
+    doc.hollow_selected(3.0, false).unwrap()
+
+    val want_cylinder = polygon(20.0, n) * 30.0 - polygon(17.0, n) * 24.0
+
+    assert(close(volume(doc, cylinder), want_cylinder, want_cylinder * 1.0e-9), s"cylinder ${volume(doc, cylinder)}")
+
+    // The slope moves in by the wall, square to itself, so the cone's cavity is the cone of its own slope from a base
+    // raised by the wall.
+    val across = 3.0 * (20.0 * 20.0 + 30.0 * 30.0).sqrt() / 30.0
+    val base = 20.0 * (1.0 - 3.0 / 30.0) - across
+    val apex = 30.0 * (1.0 - across / 20.0)
+    val want_cone = solid_cone - polygon(base, n) * (apex - 3.0) / 3.0
+
+    assert(close(volume(doc, cone), want_cone, want_cone * 1.0e-9), s"cone ${volume(doc, cone)} against ${want_cone}")
+
+    // A sphere's cavity is the sphere shrunk by the wall on every side.
+    val want_sphere = solid_sphere * (1.0 - (17.0 * 17.0 * 12.0) / (20.0 * 20.0 * 15.0))
+
+    assert(close(volume(doc, sphere), want_sphere, want_sphere * 1.0e-9), s"sphere ${volume(doc, sphere)}")
+end a_hollow_cylinder_sphere_and_cone_lose_exactly_their_moved_in_selves
+
+@test
+a_rounded_box_keeps_its_rounds_inside_moved_in_by_the_wall()
+    val doc = new_document()
+    val id = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+
+    doc.resize_to(id, Vec3(40.0, 30.0, 20.0)).unwrap()
+    doc.set_edge_radius(id, 5.0).unwrap()
+
+    val solid = volume(doc, id)
+
+    doc.hollow_selected(2.0, false).unwrap()
+
+    // The cavity is a 36 x 26 x 16 box rounded by 3, its section through the middle a rounded rectangle.
+    val section = doc.solid_of(doc.find(id).unwrap()).slice(10.0).area()
+    val outer = 40.0 * 30.0 - (4.0 - pi) * 25.0
+    val inner = 36.0 * 26.0 - (4.0 - pi) * 9.0
+
+    assert(close(section, outer - inner, (outer - inner) * 0.01), s"walls: ${section} against ${outer - inner}")
+    assert(volume(doc, id) < solid, "less than the solid")
+end a_rounded_box_keeps_its_rounds_inside_moved_in_by_the_wall
+
+@test
+a_hollow_torus_and_a_hollow_group_are_eroded_by_a_ball()
+    val doc = new_document()
+    val torus = placed(doc, Primitive.Torus, Vec3(0.0, 0.0, 0.0))
+
+    doc.resize_to(torus, Vec3(60.0, 60.0, 18.0)).unwrap()
+    doc.hollow_selected(2.0, false).unwrap()
+
+    // A tube of radius 9 about a ring of radius 21, its inside a tube of radius 7.
+    val want = 2.0 * pi * pi * 21.0 * (81.0 - 49.0)
+
+    assert(close(volume(doc, torus), want, want * 0.05), s"torus ${volume(doc, torus)} against ${want}")
+
+    val (a, b) = (placed(doc, Primitive.Box, Vec3(100.0, 0.0, 0.0)), placed(doc, Primitive.Box, Vec3(110.0, 0.0, 0.0)))
+
+    select_all(doc, [a, b])
+
+    val group = doc.group_selected().unwrap()
+
+    doc.hollow_selected(2.0, false).unwrap()
+
+    // An L-free bar 30 x 20 x 20 with a 26 x 16 x 16 cavity, the cavity's edges a little rounded by the ball's facets.
+    val shell = 12000.0 - 26.0 * 16.0 * 16.0
+
+    assert(close(volume(doc, group), shell, shell * 0.02), s"group ${volume(doc, group)} against ${shell}")
+    assert(volume(doc, group) >= shell - 1.0e-6, "the wall nowhere thinner than asked")
+    doc.set_open_top(group, true).unwrap()
+
+    val open = 12000.0 - 26.0 * 16.0 * 18.0
+
+    assert(close(volume(doc, group), open, open * 0.02), s"open group ${volume(doc, group)} against ${open}")
+end a_hollow_torus_and_a_hollow_group_are_eroded_by_a_ball
+
+@test
+a_wall_out_of_range_or_with_no_room_inside_is_refused()
+    val doc = new_document()
+
+    placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+
+    val before = doc.describe()
+    val steps = doc.undos.len()
+
+    for wall in [0.3, 20.5, -1.0, real.nan(), real.infinity()]
+        assert(doc.hollow_selected(wall, false).is_err(), s"${wall}")
+
+    doc.hollow_selected(10.0, false) match
+        Ok(_) -> assert(false, "a 10 mm wall fills a 20 mm box")
+        Err(why) -> assert(why.contains("no\nroom"), why)
+
+    assert_eq(doc.describe(), before, "nothing changed")
+    assert_eq(doc.undos.len(), steps, "no step")
+    assert(doc.hollow_selected(MIN_WALL, false).is_ok(), "the thinnest wall")
+end a_wall_out_of_range_or_with_no_room_inside_is_refused
+
+@test
+hollow_leaves_holes_as_they_are_and_refuses_a_selection_of_holes()
+    val doc = new_document()
+    val solid = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+    val hole = placed(doc, Primitive.Box, Vec3(40.0, 0.0, 0.0))
+
+    select_all(doc, [hole])
+    doc.set_hole(true).unwrap()
+    assert(!doc.can_hollow(), "nothing to hollow")
+    assert(doc.hollow_selected(2.0, false).is_err(), "refused")
+    select_all(doc, [solid, hole])
+    assert(doc.can_hollow(), "a solid among them")
+    doc.hollow_selected(2.0, false).unwrap()
+    assert(doc.find(solid).unwrap().is_hollow, "the solid hollowed")
+    assert(!doc.find(hole).unwrap().is_hollow, "the hole left alone")
+
+    val steps = doc.undos.len()
+
+    doc.hollow_selected(2.0, false).unwrap()
+    assert_eq(doc.undos.len(), steps, "hollowing again the same is no step")
+end hollow_leaves_holes_as_they_are_and_refuses_a_selection_of_holes
+
+@test
+the_wall_and_the_top_are_edited_afterwards_each_one_step()
+    val doc = new_document()
+    val id = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+
+    doc.hollow_selected(2.0, false).unwrap()
+    doc.set_wall(id, 3.0).unwrap()
+    assert(close(volume(doc, id), 8000.0 - 14.0 * 14.0 * 14.0, 1.0e-6), "a thicker wall")
+    doc.set_wall(id, 0.1).unwrap()
+    assert_eq(doc.find(id).unwrap().shell.wall, MIN_WALL, "held to the thinnest")
+    doc.set_wall(id, 50.0) match
+        Ok(_) -> assert(false, "20 mm is held to, and leaves no room")
+        Err(_) -> ()
+    doc.set_open_top(id, true).unwrap()
+    assert(doc.find(id).unwrap().shell.open, "open")
+    doc.set_wall(id, 0.0).unwrap()
+    assert(!doc.find(id).unwrap().is_hollow, "solid again")
+    assert(close(volume(doc, id), 8000.0, 1.0e-6), "the whole box")
+    assert(doc.set_open_top(id, true).is_err(), "a solid has no top to open")
+    doc.undo()
+    assert(doc.find(id).unwrap().shell == Shell(MIN_WALL, true), "undone back to the open shell")
+    doc.undo()
+    assert(doc.find(id).unwrap().shell == Shell(MIN_WALL, false), "and closed")
+end the_wall_and_the_top_are_edited_afterwards_each_one_step
+
+@test
+a_hollow_shell_is_copied_arrayed_and_cut_as_a_shell()
+    val doc = new_document()
+    val id = placed(doc, Primitive.Box, Vec3(0.0, 0.0, 0.0))
+
+    doc.hollow_selected(2.0, false).unwrap()
+    doc.array_selected(2, Pattern.Line(0, 40.0)).unwrap()
+
+    for copy in doc.selection.view()
+        assert(doc.find(copy).unwrap().shell == Shell(2.0, false), "a copy is a shell")
+        assert(close(volume(doc, copy), 3904.0, 1.0e-6), "with the same walls")
+
+    // A hollow hole with a clearance cuts its shell grown by the clearance, keeping its wall.
+    select_all(doc, [id])
+    doc.set_hole(true).unwrap()
+    doc.set_clearance(id, 1.0).unwrap()
+
+    val node = doc.find(id).unwrap()
+
+    assert(close(doc.solid_of(node).volume(), 22.0 * 22.0 * 22.0 - 18.0 * 18.0 * 18.0, 1.0e-6), "grown, the same wall")
+end a_hollow_shell_is_copied_arrayed_and_cut_as_a_shell

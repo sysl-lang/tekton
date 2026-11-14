@@ -125,3 +125,231 @@ depth_runs_from_zero_at_the_near_plane_to_one_at_the_far()
 
     assert((near_clip.z / near_w).abs() < 1.0e-6, "near is zero")
     assert((far_clip.z / far_w - 1.0).abs() < 1.0e-6, "far is one")
+
+// ## Named views
+
+private close_vec(a: Vec3, b: Vec3) -> bool = (a - b).length() < 1.0e-6
+
+// A camera that has arrived at a view.
+private at_view(v: NamedView) -> &Camera
+    val c = new_camera()
+
+    c.go_to(v)
+    c.advance(1.0)
+    c
+end at_view
+
+@test
+each_named_view_looks_where_its_name_says()
+    for (v, forward, up) in [(NamedView.Top, Vec3(0.0, 0.0, -1.0), Vec3(0.0, 1.0, 0.0)),
+                             (NamedView.Front, Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0)),
+                             (NamedView.Right, Vec3(-1.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0)),
+                             (NamedView.Back, Vec3(0.0, -1.0, 0.0), Vec3(0.0, 0.0, 1.0)),
+                             (NamedView.Left, Vec3(1.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0))]
+        val c = at_view(v)
+
+        assert(close_vec(c.forward(), forward), s"${view_name(v)} looks the right way")
+        assert(close_vec(c.up(), up), s"${view_name(v)} has the right way up")
+        assert(c.named_view() == Some(v), s"and is called ${view_name(v)}")
+
+@test
+home_is_the_view_a_new_document_starts_on()
+    val fresh = new_camera()
+    val c = at_view(NamedView.Top)
+
+    assert(fresh.named_view() == Some(NamedView.Home), "a new camera is at home")
+    c.go_to(NamedView.Home)
+    c.advance(1.0)
+    assert(close_vec(c.forward(), fresh.forward()) && close_vec(c.up(), fresh.up()), "and home comes back to it")
+
+@test
+a_view_keeps_the_target_and_the_distance()
+    val c = new_camera()
+
+    c.pan(30.0, 10.0, 600.0)
+    c.zoom(200.0)
+
+    val target = c.target
+    val distance = c.distance
+
+    for v in [NamedView.Top, NamedView.Front, NamedView.Right, NamedView.Back, NamedView.Left, NamedView.Home]
+        c.go_to(v)
+        c.advance(1.0)
+        assert(c.target == target && c.distance == distance, s"${view_name(v)} looks at the same place from as far")
+        assert(close_vec(c.eye() + c.forward() * c.distance, target), "straight at it")
+
+@test
+going_to_a_view_turns_there_over_a_quarter_second()
+    val c = new_camera()
+    val before = c.forward()
+
+    c.go_to(NamedView.Top)
+    assert(c.moving(), "on the way")
+    assert(close_vec(c.forward(), before), "it starts where it was")
+    assert(c.named_view() == Some(NamedView.Top), "but already says where it is going")
+
+    c.advance(0.125)
+
+    val half = c.forward()
+
+    assert(!close_vec(half, before) && !close_vec(half, Vec3(0.0, 0.0, -1.0)), "half way it is between the two")
+    assert(close(half.length(), 1.0), "still a direction")
+
+    c.advance(0.124)
+    assert(c.moving(), "not there a moment early")
+    c.advance(0.002)
+    assert(!c.moving(), "and there on time")
+    assert(close_vec(c.forward(), Vec3(0.0, 0.0, -1.0)), "looking straight down")
+
+@test
+the_turn_to_a_view_goes_the_short_way_round()
+    val c = new_camera()
+
+    c.orbit(-7.0 / ORBIT_RATE, 0.0)
+    assert(c.named_view().is_none(), "turned by hand, it is no named view")
+
+    val turn = c.turn
+
+    c.go_to(NamedView.Front)
+    assert((c.turn - turn).abs() <= pi, "less than half a turn from where it was")
+    assert(c.named_view() == Some(NamedView.Front), "and it is the front")
+
+@test
+a_drag_from_a_view_beyond_the_tilt_range_only_comes_back_toward_it()
+    val top = at_view(NamedView.Top)
+
+    top.orbit(0.0, 50.0)
+    assert_eq(top.tilt, pi * 0.5, "no further than straight down")
+    top.orbit(0.0, -50.0)
+    assert(top.tilt < pi * 0.5 && top.tilt > MIN_TILT, "and up from it")
+
+    val front = at_view(NamedView.Front)
+
+    front.orbit(0.0, -50.0)
+    assert_eq(front.tilt, 0.0, "no lower than level")
+    front.orbit(0.0, 50.0)
+    assert(front.tilt > 0.0, "and down from it")
+
+@test
+a_drag_while_going_to_a_view_arrives_first()
+    val c = new_camera()
+
+    c.go_to(NamedView.Right)
+    c.orbit(10.0, 0.0)
+    assert(!c.moving(), "it has arrived")
+    assert(close(c.turn, pi * 0.5 - 10.0 * ORBIT_RATE), "and turns on from there")
+
+@test
+time_passing_with_nowhere_to_go_changes_nothing()
+    val c = new_camera()
+    val before = c.forward()
+
+    c.advance(0.5)
+    assert(close_vec(c.forward(), before) && !c.moving(), "settled stays settled")
+
+// ## Orthographic
+
+@test
+orthographic_keeps_the_size_of_what_is_at_the_target()
+    val c = new_camera()
+    val p = c.target + c.right() * 20.0 + c.up() * 10.0
+    val (x0, y0) = c.project(p, 800.0, 600.0).unwrap()
+
+    c.toggle_orthographic()
+
+    val (x1, y1) = c.project(p, 800.0, 600.0).unwrap()
+
+    assert(close(x0, x1) && close(y0, y1), "the same place on the screen")
+
+    c.toggle_orthographic()
+    assert(!c.orthographic, "and back to perspective")
+
+@test
+orthographic_draws_near_and_far_the_same_size()
+    val c = new_camera()
+
+    c.toggle_orthographic()
+
+    val near_one = c.target - c.forward() * 50.0
+    val far_one = c.target + c.forward() * 50.0
+    val (a, _) = c.project(near_one + c.right() * 10.0, 800.0, 600.0).unwrap()
+    val (b, _) = c.project(far_one + c.right() * 10.0, 800.0, 600.0).unwrap()
+
+    assert(close(a, b), "a step across is as wide near as far")
+    assert(close(c.world_per_point(near_one, 600.0), c.world_per_point(far_one, 600.0)), "and so is a point")
+
+@test
+an_orthographic_ray_runs_straight_ahead_through_its_point()
+    val c = new_camera()
+    val p = Vec3(12.0, -7.0, 5.0)
+
+    c.orbit(130.0, -20.0)
+    c.toggle_orthographic()
+
+    val (x, y) = c.project(p, 1024.0, 640.0).unwrap()
+    val ray = c.ray(x, y, 1024.0, 640.0)
+    val to = p - ray.origin
+    val off = to - ray.direction * to.dot(ray.direction)
+
+    assert(off.length() < 1.0e-6, "the matrix and the ray agree")
+    assert(close_vec(ray.direction, c.forward()), "parallel to the view")
+    assert(close_vec(c.ray(0.0, 0.0, 1024.0, 640.0).direction, c.forward()), "everywhere")
+    assert(to.dot(ray.direction) > 0.0, "and the point is ahead of where it starts")
+
+@test
+orthographic_zoom_changes_the_scale()
+    val c = new_camera()
+
+    c.toggle_orthographic()
+
+    val before = c.world_per_point(c.target, 600.0)
+
+    c.zoom(300.0)
+    assert(c.world_per_point(c.target, 600.0) < before, "toward is bigger")
+
+    c.zoom(1.0e6)
+    assert_eq(c.distance, MIN_DISTANCE, "clamped as perspective is")
+
+@test
+orthographic_depth_runs_from_zero_at_the_near_plane_to_one_at_the_far()
+    val c = new_camera()
+
+    c.toggle_orthographic()
+
+    val m = c.view_projection(1.0)
+    val (near_clip, near_w) = m.apply(c.eye() + c.forward() * NEAR_PLANE)
+    val (far_clip, far_w) = m.apply(c.eye() + c.forward() * FAR_PLANE)
+
+    assert(close(near_w, 1.0) && close(far_w, 1.0), "no perspective divide")
+    assert(near_clip.z.abs() < 1.0e-6, "near is zero")
+    assert((far_clip.z - 1.0).abs() < 1.0e-6, "far is one")
+
+    val (target_clip, _) = m.apply(c.target)
+
+    assert(target_clip.z > 0.0 && target_clip.z < 1.0, "and the target is between them")
+
+@test
+an_orthographic_pan_keeps_what_is_at_the_target_under_the_pointer()
+    val c = new_camera()
+
+    c.toggle_orthographic()
+
+    val anchor = c.target
+    val (x0, y0) = c.project(anchor, 800.0, 600.0).unwrap()
+
+    c.pan(40.0, 25.0, 600.0)
+
+    val (x1, y1) = c.project(anchor, 800.0, 600.0).unwrap()
+
+    assert((x1 - x0 - 40.0).abs() < 1.0e-6 && (y1 - y0 - 25.0).abs() < 1.0e-6, "by what the pointer moved")
+
+@test
+the_centre_of_an_orthographic_viewport_looks_at_the_target()
+    val c = at_view(NamedView.Top)
+
+    c.toggle_orthographic()
+
+    val ray = c.ray(400.0, 300.0, 800.0, 600.0)
+    val to = c.target - ray.origin
+
+    assert((to - ray.direction * to.dot(ray.direction)).length() < 1.0e-6, "straight down onto it")

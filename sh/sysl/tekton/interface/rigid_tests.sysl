@@ -1,0 +1,152 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.tekton.camera.NamedView
+import sh.sysl.tekton.document.{Primitive, moved_to}
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+
+// Arrange → Rigid in the window, and a drag in the viewport stopping where it meets another solid.
+
+private val WHOLE: Rect = Rect(0, 0, 1280, 800)
+private val VIEW: Rect = Rect(0, 0, 900, 600)
+
+private tap(w: &Workspace, c: *Recorder, name: string)
+    val v = w.tree()
+
+    c.taps.reset()
+    render(v, c, WHOLE)
+
+    val (x, y) = snapshot(v, c, WHOLE).click_point(name).unwrap()
+
+    c.point(x, y, true)
+    render(w.tree(), c, WHOLE)
+    c.release(x, y)
+    render(w.tree(), c, WHOLE)
+end tap
+
+// The marks on the Rigid row, read with the menu open and leaving it closed.
+private rigid_marks(w: &Workspace, c: *Recorder) -> string
+    assert(w.show_menu("Arrange"), "an Arrange menu")
+
+    val v = w.tree()
+
+    render(v, c, WHOLE)
+
+    val row = snapshot(v, c, WHOLE).find("menu.Arrange.Rigid").unwrap()
+
+    w.open_menu.set(NO_MENU)
+    row.marks
+end rigid_marks
+
+@test
+the_rigid_row_is_always_live_ticked_while_on_and_turns_it_off_and_on()
+    val w = new_workspace()
+    var c = recorder()
+
+    assert(rigid_marks(w, &c).index_of("disabled").is_none(), "live with nothing in the document")
+    assert(rigid_marks(w, &c).index_of("checked").is_some(), "ticked: on by default")
+
+    tap(w, &c, "menu.Arrange")
+    tap(w, &c, "menu.Arrange.Rigid")
+    assert(!w.doc.rigid, "off")
+    assert(rigid_marks(w, &c).index_of("checked").is_none(), "no tick")
+    assert(w.doc.is_dirty(), "a change to save")
+
+    w.undo()
+    assert(w.doc.rigid, "undo turns it back on")
+
+    w.toggle_rigid()
+    w.toggle_rigid()
+    assert(w.doc.rigid, "twice is on again")
+end the_rigid_row_is_always_live_ticked_while_on_and_turns_it_off_and_on
+
+private paint_frame(w: &Workspace, c: *Recorder) = render(w.viewport(), c, VIEW)
+
+private centre_of(w: &Workspace, id: int) -> (int, int)
+    val (x, y) = w.camera.project(w.doc.bounds_of(w.doc.find(id).unwrap()).center(), 900.0, 600.0).unwrap()
+
+    (int(x), int(y))
+
+// A drag of `id` from its middle to three times as far as `toward`'s middle is from it, on the screen.
+private drag_past(w: &Workspace, c: *Recorder, id: int, toward: int, shift: bool)
+    val (x, y) = centre_of(w, id)
+    val (tx, ty) = centre_of(w, toward)
+
+    c.chord.keys = Modifiers(shift, false, false, false)
+    paint_frame(w, c)
+    c.point(x, y, true)
+    paint_frame(w, c)
+
+    for k in 1..12
+        c.point(x + (tx - x) * k / 4, y + (ty - y) * k / 4, true)
+        paint_frame(w, c)
+
+    c.release(x + (tx - x) * 3, y + (ty - y) * 3)
+    paint_frame(w, c)
+    c.chord.keys = no_modifiers()
+end drag_past
+
+// Two boxes 40 mm apart along x, the first selected.
+private two_boxes() -> (&Workspace, int, int)
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+
+    w.doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    w.doc.set_transform(b, moved_to(Vec3(40.0, 0.0, 0.0)))
+    w.doc.select(Some(a))
+    (w, a, b)
+end two_boxes
+
+@test
+a_drag_in_the_viewport_stops_against_another_solid_and_is_one_step()
+    val (w, a, b) = two_boxes()
+    var c = recorder()
+
+    drag_past(w, &c, a, b, false)
+
+    val box = w.doc.bounds_of(w.doc.find(a).unwrap())
+    val other = w.doc.bounds_of(w.doc.find(b).unwrap())
+    val apart = box.max.x <= other.min.x + 1.0e-9 || box.max.y <= other.min.y + 1.0e-9 ||
+                box.min.y >= other.max.y - 1.0e-9
+
+    assert(apart, s"not into it: ${box}")
+    assert(box.max.x > 25.0, s"and up against it or past it: ${box}")
+    assert_eq(w.doc.find(b).unwrap().transform.translation, Vec3(40.0, 0.0, 0.0), "the other stays")
+
+    w.undo()
+    assert_eq(w.doc.find(a).unwrap().transform.translation, Vec3(0.0, 0.0, 0.0), "one undo takes the drag back")
+end a_drag_in_the_viewport_stops_against_another_solid_and_is_one_step
+
+@test
+shift_drags_straight_through()
+    val (w, a, b) = two_boxes()
+    var c = recorder()
+
+    drag_past(w, &c, a, b, true)
+    assert(w.doc.find(a).unwrap().transform.translation.x > 60.0, s"through and beyond: ${w.doc.find(a).unwrap().transform}")
+end shift_drags_straight_through
+
+@test
+a_drag_in_an_orthographic_view_stops_the_same_way()
+    // Straight from the front, and from the home view's angle; from straight above a press on a box's middle takes
+    // its lift arrow, with Rigid on or off.
+    for view in [NamedView.Front, NamedView.Home]
+        val (w, a, b) = two_boxes()
+        var c = recorder()
+
+        w.look_from(view)
+        w.toggle_orthographic()
+        w.next_frame(1.0)
+        assert(w.camera.orthographic && w.camera.named_view() == Some(view), "looking straight on, orthographic")
+
+        drag_past(w, &c, a, b, false)
+
+        val box = w.doc.bounds_of(w.doc.find(a).unwrap())
+
+        assert(box.max.x > 15.0, s"it moved toward the other: ${box}")
+        assert(w.doc.solid_of(w.doc.find(a).unwrap()).intersection(w.doc.solid_of(w.doc.find(b).unwrap())).volume() <= 1.0e-4,
+               s"and not into it: ${box}")
+        assert_eq(w.doc.find(b).unwrap().transform.translation, Vec3(40.0, 0.0, 0.0), "the other stays")
+end a_drag_in_an_orthographic_view_stops_the_same_way

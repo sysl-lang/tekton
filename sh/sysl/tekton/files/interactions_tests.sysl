@@ -1,0 +1,46 @@
+module sh.sysl.tekton.files
+@tests
+
+import sh.sysl.tekton.document.{Primitive, Shell, new_document}
+import sysl.text.replace_all
+
+// A hollow tube says both of its walls, each under its own key, and both come back.
+
+@test
+a_hollow_tube_saves_its_tube_wall_and_its_shell_wall_apart()
+    val doc = new_document()
+    val tube = doc.add_shape(Primitive.Tube)
+
+    doc.set_tube_wall(tube, 3.0).unwrap()
+    doc.hollow_selected(0.5, true).unwrap()
+
+    val text = document_text(doc)
+
+    assert(text.contains("    tube_wall = 3.0\n"), text)
+    assert(text.contains("    wall = 0.5\n") && text.contains("    open_top = true\n"), text)
+
+    val back = document_from_text(text).unwrap()
+    val node = back.find(tube).unwrap()
+
+    assert_eq(node.tube_wall, Some(3.0), "the tube's wall")
+    assert(node.shell == Shell(0.5, true), "the shell")
+    assert_eq(document_text(back), text, "and the text is stable")
+
+@test
+a_tube_wall_is_held_to_the_tubes_range_not_the_shells()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Tube)
+
+    val text = document_text(doc)
+    val at = "    hole = false\n"
+
+    // Twelve millimetres is a wall a shell may have and a tube may not.
+    document_from_text(replace_all(text, at, s"${at}    tube_wall = 12.0\n")) match
+        Ok(_) -> assert(false, "a tube wall past the bore is refused")
+        Err(why) -> assert(why.contains("`tube_wall` must be from 0.2 to 9.8 mm"), why)
+
+    val thin = document_from_text(replace_all(text, at, s"${at}    tube_wall = 0.3\n")).unwrap()
+
+    assert_eq(thin.items()[0].tube_wall, Some(0.3), "a wall thinner than any shell's is a tube's")
+    assert(!thin.items()[0].is_hollow, "and makes no shell")

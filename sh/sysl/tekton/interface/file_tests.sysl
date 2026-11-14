@@ -965,7 +965,6 @@ what_was_being_typed_about_the_old_document_does_not_reach_the_new_one()
     val id = w.doc.selected.unwrap()
 
     render(w.tree(), &c, WINDOW)
-    w.number_fields()[0].was_mine = true
     w.number_fields()[0].text.set("77")
     c.take_focus(FIRST_FIELD_ID)
     w.doc.mark_saved()

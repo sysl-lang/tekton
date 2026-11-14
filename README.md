@@ -28,7 +28,8 @@ sysl build . && ./tekton
 - **Shift-click** adds a shape to the selection or takes it away. Several selected show no handles and no numbers:
   dragging any of them moves them all.
 - **Solid** and **Hole** in the panel say which the selection is. A hole is drawn translucent, and faintly through
-  whatever it stands inside, until it is grouped.
+  whatever it stands inside, until it is grouped. **A hole cuts only what it is grouped with**: one standing loose
+  on the ground cuts nothing, on screen or in an export, and ungrouping a hole frees it to cut nothing.
 - **Group** (Cmd+G) makes one thing of what is selected, standing where it stood: the solids joined, the holes cut
   out. **Ungroup** (Cmd+Shift+G) gives the parts back, each where it stands now, and groups nest. A group with no
   solid in it, or holes that would leave nothing, is refused, and the panel says why. A part that a stretched group
@@ -38,7 +39,7 @@ sysl build . && ./tekton
   the meshes only it holds pass 256 MB. While a field has the keyboard, these keys belong to the field.
 - `./tekton --demo` opens with one of each shape, in a row on the bed. `--select 3` chooses what is selected (`--select 3,4` for several)
   and `--view 0.3,0.5` sets the camera's turn and tilt in radians. `./tekton --holes` opens with a part with a hole
-  cut in it, beside a hole not yet grouped.
+  cut in it, beside a block with a hole not yet grouped, which cuts nothing until it is.
 - `./tekton --demo --shot frame.png --size 1400x900` writes a frame to a PNG and closes its window.
 - `./tekton --export part.stl part.tekton` opens no window: it writes the file's solid as STL, or as 3MF when the
   name ends in `.3mf`, and exits. `--demo` or `--holes` in place of the file exports that scene. A failure is one

@@ -1,0 +1,32 @@
+module sh.sysl.tekton.live
+@tests
+
+import sh.sysl.tekton.camera.new_camera
+import sh.sysl.tekton.document.{Primitive, moved_to, new_document}
+import sh.sysl.tekton.space.Vec3
+
+// What `/tekton/state` says of an intersection and of a hollow shell, and of neither.
+
+@test
+private an_intersection_and_a_shell_are_reported_and_plain_nodes_say_nothing_of_them()
+    val d = new_document()
+    val a = d.add_shape(Primitive.Box)
+    val b = d.add_shape(Primitive.Box)
+
+    d.set_transform(b, moved_to(Vec3(10.0, 0.0, 0.0)))
+    d.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+
+    val plain = state_json(d, new_camera(), "", false)
+
+    assert(!plain.contains("mode") && !plain.contains("wall") && !plain.contains("open_top"), plain)
+
+    d.select(Some(a))
+    d.toggle_selected(b)
+    d.group_selected(intersect = true).unwrap()
+    d.hollow_selected(2.0, true).unwrap()
+
+    val shown = state_json(d, new_camera(), "", false)
+
+    assert(shown.contains("\"mode\":\"intersect\",\"wall\":2,\"open_top\":true,\"children\""), shown)
+    assert(shown.contains("\"size\":[10,20,20]"), s"the intersection's size: ${shown}")
+end an_intersection_and_a_shell_are_reported_and_plain_nodes_say_nothing_of_them

@@ -30,6 +30,9 @@ const TURN_STEP: real = 15.0
 // instead, the ring being too thin to follow.
 const TURN_EDGE_ON: real = 0.2
 
+// A plane this far from square to the view, as a cosine, or nearer, is seen edge on: a level view's ground.
+const EDGE_ON: real = 0.05
+
 const DEGREES: real = real.pi() / 180.0
 
 // How a drag is held right now.
@@ -140,7 +143,7 @@ struct Drag
     end transform_at
 
     private slide(self, camera: &Camera, ray: Ray, k: DragKeys) -> Transform
-        val p = plane_point(ray, self.grab, Vec3(0.0, 0.0, 1.0), reach_of(camera, self.grab))
+        val p = seen_plane_point(camera, ray, self.grab, Vec3(0.0, 0.0, 1.0))
         val t = self.start.translation + (p - self.grab)
         val limit = POSITION_LIMIT
 
@@ -172,7 +175,7 @@ struct Drag
         val from = self.start.apply(self.corner(cx, cy))
         val fixed = self.corner(-cx, -cy)
         val pinned = self.start.apply(fixed)
-        val p = plane_point(ray, self.grab, up, reach_of(camera, self.grab))
+        val p = seen_plane_point(camera, ray, self.grab, up)
 
         // The corner in the shape's own axes, measured from the corner across from it.
         val along = vec_back(self.start, from + (p - self.grab) - pinned)
@@ -215,6 +218,22 @@ private proportional(s: Vec3, ratio: real) -> Vec3
 
 private reach_of(camera: &Camera, at: Vec3) -> real =
     camera.distance.max((at - camera.eye()).length()) * REACH
+
+// Where the pointer is on a plane through `anchor`, as the viewer sees it. **A plane seen edge on**, as the
+// ground is from a level view, has no point under the pointer, and an orthographic ray never meets it at all;
+// there the pointer moves across the plane the way it moves across the screen: on the plane through `anchor`
+// that holds `normal` and faces the viewer, brought back onto the first.
+seen_plane_point(camera: &Camera, ray: Ray, anchor: Vec3, normal: Vec3) -> Vec3
+    val reach = reach_of(camera, anchor)
+    val f = camera.forward()
+    val facing = f - normal * f.dot(normal)
+
+    if f.dot(normal).abs() >= EDGE_ON || facing.length() < 1.0e-9 then return plane_point(ray, anchor, normal, reach)
+
+    val p = plane_point(ray, anchor, facing.unit(), reach)
+
+    p - normal * (p - anchor).dot(normal)
+end seen_plane_point
 
 // The signed angle about `around` from the grab to where this ray meets the ring's plane.
 private ring_angle(camera: &Camera, ray: Ray, c: Vec3, around: Vec3, grab: Vec3) -> real
@@ -264,7 +283,7 @@ drag_grip(doc: &Document, camera: &Camera, id: int, grip: Grip, width: real, hei
             val corner = t.apply(Vec3(if cx > 0.0 then local.max.x else local.min.x,
                                       if cy > 0.0 then local.max.y else local.min.y, local.min.z))
 
-            plane_point(ray, corner, up, reach_of(camera, corner))
+            seen_plane_point(camera, ray, corner, up)
         Turn(axis) ->
             val around = world_axis(axis)
 

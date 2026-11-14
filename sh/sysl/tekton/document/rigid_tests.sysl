@@ -1,0 +1,767 @@
+module sh.sysl.tekton.document
+@tests
+
+import sh.sysl.quaternion.Quaternion
+import sh.sysl.tekton.space.{Aabb, Vec3}
+import sysl.buf.{Buf, buf}
+
+// Rigid solids: a solid stops where it meets another, through every command that moves, turns or sizes one.
+
+private near(a: real, b: real, tol: real = 1.0e-3) -> bool = (a - b).abs() <= tol
+
+private box_of(doc: &Document, id: int) -> Aabb = doc.bounds_of(doc.find(id).unwrap())
+
+private at_of(doc: &Document, id: int) -> Vec3 = doc.find(id).unwrap().transform.translation
+
+private place(doc: &Document, id: int, at: Vec3) = doc.set_transform(id, moved_to(at))
+
+private sized(doc: &Document, id: int, at: Vec3, scale: Vec3) =
+    doc.set_transform(id, Transform(at, Quaternion.identity(), scale))
+
+private overlap(doc: &Document, a: int, b: int) -> real =
+    doc.solid_of(doc.find(a).unwrap()).intersection(doc.solid_of(doc.find(b).unwrap())).volume()
+
+private gap(doc: &Document, a: int, b: int) -> real =
+    doc.solid_of(doc.find(a).unwrap()).min_gap(doc.solid_of(doc.find(b).unwrap()), 10.0)
+
+private turn_z(degrees: real) -> Quaternion[real] = Quaternion.from_axis_angle([0.0, 0.0, 1.0], degrees * real.pi() / 180.0)
+
+// Two palette boxes, 20 mm each way, the first at the origin and the second at x = 40, so 20 mm apart; the first
+// selected.
+private two_boxes() -> (&Document, int, int)
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    place(doc, a, Vec3(0.0, 0.0, 0.0))
+    place(doc, b, Vec3(40.0, 0.0, 0.0))
+    doc.select(Some(a))
+    (doc, a, b)
+end two_boxes
+
+// A drag of `id` alone to `at`, as the viewport makes one: one step, Shift as given.
+private drag(doc: &Document, id: int, at: Vec3, shift: bool = false)
+    val t = doc.find(id).unwrap().transform
+
+    doc.begin_step()
+    doc.move_together([(id, Transform(at, t.rotation, t.scale))], shift)
+    doc.end_step()
+end drag
+
+// ## The setting
+
+@test
+rigid_is_on_in_a_new_document_and_turning_it_is_one_step()
+    val doc = new_document()
+
+    assert(doc.rigid, "on by default")
+    assert(!doc.is_dirty(), "and nothing to save")
+
+    doc.set_rigid(false)
+    assert(!doc.rigid, "off")
+    assert(doc.is_dirty(), "a change the file does not hold")
+    assert(doc.describe().ends_with("rigid:false"), doc.describe())
+
+    val steps = doc.undos.len()
+
+    doc.set_rigid(false)
+    assert_eq(doc.undos.len(), steps, "the same setting again is no step")
+
+    assert(doc.undo(), "undone")
+    assert(doc.rigid, "on again")
+    assert(!doc.is_dirty(), "and clean again")
+    assert(doc.redo(), "redone")
+    assert(!doc.rigid, "off again")
+
+    doc.mark_saved()
+    assert(!doc.is_dirty(), "saved with it off")
+    doc.set_rigid(true)
+    assert(doc.is_dirty(), "on is a change from that")
+end rigid_is_on_in_a_new_document_and_turning_it_is_one_step
+
+// ## Moving
+
+@test
+a_typed_move_stops_where_the_faces_meet()
+    val (doc, a, b) = two_boxes()
+
+    doc.move_to(a, Vec3(60.0, 0.0, 0.0)).unwrap()
+    assert(near(at_of(doc, a).x, 20.0, 1.0e-9), s"stopped touching: ${at_of(doc, a).x}")
+    assert(near(overlap(doc, a, b), 0.0, 1.0e-6), "nothing overlaps")
+    assert_eq(at_of(doc, b), Vec3(40.0, 0.0, 0.0), "the other did not move")
+
+    // From touching, toward it again: nowhere, and no step.
+    val steps = doc.undos.len()
+
+    doc.move_to(a, Vec3(50.0, 0.0, 0.0)).unwrap()
+    assert(near(at_of(doc, a).x, 20.0, 1.0e-9), "still touching")
+    assert_eq(doc.undos.len(), steps, "a move that went nowhere is no step")
+
+    // And away from it, freely.
+    doc.move_to(a, Vec3(-30.0, 0.0, 0.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(-30.0, 0.0, 0.0), "away is free")
+end a_typed_move_stops_where_the_faces_meet
+
+@test
+a_move_that_meets_nothing_goes_all_the_way()
+    val (doc, a, _) = two_boxes()
+
+    doc.move_to(a, Vec3(10.0, -35.0, 4.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(10.0, -35.0, 4.0), "exactly there")
+
+    // Past the other, beside it, touching its side all the way along.
+    doc.move_to(a, Vec3(10.0, -20.0, 0.0)).unwrap()
+    doc.move_to(a, Vec3(80.0, -20.0, 0.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(80.0, -20.0, 0.0), "a face sliding along a face is free")
+end a_move_that_meets_nothing_goes_all_the_way
+
+@test
+a_move_is_one_step_that_undo_takes_back()
+    val (doc, a, _) = two_boxes()
+    val before = doc.describe()
+
+    doc.move_to(a, Vec3(60.0, 0.0, 0.0)).unwrap()
+
+    val after = doc.describe()
+
+    assert(doc.undo(), "undone")
+    assert_eq(doc.describe(), before, "as it was")
+    assert(doc.redo(), "redone")
+    assert_eq(doc.describe(), after, "stopped where it stopped")
+end a_move_is_one_step_that_undo_takes_back
+
+@test
+a_fast_move_cannot_pass_through_a_thin_wall()
+    val (doc, a, b) = two_boxes()
+
+    // A wall 1 mm thick, the thinnest a side may be, at x = 40.
+    sized(doc, b, Vec3(40.0, 0.0, 0.0), Vec3(0.05, 3.0, 3.0))
+    doc.move_to(a, Vec3(500.0, 0.0, 0.0)).unwrap()
+    assert(near(at_of(doc, a).x, 29.5, 1.0e-9), s"stopped at the wall: ${at_of(doc, a).x}")
+
+    // The same wall turned 45 degrees about z, so its box is far thicker than it is.
+    place(doc, a, Vec3(0.0, 0.0, 0.0))
+    doc.set_transform(b, Transform(Vec3(40.0, 0.0, 0.0), turn_z(45.0), Vec3(0.05, 3.0, 3.0)))
+    doc.move_to(a, Vec3(500.0, 0.0, 0.0)).unwrap()
+    assert(at_of(doc, a).x < 40.0, s"stopped before it: ${at_of(doc, a).x}")
+    assert(overlap(doc, a, b) <= 1.0e-3, s"and not in it: ${overlap(doc, a, b)}")
+    assert(gap(doc, a, b) < 1.0e-3, s"touching it: ${gap(doc, a, b)}")
+end a_fast_move_cannot_pass_through_a_thin_wall
+
+@test
+a_drag_into_a_wall_slides_along_it()
+    val (doc, a, _) = two_boxes()
+
+    drag(doc, a, Vec3(60.0, 30.0, 0.0))
+    assert(near(at_of(doc, a).x, 20.0, 1.0e-6), s"held at the wall: ${at_of(doc, a)}")
+    assert(near(at_of(doc, a).y, 30.0, 1.0e-9), s"and on along it: ${at_of(doc, a)}")
+end a_drag_into_a_wall_slides_along_it
+
+@test
+shift_and_rigid_off_let_a_drag_pass_through()
+    val (doc, a, b) = two_boxes()
+
+    drag(doc, a, Vec3(40.0, 0.0, 0.0), shift = true)
+    assert_eq(at_of(doc, a), Vec3(40.0, 0.0, 0.0), "Shift: straight into it")
+    assert(overlap(doc, a, b) > 7999.0, "they overlap")
+
+    val (off, c, _) = two_boxes()
+
+    off.set_rigid(false)
+    drag(off, c, Vec3(40.0, 0.0, 0.0))
+    assert_eq(at_of(off, c), Vec3(40.0, 0.0, 0.0), "Rigid off: the same")
+    off.move_to(c, Vec3(45.0, 0.0, 0.0)).unwrap()
+    assert_eq(at_of(off, c), Vec3(45.0, 0.0, 0.0), "and a typed move too")
+end shift_and_rigid_off_let_a_drag_pass_through
+
+@test
+a_drag_held_at_a_contact_does_not_tunnel_however_far_the_pointer_goes()
+    val (doc, a, b) = two_boxes()
+
+    sized(doc, b, Vec3(40.0, 0.0, 0.0), Vec3(0.05, 3.0, 3.0))
+    doc.begin_step()
+
+    for x in [10.0, 25.0, 60.0, 200.0, 35.0, 90.0]
+        doc.move_together([(a, moved_to(Vec3(x, 0.0, 0.0)))], false)
+        assert(at_of(doc, a).x <= 29.5 + 1.0e-9, s"pointer at ${x}: ${at_of(doc, a).x}")
+
+    doc.end_step()
+    assert(near(at_of(doc, a).x, 29.5, 1.0e-9), "resting on the wall")
+    assert(doc.undo(), "one step")
+    assert_eq(at_of(doc, a), Vec3(0.0, 0.0, 0.0), "back where the drag began")
+end a_drag_held_at_a_contact_does_not_tunnel_however_far_the_pointer_goes
+
+// ## Holes and groups
+
+@test
+holes_pass_through_solids_and_solids_through_holes()
+    val (doc, a, b) = two_boxes()
+
+    doc.set_hole(true).unwrap()
+    doc.move_to(a, Vec3(40.0, 0.0, 5.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(40.0, 0.0, 5.0), "a hole goes into a solid")
+
+    doc.select(Some(b))
+    doc.move_to(b, Vec3(35.0, 0.0, 0.0)).unwrap()
+    assert_eq(at_of(doc, b), Vec3(35.0, 0.0, 0.0), "and a solid into a hole")
+end holes_pass_through_solids_and_solids_through_holes
+
+// A 40 mm block with a 12 mm hole down through it, grouped, and a 10 mm peg standing high above the hole.
+private block_with_hole_and_peg() -> (&Document, int, int)
+    val doc = new_document()
+    val block = doc.add_shape(Primitive.Box)
+    val drill = doc.add_shape(Primitive.Cylinder)
+    val peg = doc.add_shape(Primitive.Cylinder)
+
+    sized(doc, block, Vec3(0.0, 0.0, 0.0), Vec3(2.0, 2.0, 1.0))
+    doc.select(Some(drill))
+    doc.set_hole(true).unwrap()
+    sized(doc, drill, Vec3(0.0, 0.0, -5.0), Vec3(0.6, 0.6, 1.5))
+    doc.select(Some(block))
+    doc.toggle_selected(drill)
+
+    val g = doc.group_selected().unwrap()
+
+    sized(doc, peg, Vec3(0.0, 0.0, 60.0), Vec3(0.5, 0.5, 1.0))
+    (doc, g, peg)
+end block_with_hole_and_peg
+
+@test
+a_peg_goes_down_through_the_hole_a_group_cuts_and_a_wide_one_stands_on_it()
+    val (doc, g, peg) = block_with_hole_and_peg()
+
+    doc.move_to(peg, Vec3(0.0, 0.0, -30.0)).unwrap()
+    assert_eq(at_of(doc, peg), Vec3(0.0, 0.0, -30.0), "through the hole and out of the bottom")
+
+    // Made too wide for the hole, it cannot come back up through it.
+    doc.resize_to(peg, Vec3(30.0, 30.0, 20.0)).unwrap()
+    doc.move_to(peg, Vec3(0.0, 0.0, 60.0)).unwrap()
+    assert(near(box_of(doc, peg).max.z, 0.0, 1.0e-9), s"stopped under the block: ${box_of(doc, peg)}")
+
+    // From above, it stands on the block.
+    place(doc, peg, Vec3(0.0, 0.0, 60.0))
+    doc.move_to(peg, Vec3(0.0, 0.0, -30.0)).unwrap()
+    assert(near(at_of(doc, peg).z, 20.0, 1.0e-9), s"standing on the block: ${at_of(doc, peg).z}")
+    assert(overlap(doc, peg, g) <= 1.0e-4, "not in it")
+end a_peg_goes_down_through_the_hole_a_group_cuts_and_a_wide_one_stands_on_it
+
+@test
+a_group_is_one_body_and_collides_as_one()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+    val c = doc.add_shape(Primitive.Box)
+
+    // The parts of the group overlap each other; that is no collision.
+    doc.set_rigid(false)
+    place(doc, a, Vec3(0.0, 0.0, 0.0))
+    place(doc, b, Vec3(10.0, 0.0, 0.0))
+    place(doc, c, Vec3(60.0, 0.0, 0.0))
+    doc.set_rigid(true)
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val g = doc.group_selected().unwrap()
+
+    doc.move_to(g, at_of(doc, g) + Vec3(-5.0, 0.0, 0.0)).unwrap()
+    assert(near(box_of(doc, g).min.x, -15.0, 1.0e-9), "the group moves freely though its parts overlap")
+
+    doc.move_to(g, at_of(doc, g) + Vec3(100.0, 0.0, 0.0)).unwrap()
+    assert(near(box_of(doc, g).max.x, 50.0, 1.0e-9), s"and stops as one at the other: ${box_of(doc, g)}")
+end a_group_is_one_body_and_collides_as_one
+
+@test
+a_multi_selection_moves_as_one_body_and_stops_together()
+    val (doc, a, b) = two_boxes()
+    val c = doc.add_shape(Primitive.Box)
+
+    place(doc, c, Vec3(0.0, 40.0, 0.0))
+    doc.begin_step()
+    doc.move_together([(c, moved_to(Vec3(50.0, 40.0, 0.0))), (a, moved_to(Vec3(50.0, 0.0, 0.0)))], false)
+    doc.end_step()
+    assert(near(at_of(doc, a).x, 20.0, 1.0e-9), s"the one that meets the box stops: ${at_of(doc, a)}")
+    assert(near(at_of(doc, c).x, 20.0, 1.0e-9), s"and the one that meets nothing stops with it: ${at_of(doc, c)}")
+
+    // The ones moving never collide with each other: c goes into the place a leaves.
+    doc.begin_step()
+    doc.move_together([(c, moved_to(Vec3(20.0, 0.0, 0.0))), (a, moved_to(Vec3(20.0, -40.0, 0.0)))], false)
+    doc.end_step()
+    assert_eq(at_of(doc, c), Vec3(20.0, 0.0, 0.0), "into the place the other left")
+    assert_eq(at_of(doc, b), Vec3(40.0, 0.0, 0.0), "the still one stays")
+end a_multi_selection_moves_as_one_body_and_stops_together
+
+// ## Overlapping already
+
+@test
+things_already_overlapping_may_be_pulled_apart_but_not_pushed_further_in()
+    val (doc, a, b) = two_boxes()
+
+    // With Rigid off, b is pushed 5 mm into a; then Rigid is on again.
+    doc.set_rigid(false)
+    place(doc, b, Vec3(15.0, 0.0, 0.0))
+    doc.set_rigid(true)
+    assert(near(overlap(doc, a, b), 2000.0, 1.0e-6), s"5 mm in: ${overlap(doc, a, b)}")
+
+    doc.move_to(a, Vec3(3.0, 0.0, 0.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(0.0, 0.0, 0.0), "not further in")
+
+    doc.move_to(a, Vec3(0.0, 0.0, 10.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(0.0, 0.0, 10.0), "out by another way, the overlap shrinking")
+
+    doc.move_to(a, Vec3(0.0, 0.0, 0.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(0.0, 0.0, 10.0), "and not back in")
+
+    doc.move_to(a, Vec3(-2.0, 0.0, 10.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(-2.0, 0.0, 10.0), "pulled apart")
+
+    doc.move_to(a, Vec3(-30.0, 0.0, 10.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(-30.0, 0.0, 10.0), "all the way out")
+
+    doc.move_to(a, Vec3(10.0, 0.0, 10.0)).unwrap()
+    assert(near(at_of(doc, a).x, -5.0, 1.0e-9), s"and once apart, they stay apart: ${at_of(doc, a)}")
+end things_already_overlapping_may_be_pulled_apart_but_not_pushed_further_in
+
+@test
+a_move_out_of_an_overlap_may_not_go_deeper_on_the_way()
+    val (doc, a, b) = two_boxes()
+
+    doc.set_rigid(false)
+    place(doc, b, Vec3(15.0, 0.0, 0.0))
+    doc.set_rigid(true)
+
+    // Straight through b to its far side, where they would not overlap: deeper in on the way, so refused.
+    doc.move_to(a, Vec3(40.0, 0.0, 0.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(0.0, 0.0, 0.0), "refused from the start")
+
+    // Both overlapping it, b may still be dragged out from between them.
+    val c = doc.add_shape(Primitive.Box)
+
+    doc.set_rigid(false)
+    place(doc, c, Vec3(30.0, 0.0, 0.0))
+    doc.set_rigid(true)
+    doc.move_to(b, Vec3(15.0, 0.0, 30.0)).unwrap()
+    assert_eq(at_of(doc, b), Vec3(15.0, 0.0, 30.0), "lifted out of both")
+end a_move_out_of_an_overlap_may_not_go_deeper_on_the_way
+
+// ## Turning and resizing
+
+@test
+a_resize_stops_where_it_meets_another()
+    val (doc, a, b) = two_boxes()
+
+    doc.resize_to(a, Vec3(80.0, 20.0, 20.0)).unwrap()
+    assert(near(doc.size_of(doc.find(a).unwrap()).x, 60.0, 1.0e-6), s"grown to touch: ${doc.size_of(doc.find(a).unwrap())}")
+    assert(overlap(doc, a, b) <= 1.0e-3, "not into it")
+
+    doc.resize_to(a, Vec3(10.0, 20.0, 20.0)).unwrap()
+    assert(near(doc.size_of(doc.find(a).unwrap()).x, 10.0, 1.0e-9), "shrinking is free")
+
+    doc.resize_to(a, Vec3(10.0, 20.0, 80.0)).unwrap()
+    assert(near(doc.size_of(doc.find(a).unwrap()).z, 80.0, 1.0e-9), "and growing where nothing is")
+end a_resize_stops_where_it_meets_another
+
+@test
+a_turn_stops_where_it_meets_another()
+    val doc = new_document()
+    val bar = doc.add_shape(Primitive.Box)
+    val post = doc.add_shape(Primitive.Box)
+
+    // A bar 60 long along x, and a post 25 out along y that a quarter turn would sweep through.
+    sized(doc, bar, Vec3(0.0, 0.0, 0.0), Vec3(3.0, 0.5, 0.5))
+    place(doc, post, Vec3(10.0, 25.0, 0.0))
+    doc.rotate_to(bar, turn_z(90.0)).unwrap()
+
+    val q = doc.find(bar).unwrap().transform.rotation
+    val turned = 2.0 * q.w.abs().min(1.0).acos() * 180.0 / real.pi()
+
+    assert(turned > 1.0 && turned < 89.0, s"part of the way: ${turned} degrees")
+    assert(overlap(doc, bar, post) <= 1.0e-3, s"not into the post: ${overlap(doc, bar, post)}")
+    assert(gap(doc, bar, post) < 1.0e-2, s"up to it: ${gap(doc, bar, post)}")
+    assert(near(box_of(doc, bar).center().x, 0.0, 1.0e-6) && near(box_of(doc, bar).center().y, 0.0, 1.0e-6),
+           "about its own middle")
+
+    doc.rotate_to(bar, turn_z(-30.0)).unwrap()
+    assert(doc.find(bar).unwrap().transform.rotation.near(turn_z(-30.0), 1.0e-9), "the other way is free")
+end a_turn_stops_where_it_meets_another
+
+// ## Landing
+
+@test
+drop_to_bed_lands_on_the_solid_beneath()
+    val (doc, a, b) = two_boxes()
+
+    place(doc, a, Vec3(30.0, 5.0, 70.0))
+    doc.drop_selected().unwrap()
+    assert(near(at_of(doc, a).z, 20.0, 1.0e-9), s"on top of the other: ${at_of(doc, a)}")
+    assert_eq(at_of(doc, a).x, 30.0, "straight down")
+
+    assert(doc.undo(), "one step")
+    assert_eq(at_of(doc, a), Vec3(30.0, 5.0, 70.0), "back up")
+
+    // Beside the other, the ground.
+    place(doc, a, Vec3(0.0, 5.0, 70.0))
+    doc.drop_selected().unwrap()
+    assert_eq(at_of(doc, a).z, 0.0, "on the ground")
+
+    // Over a hole, the ground too.
+    place(doc, a, Vec3(40.0, 0.0, 70.0))
+    doc.select(Some(b))
+    doc.set_hole(true).unwrap()
+    doc.select(Some(a))
+    doc.drop_selected().unwrap()
+    assert_eq(at_of(doc, a).z, 0.0, "a hole holds nothing up")
+
+    // Rigid off, the ground through everything.
+    place(doc, a, Vec3(40.0, 0.0, 70.0))
+    doc.select(Some(b))
+    doc.set_hole(false).unwrap()
+    doc.select(Some(a))
+    doc.set_rigid(false)
+    doc.drop_selected().unwrap()
+    assert_eq(at_of(doc, a).z, 0.0, "Rigid off: on the ground")
+end drop_to_bed_lands_on_the_solid_beneath
+
+@test
+a_sphere_dropped_on_a_sphere_rests_on_it()
+    val doc = new_document()
+    val low = doc.add_shape(Primitive.Sphere)
+    val high = doc.add_shape(Primitive.Sphere)
+
+    place(doc, low, Vec3(0.0, 0.0, 0.0))
+    place(doc, high, Vec3(6.0, 0.0, 80.0))
+    doc.select(Some(high))
+    doc.drop_selected().unwrap()
+
+    val z = at_of(doc, high).z
+
+    assert(z > 10.0 && z < 20.0, s"held up off the ground, lower than the top: ${z}")
+    assert(gap(doc, high, low) < 1.0e-3, s"touching: ${gap(doc, high, low)}")
+    assert(overlap(doc, high, low) <= 1.0e-3, s"not sunk in: ${overlap(doc, high, low)}")
+end a_sphere_dropped_on_a_sphere_rests_on_it
+
+@test
+a_selection_dropped_together_stops_where_its_lowest_part_lands()
+    val (doc, a, b) = two_boxes()
+    val c = doc.add_shape(Primitive.Box)
+
+    // a over b, c beside it and lower: together they stop when a meets b, c still in the air.
+    place(doc, a, Vec3(40.0, 0.0, 50.0))
+    place(doc, c, Vec3(0.0, 0.0, 40.0))
+    doc.select(Some(a))
+    doc.toggle_selected(c)
+    doc.drop_selected().unwrap()
+    assert(near(at_of(doc, a).z, 20.0, 1.0e-9), s"a on b: ${at_of(doc, a)}")
+    assert(near(at_of(doc, c).z, 10.0, 1.0e-9), s"c as far down as a went: ${at_of(doc, c)}")
+end a_selection_dropped_together_stops_where_its_lowest_part_lands
+
+@test
+a_thing_placed_over_others_lands_on_the_highest_beneath_it()
+    val (doc, a, b) = two_boxes()
+    val c = doc.add_shape(Primitive.Box)
+
+    // c stacked on b; a thing put over both comes down onto c.
+    place(doc, c, Vec3(40.0, 0.0, 20.0))
+
+    val drop = doc.find(a).unwrap()
+
+    assert(near(landed(doc, drop, moved_to(Vec3(35.0, 0.0, 0.0))).translation.z, 40.0, 1.0e-9), "on c's top")
+    assert_eq(landed(doc, drop, moved_to(Vec3(-35.0, 0.0, 30.0))).translation.z, 0.0, "nothing beneath: the ground")
+
+    // The palette's next place is clear of everything, so a new shape lands on the ground.
+    val n = doc.add_shape(Primitive.Cone)
+
+    assert_eq(box_of(doc, n).min.z, 0.0, "on the ground")
+    assert_eq(at_of(doc, b), Vec3(40.0, 0.0, 0.0), "nothing else moved")
+end a_thing_placed_over_others_lands_on_the_highest_beneath_it
+
+// ## Copies
+
+@test
+a_duplicate_is_pushed_on_a_step_at_a_time_until_clear()
+    val (doc, a, b) = two_boxes()
+
+    place(doc, b, Vec3(25.0, 0.0, 0.0))
+    place(doc, a, Vec3(-5.0, 0.0, 0.0))
+    doc.duplicate_selected(5.0).unwrap()
+    assert_eq(at_of(doc, doc.selection[0]), Vec3(45.0, 0.0, 0.0), "past the original and the box beside it")
+
+    assert(doc.undo(), "one step")
+    doc.set_rigid(false)
+    doc.duplicate_selected(5.0).unwrap()
+    assert_eq(at_of(doc, doc.selection[0]), Vec3(0.0, 0.0, 0.0), "Rigid off: one step")
+end a_duplicate_is_pushed_on_a_step_at_a_time_until_clear
+
+@test
+a_duplicated_hole_is_not_pushed()
+    val (doc, _, _) = two_boxes()
+
+    doc.set_hole(true).unwrap()
+    doc.duplicate_selected(5.0).unwrap()
+    assert_eq(at_of(doc, doc.selection[0]), Vec3(5.0, 0.0, 0.0), "a hole overlaps nothing")
+end a_duplicated_hole_is_not_pushed
+
+@test
+a_line_array_too_tight_spreads_its_copies_until_each_is_clear()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+
+    place(doc, a, Vec3(0.0, 0.0, 0.0))
+    doc.array_selected(3, Pattern.Line(1, 8.0)).unwrap()
+
+    for k in 0..<3
+        assert_eq(at_of(doc, doc.selection[k]), Vec3(0.0, 24.0 * real(k + 1), 0.0), s"copy ${k + 1}, in 8 mm steps")
+
+    // A wide spacing is kept as it is.
+    doc.select(Some(a))
+    doc.array_selected(2, Pattern.Line(0, -30.0)).unwrap()
+    assert_eq(at_of(doc, doc.selection[1]), Vec3(-60.0, 0.0, 0.0), "every 30 mm")
+end a_line_array_too_tight_spreads_its_copies_until_each_is_clear
+
+@test
+copies_with_no_clear_place_are_refused_and_change_nothing()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+
+    place(doc, a, Vec3(20.0, 0.0, 0.0))
+
+    val before = doc.describe()
+
+    assert(doc.array_selected(2, Pattern.Line(0, 0.0)).is_err(), "no spacing to clear by")
+    assert(doc.array_selected(3, Pattern.Ring(false, 90.0)).is_err(), "turned in its own place, never clear")
+    assert(doc.duplicate_selected(0.0).is_err(), "no step")
+    assert_eq(doc.describe(), before, "unchanged")
+
+    // About the origin the ring clears it: a quarter turn carries the box round.
+    doc.array_selected(3, Pattern.Ring(true, 90.0)).unwrap()
+    assert_eq(doc.selection.len(), 3, "three copies")
+    assert_eq(at_of(doc, doc.selection[0]), Vec3(0.0, 20.0, 0.0), "each where the ring puts it")
+end copies_with_no_clear_place_are_refused_and_change_nothing
+
+@test
+mirror_and_align_are_allowed_to_overlap()
+    val (doc, a, b) = two_boxes()
+
+    doc.toggle_selected(b)
+    doc.align_selected(0, Edge.Min).unwrap()
+    assert(overlap(doc, a, b) > 7999.0, "aligned onto each other")
+    doc.undo()
+
+    // An L of two boxes, low left and high right, with a third box in its notch; mirrored along z, the L's low box
+    // comes down onto the third.
+    val notch = doc.add_shape(Primitive.Box)
+
+    place(doc, b, Vec3(20.0, 0.0, 20.0))
+    place(doc, notch, Vec3(20.0, 0.0, 0.0))
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+
+    val l = doc.group_selected().unwrap()
+
+    assert(overlap(doc, l, notch) <= 1.0e-6, "in the notch, touching")
+    doc.mirror_selected(2).unwrap()
+    assert(overlap(doc, l, notch) > 7999.0, "mirrored onto it")
+end mirror_and_align_are_allowed_to_overlap
+
+// ## Many things
+
+// Fifty boxes and cylinders in rows 30 mm apart, and one more box dragged on the ground across under the first
+// row and up into it, in the small steps a pointer makes.
+@test
+a_drag_past_a_crowd_slides_along_it_and_never_enters_any()
+    val doc = new_document()
+    var ids: Buf[int] = buf()
+
+    for i in 0..<50
+        val id = doc.add_shape(if i % 2 == 0 then Primitive.Box else Primitive.Cylinder)
+
+        place(doc, id, Vec3(real(i % 10) * 30.0, real(i / 10) * 30.0 + 30.0, 0.0))
+        ids.push(id)
+
+    val mover = doc.add_shape(Primitive.Box)
+
+    place(doc, mover, Vec3(-30.0, 0.0, 0.0))
+    doc.begin_step()
+
+    for k in 0..<60 do doc.move_together([(mover, moved_to(Vec3(-30.0 + real(k) * 5.0, real(k), 0.0)))], false)
+
+    doc.end_step()
+
+    for id in ids do assert(overlap(doc, mover, id) <= 1.0e-3, s"not in ${id}")
+
+    assert(near(at_of(doc, mover).y, 10.0, 1.0e-6), s"held against the first row: ${at_of(doc, mover)}")
+    assert(near(at_of(doc, mover).x, 265.0, 1.0e-9), s"sliding along under it: ${at_of(doc, mover)}")
+end a_drag_past_a_crowd_slides_along_it_and_never_enters_any
+
+
+// Round things in a row, and a sphere dragged diagonally into them: it may wedge between two, but never enters one.
+@test
+a_sphere_dragged_into_round_things_never_enters_one()
+    val doc = new_document()
+    var ids: Buf[int] = buf()
+
+    for i in 0..<6
+        val id = doc.add_shape(if i % 2 == 0 then Primitive.Sphere else Primitive.Torus)
+
+        place(doc, id, Vec3(real(i) * 30.0, 30.0, 0.0))
+        ids.push(id)
+
+    val mover = doc.add_shape(Primitive.Sphere)
+
+    place(doc, mover, Vec3(-30.0, 0.0, 0.0))
+    doc.begin_step()
+
+    for k in 0..<24 do doc.move_together([(mover, moved_to(Vec3(-30.0 + real(k) * 5.0, real(k), 0.0)))], false)
+
+    doc.end_step()
+
+    for id in ids do assert(overlap(doc, mover, id) <= 1.0e-3, s"not in ${id}: ${overlap(doc, mover, id)}")
+
+    assert(at_of(doc, mover).y > 10.0, s"pressed up between them: ${at_of(doc, mover)}")
+end a_sphere_dragged_into_round_things_never_enters_one
+
+// ## With the rest of the modeller
+
+@test
+a_paste_that_would_overlap_is_pushed_on_until_clear()
+    val (doc, a, _) = two_boxes()
+
+    place(doc, a, Vec3(-30.0, 0.0, 0.0))
+
+    val kept = doc.copy_selected().unwrap()
+
+    doc.paste(kept.view(), 1, 5.0).unwrap()
+    assert_eq(at_of(doc, doc.selection[0]), Vec3(-10.0, 0.0, 0.0), "touching the original")
+
+    doc.paste(kept.view(), 2, 5.0).unwrap()
+    assert_eq(at_of(doc, doc.selection[0]), Vec3(10.0, 0.0, 0.0), "the second beside the first")
+
+    doc.paste(kept.view(), 3, 5.0).unwrap()
+    assert_eq(at_of(doc, doc.selection[0]), Vec3(60.0, 0.0, 0.0), "the third past the box at 40")
+    assert(doc.undo(), "each paste one step")
+    assert_eq(doc.items().len, 4, "the third gone")
+end a_paste_that_would_overlap_is_pushed_on_until_clear
+
+@test
+a_nudge_stops_at_contact_like_a_drag()
+    val (doc, a, b) = two_boxes()
+
+    doc.nudge_selected(Vec3(15.0, 0.0, 0.0)).unwrap()
+    assert_eq(at_of(doc, a), Vec3(15.0, 0.0, 0.0), "free so far")
+
+    doc.nudge_selected(Vec3(15.0, 0.0, 0.0)).unwrap()
+    assert(near(at_of(doc, a).x, 20.0, 1.0e-9), s"stopped touching: ${at_of(doc, a)}")
+    assert(near(overlap(doc, a, b), 0.0, 1.0e-6), "not into it")
+
+    doc.nudge_selected(Vec3(0.0, 0.0, 5.0)).unwrap()
+    assert(near(at_of(doc, a).z, 5.0, 1.0e-9), "up along its face is free")
+
+    assert(doc.undo(), "the nudges in a row are one step")
+    assert_eq(at_of(doc, a), Vec3(0.0, 0.0, 0.0), "back")
+end a_nudge_stops_at_contact_like_a_drag
+
+@test
+the_halves_of_a_split_touch_and_stay_where_the_split_left_them()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+
+    place(doc, a, Vec3(0.0, 0.0, 0.0))
+    doc.split_selected(0).unwrap()
+    assert_eq(doc.items().len, 2, "two halves")
+
+    val low = doc.items()[0].id
+    val high = doc.items()[1].id
+    val (lb, hb) = (box_of(doc, low), box_of(doc, high))
+
+    assert(near(lb.max.x, 0.0, 1.0e-9) && near(hb.min.x, 0.0, 1.0e-9), s"meeting at the cut: ${lb} ${hb}")
+    assert(overlap(doc, low, high) <= 1.0e-4, "touching, not overlapping")
+
+    // Each half slides along the cut, comes away from it, and goes back against it, but not into the other.
+    doc.move_to(high, at_of(doc, high) + Vec3(0.0, 0.0, 5.0)).unwrap()
+    assert(near(box_of(doc, high).min.z, 5.0, 1.0e-9), "along the cut")
+    doc.move_to(high, at_of(doc, high) + Vec3(-5.0, 0.0, 0.0)).unwrap()
+    assert(near(box_of(doc, high).min.x, 0.0, 1.0e-9), s"not into the other: ${box_of(doc, high)}")
+    doc.move_to(low, at_of(doc, low) + Vec3(-10.0, 0.0, 0.0)).unwrap()
+    doc.move_to(low, at_of(doc, low) + Vec3(30.0, 0.0, 0.0)).unwrap()
+    assert(near(box_of(doc, low).max.x, 0.0, 1.0e-9), s"and back against it: ${box_of(doc, low)}")
+end the_halves_of_a_split_touch_and_stay_where_the_split_left_them
+
+@test
+an_intersection_collides_by_what_it_keeps_not_by_its_parts()
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+    val c = doc.add_shape(Primitive.Box)
+
+    // a and b overlap from x = 0 to 10; together they keep only that.
+    doc.set_rigid(false)
+    place(doc, a, Vec3(0.0, 0.0, 0.0))
+    place(doc, b, Vec3(10.0, 0.0, 0.0))
+    place(doc, c, Vec3(60.0, 0.0, 0.0))
+    doc.set_rigid(true)
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+    doc.group_selected(intersect = true).unwrap()
+    doc.move_to(c, Vec3(0.0, 0.0, 0.0)).unwrap()
+    assert(near(at_of(doc, c).x, 20.0, 1.0e-9), s"against what it keeps, at x = 10: ${at_of(doc, c)}")
+end an_intersection_collides_by_what_it_keeps_not_by_its_parts
+
+@test
+each_new_shape_collides_and_stacks_like_any_solid()
+    for p in [Primitive.Wedge, Primitive.Pyramid, Primitive.Tube, Primitive.HalfSphere, Primitive.PolygonPrism]
+        val doc = new_document()
+        val base = doc.add_shape(Primitive.Box)
+        val shape = doc.add_shape(p)
+
+        doc.resize_to(base, Vec3(60.0, 60.0, 20.0)).unwrap()
+        place(doc, base, Vec3(0.0, 0.0, 0.0))
+        place(doc, shape, Vec3(0.0, 0.0, 80.0))
+        doc.select(Some(shape))
+        doc.drop_selected().unwrap()
+        assert(near(box_of(doc, shape).min.z, 20.0, 1.0e-9), s"${primitive_name(p)} stands on the block")
+
+        doc.move_to(shape, Vec3(0.0, 0.0, 0.0)).unwrap()
+        assert(near(box_of(doc, shape).min.z, 20.0, 1.0e-9), s"${primitive_name(p)} does not go into it")
+        assert(overlap(doc, shape, base) <= 1.0e-4, s"${primitive_name(p)}: no overlap")
+end each_new_shape_collides_and_stacks_like_any_solid
+
+@test
+a_peg_passes_down_through_a_tubes_bore()
+    val doc = new_document()
+    val tube = doc.add_shape(Primitive.Tube)
+    val peg = doc.add_shape(Primitive.Cylinder)
+
+    // The tube is 20 across with walls 2 thick; a 10 mm peg fits its 16 mm bore.
+    place(doc, tube, Vec3(0.0, 0.0, 0.0))
+    sized(doc, peg, Vec3(0.0, 0.0, 40.0), Vec3(0.5, 0.5, 1.0))
+    doc.move_to(peg, Vec3(0.0, 0.0, -5.0)).unwrap()
+    assert_eq(at_of(doc, peg), Vec3(0.0, 0.0, -5.0), "all the way down the bore")
+    assert(overlap(doc, peg, tube) <= 1.0e-4, "touching nothing on the way")
+end a_peg_passes_down_through_a_tubes_bore
+
+@test
+a_hollow_box_collides_by_its_shell_and_an_open_one_holds_what_is_dropped_in()
+    val doc = new_document()
+    val cup = doc.add_shape(Primitive.Box)
+    val peg = doc.add_shape(Primitive.Box)
+
+    place(doc, peg, Vec3(100.0, 0.0, 0.0))
+    place(doc, cup, Vec3(0.0, 0.0, 0.0))
+    doc.resize_to(cup, Vec3(40.0, 40.0, 30.0)).unwrap()
+    doc.select(Some(cup))
+    doc.hollow_selected(2.0, false).unwrap()
+
+    // Closed: a peg comes down onto its lid.
+    sized(doc, peg, Vec3(0.0, 0.0, 60.0), Vec3(0.5, 0.5, 0.5))
+    doc.select(Some(peg))
+    doc.drop_selected().unwrap()
+    assert(near(box_of(doc, peg).min.z, 30.0, 1.0e-9), s"on the lid: ${box_of(doc, peg)}")
+
+    // Open at the top: down inside it, onto its floor.
+    doc.select(Some(cup))
+    doc.hollow_selected(2.0, true).unwrap()
+    place(doc, peg, Vec3(0.0, 0.0, 60.0))
+    doc.select(Some(peg))
+    doc.drop_selected().unwrap()
+    assert(near(box_of(doc, peg).min.z, 2.0, 1.0e-9), s"on the floor inside: ${box_of(doc, peg)}")
+    assert(overlap(doc, peg, cup) <= 1.0e-4, "touching only its floor")
+end a_hollow_box_collides_by_its_shell_and_an_open_one_holds_what_is_dropped_in

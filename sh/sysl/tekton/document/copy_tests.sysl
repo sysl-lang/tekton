@@ -61,8 +61,9 @@ private all_ids_unique(doc: &Document) -> bool
 end all_ids_unique
 
 // Two boxes 40 apart along x, grouped, with a third box at y = 60; the group is selected.
+// Rigid is off, so a copy stands exactly a step on even where it overlaps; `rigid_tests` has copies with it on.
 private group_and_box() -> (&Document, int, int)
-    val doc = new_document()
+    val doc = new_document(rigid = false)
     val a = doc.add_shape(Primitive.Box)
     val b = doc.add_shape(Primitive.Box)
     val c = doc.add_shape(Primitive.Box)
@@ -234,7 +235,7 @@ end a_line_array_of_several_keeps_each_copy_where_its_original_stands_in_the_row
 @test
 an_array_counts_from_one_to_the_cap_and_no_further()
     for (count, fine) in [(0, false), (-1, false), (1, true), (MAX_ARRAY_COPIES, true), (MAX_ARRAY_COPIES + 1, false)]
-        val doc = new_document()
+        val doc = new_document(rigid = false)
 
         doc.add_shape(Primitive.Box)
 
@@ -286,7 +287,7 @@ end a_ring_about_the_origin_turns_each_copy_and_carries_it_round
 
 @test
 a_ring_about_the_middle_spins_the_selection_about_its_own_centre()
-    val doc = new_document()
+    val doc = new_document(rigid = false)
     val a = doc.add_shape(Primitive.Box)
     val b = doc.add_shape(Primitive.Box)
 

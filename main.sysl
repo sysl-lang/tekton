@@ -88,7 +88,7 @@ main(args: []string) -> Result[unit, string]
             _ -> false
     , on_frame = dt ->
         deliver_dialogs()
-        w.next_frame()
+        w.next_frame(dt)
 
         if shot != ""
             frames.set(frames.read() + 1)

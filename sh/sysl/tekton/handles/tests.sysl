@@ -2,7 +2,7 @@ module sh.sysl.tekton.handles
 @tests
 
 import sh.sysl.quaternion.Quaternion
-import sh.sysl.tekton.camera.{Camera, new_camera}
+import sh.sysl.tekton.camera.{Camera, NamedView, new_camera, view_name}
 import sh.sysl.tekton.document.{Document, MAX_SIZE, MIN_SIZE, POSITION_LIMIT, Primitive, Transform, new_document}
 import sh.sysl.tekton.space.{Ray, Vec3}
 
@@ -512,3 +512,90 @@ moving_turning_and_resizing_by_every_handle_never_asks_the_kernel()
     doc.set_transform(1, d.transform_at(camera, W, H, 500.0, 320.0, SNAPPED()))
     assert_eq(doc.builds, before, "not once")
     assert_eq(doc.mesh_of(node).revision, mesh.revision, "and the triangles are the same triangles")
+
+// ## Named views and orthographic
+
+private at_view(v: NamedView, ortho: bool) -> &Camera
+    val camera = new_camera()
+
+    camera.go_to(v)
+    camera.advance(1.0)
+    camera.orthographic = ortho
+    camera
+end at_view
+
+private val VIEWS: [6]NamedView = [NamedView.Home, NamedView.Top, NamedView.Front, NamedView.Right, NamedView.Back,
+                                   NamedView.Left]
+
+@test
+every_handle_in_every_named_view_and_both_projections_stays_finite()
+    for v in VIEWS
+        for ortho in [false, true]
+            val camera = at_view(v, ortho)
+
+            for g in ALL_GRIPS()
+                val doc = box()
+
+                layout(doc, camera, W, H).spot(g) match
+                    Some((x, y)) ->
+                        assert(layout(doc, camera, W, H).grip_at(x, y).is_some(), "a handle answers on its ink")
+
+                        val d = grab(doc, camera, g)
+
+                        for (px, py) in [(0.0, 0.0), (W, H), (-5000.0, -5000.0), (9000.0, 4000.0), (x, y)]
+                            val t = d.transform_at(camera, W, H, px, py, SNAPPED())
+
+                            assert(all_finite(t), s"finite: ${view_name(v)} ${ortho}")
+                            assert(t.translation.length() < 1.0e5, "and bounded")
+                    None -> ()
+
+@test
+handles_keep_their_size_on_the_screen_in_orthographic()
+    val doc = box()
+    val camera = at_view(NamedView.Home, true)
+    val near_one = layout(doc, camera, W, H)
+
+    camera.zoom(-300.0)
+
+    val far_one = layout(doc, camera, W, H)
+
+    assert_eq(near_one.strokes.len(), far_one.strokes.len(), "the same handles")
+    assert(near(near_one.strokes[near_one.strokes.len() - 1].radius, far_one.strokes[far_one.strokes.len() - 1].radius),
+           "a dot the same size")
+
+@test
+a_shape_slides_across_the_screen_from_a_level_view_and_does_not_jump()
+    for v in [NamedView.Front, NamedView.Right]
+        for ortho in [false, true]
+            val doc = box()
+            val camera = at_view(v, ortho)
+            val hit = if v == NamedView.Front then Vec3(0.0, -10.0, 10.0) else Vec3(10.0, 0.0, 10.0)
+            val (x, y) = camera.project(hit, W, H).unwrap()
+            val d = drag_body(doc, 1, hit, x, y).unwrap()
+            val still = d.transform_at(camera, W, H, x, y, FREE())
+
+            assert(near_vec(still.translation, d.start.translation, 1.0e-6), s"no jump at the press: ${view_name(v)} ${ortho}")
+
+            val moved = d.transform_at(camera, W, H, x + 50.0, y, FREE())
+            val travel = 50.0 * camera.world_per_point(hit, H)
+            val across = camera.right() * travel
+
+            assert(near_vec(moved.translation, d.start.translation + across, 1.0e-6), "across by what the pointer went")
+
+            val up = d.transform_at(camera, W, H, x, y - 50.0, FREE())
+
+            assert(near_vec(up.translation, d.start.translation, 1.0e-6), "and up the screen is no slide along the ground")
+
+@test
+a_corner_resizes_across_the_screen_from_a_level_orthographic_view()
+    val doc = box()
+    val camera = at_view(NamedView.Front, true)
+    val d = grab(doc, camera, Grip.Corner(1.0, -1.0))
+    val still = d.transform_at(camera, W, H, d.press_x, d.press_y, FREE())
+
+    assert(near_vec(still.scale, d.start.scale, 1.0e-6), "no jump at the press")
+
+    val wider = d.transform_at(camera, W, H, d.press_x + 40.0, d.press_y, SNAPPED())
+
+    assert(wider.scale.x > 1.0, "wider")
+    assert(near(wider.scale.y, 1.0) && near(wider.scale.z, 1.0), "and no deeper or taller")
