@@ -37,6 +37,8 @@ private pair() -> (&Workspace, int, int)
     val a = w.doc.add_shape(Primitive.Box)
     val b = w.doc.add_shape(Primitive.Box)
 
+    // Rigid off, so a paste stands exactly a step along even over what it copies; rigid pastes are in `rigid_tests`.
+    w.doc.rigid = false
     w.doc.set_transform(a, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
     w.doc.set_transform(b, Transform(Vec3(60.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
     (w, a, b)

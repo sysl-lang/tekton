@@ -63,7 +63,7 @@ every_toolbar_glyph_is_drawn_inside_its_box()
     for (all, what) in [(undo_glyph(), "undo"), (redo_glyph(), "redo"), (grouping_glyph(), "group"),
                         (ungrouping_glyph(), "ungroup"), (intersect_glyph(), "intersect"), (align_glyph(), "align"),
                         (mirror_glyph(), "mirror"), (split_glyph(), "split"), (hollow_glyph(), "hollow"),
-                        (snap_glyph(), "snap"), (group_glyph(), "a group in the list")]
+                        (snap_glyph(), "snap"), (rigid_glyph(), "rigid"), (group_glyph(), "a group in the list")]
         drawn_inside(all, what)
 
 @test

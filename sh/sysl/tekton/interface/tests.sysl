@@ -366,6 +366,8 @@ a_handle_in_front_of_another_shape_wins_the_press_over_it()
     val behind = w.doc.add_shape(Primitive.Box)
     var c = recorder()
 
+    // Rigid is off: the other shape is moved over this one, and this one is resized further into it.
+    w.doc.rigid = false
     w.doc.select(Some(a))
 
     val (x, y) = spot_of(w, Grip.Corner(1.0, 1.0))
@@ -395,6 +397,8 @@ a_selected_shape_hidden_behind_another_can_still_be_worked_by_its_handles()
     var c = recorder()
     val toward = w.camera.forward() * -40.0
 
+    // Rigid is off: the shape in front overlaps this one, which is then made taller into it.
+    w.doc.rigid = false
     w.doc.set_transform(front, Transform(Vec3(toward.x, toward.y, 0.0), Quaternion.identity(), Vec3(5.0, 5.0, 5.0)))
     w.doc.select(Some(a))
 

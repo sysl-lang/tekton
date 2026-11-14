@@ -34,8 +34,10 @@ private all_ids_unique(doc: &Document) -> bool
 end all_ids_unique
 
 // A box at (10, 20, 5), then a cylinder of 12 sides, rounded, mirrored along x, a hole with clearance, at (50, 0, 0).
+// Rigid is off here and in `group_and_box`, so a paste stands exactly a step along even over what it copies; rigid
+// pastes are in `rigid_tests`.
 private odd_pair() -> (&Document, int, int)
-    val doc = new_document()
+    val doc = new_document(rigid = false)
     val a = doc.add_shape(Primitive.Box)
     val b = doc.add_shape(Primitive.Cylinder)
 
@@ -52,7 +54,7 @@ end odd_pair
 
 // Two boxes grouped, at x = 0 and 40, with a third box beside at y = 60. The group is selected.
 private group_and_box() -> (&Document, int, int)
-    val doc = new_document()
+    val doc = new_document(rigid = false)
     val a = doc.add_shape(Primitive.Box)
     val b = doc.add_shape(Primitive.Box)
     val c = doc.add_shape(Primitive.Box)

@@ -162,7 +162,8 @@ a_torus_and_a_group_take_no_clearance()
 
 @test
 a_hole_inside_a_group_cuts_with_its_clearance()
-    val doc = new_document()
+    // Rigid is off: the cylinder is moved into the block while it is still solid.
+    val doc = new_document(rigid = false)
     val block = doc.add_shape(Primitive.Box)
     val drill = doc.add_shape(Primitive.Cylinder)
 

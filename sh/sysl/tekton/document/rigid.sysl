@@ -1,0 +1,439 @@
+module sh.sysl.tekton.document
+
+import sh.sysl.manifold.Manifold
+import sh.sysl.quaternion.{Quaternion, slerp}
+import sh.sysl.tekton.space.{Aabb, Vec3, vec3}
+import sysl.buf.{Buf, buf}
+
+// Rigid solids: how far things may go before they would press into other solids.
+//
+// **A solid may touch another but not enter it.** Two solids overlap where their intersection has a volume, so
+// faces that meet (a box standing on a box) are allowed, which is how things stack. A hole passes through
+// everything, since cutting is its job, and the parts of one group are one body: only the things on the ground
+// collide, each as a whole.
+//
+// **What is already overlapping may be pulled apart but not pushed further in.** A file from before, or one made
+// with Rigid off, can hold solids that overlap; a rule of "never overlap" would freeze them. The rule is instead
+// that along a motion the overlap of a moving thing with any other never grows, so a solid touching nothing must
+// stay touching nothing, and one sunk into another may come out of it.
+//
+// **The search cannot step over a thin solid**, however fast a drag goes. A motion is followed from where it
+// starts, never judged only where it ends: the kernel's `min_gap` says how far apart two solids are, and nothing
+// moves further than that in one step, so a step can only end at a contact, never past one. Where two solids
+// already touch or overlap, the gap says nothing, and the motion goes on in steps of `CONTACT_STEP`, each asking
+// the kernel for the overlap; a solid is at least `MIN_SIZE` thick, four steps. When a step would press in, the
+// contact between it and the last free position is found by halving, and a face of one box meeting a face of the
+// other is tried last, so things that stack on flat faces stand exactly on them.
+//
+// **Boxes are asked before the kernel.** Only a pair whose boxes overlap somewhere along the motion is looked at,
+// and a pair whose boxes only touch, as a box resting on another, never is: sliding along a face costs nothing.
+//
+// The overlap volume is used rather than `min_gap` reaching zero because `min_gap` is zero both for faces that
+// touch and for solids that overlap, and only the second is refused; the volume tells them apart exactly.
+
+// How far any point of a moving thing goes in one step while it touches something, in millimetres.
+const CONTACT_STEP: real = 0.25
+
+// How close, in millimetres, the search comes to a contact before it stops.
+const STOP_PRECISION: real = 1.0e-4
+
+// How much overlap, in cubic millimetres, is taken as none: the rounding of two faces that meet.
+const OVERLAP_TOLERANCE: real = 1.0e-4
+
+// How far, in millimetres, the kernel is asked to look for a gap at one step.
+const GAP_SEARCH: real = 10.0
+
+// How far, in millimetres, a stop may be moved to stand exactly where two faces meet.
+const SNAP_DISTANCE: real = 1.0e-2
+
+// How far apart two boxes must reach into each other, in millimetres, to count as overlapping rather than touching.
+const BOX_TOLERANCE: real = 1.0e-6
+
+// How far past its own speed a turn is allowed for, since a short turn is interpolated along a chord.
+const TURN_MARGIN: real = 1.01
+
+// The most steps one search takes, which no motion inside the build volume comes near.
+const MAX_SEARCH_STEPS: int = 200000
+
+// One thing on the move: from where it stands to where it is asked to be.
+struct Motion
+    node: &Node
+    from: Transform
+    to: Transform
+
+// What the search needs of one moving solid.
+private struct Mover
+    node: &Node
+    from: Transform
+    to: Transform
+    middle: Vec3
+    turn: real
+    moves_only: bool
+    speed: real
+
+    // Where it stands at `t` of the way: moved straight; and turned at an even rate with its middle going
+    // straight, and resized evenly, so that a corner its resize keeps still stays still.
+    at(self, t: real) -> Transform
+        if t <= 0.0 then return self.from
+        if t >= 1.0 then return self.to
+
+        val f = self.from
+        val g = self.to
+
+        if self.moves_only then return Transform(f.translation + (g.translation - f.translation) * t, f.rotation, f.scale)
+
+        val q = if f.rotation == g.rotation then f.rotation else slerp(f.rotation, g.rotation, t)
+        val s = f.scale + (g.scale - f.scale) * t
+        val start = f.apply(self.middle)
+        val c = start + (g.apply(self.middle) - start) * t
+
+        Transform(c - vec3(q.rotate(self.middle.times(s).array())), q, s)
+    end at
+
+// A moving solid, with the most any point of it travels over the whole motion: its middle's travel, its turn
+// at the farthest a corner of it stands from its middle, and its growth at the farthest corner.
+private mover_of(doc: &Document, m: Motion) -> Mover
+    val f = m.from
+    val g = m.to
+    val local = doc.local_bounds(m.node)
+    val middle = local.center()
+    val moves_only = f.rotation == g.rotation && f.scale == g.scale
+    val turn = if f.rotation == g.rotation then 0.0 else angle_between(f.rotation, g.rotation)
+    var speed = 0.0
+
+    if moves_only
+        speed = (g.translation - f.translation).length()
+    else
+        val shift = (g.apply(middle) - f.apply(middle)).length()
+
+        for i in 0..<8
+            val corner = Vec3(if (i & 1) == 0 then local.min.x else local.max.x,
+                              if (i & 2) == 0 then local.min.y else local.max.y,
+                              if (i & 4) == 0 then local.min.z else local.max.z)
+            val r = corner - middle
+            val arm = r.times(f.scale).length().max(r.times(g.scale).length())
+
+            speed = speed.max(shift + turn * arm * TURN_MARGIN + r.times(g.scale - f.scale).length())
+
+    Mover(m.node, f, g, middle, turn, moves_only, speed)
+end mover_of
+
+// The angle of the turn from one rotation to another, in radians.
+private angle_between(a: Quaternion[real], b: Quaternion[real]) -> real = 2.0 * a.dot(b).abs().min(1.0).acos()
+
+// A moving solid and a still one whose boxes meet somewhere along the motion.
+private struct Pair
+    mover: usize
+    solid: &Manifold
+    bounds: Aabb
+
+    // The least the two have overlapped so far along the motion, which they may not go above.
+    least: real
+
+    // Whether they are close enough, in the step being taken, that only the kernel can say they do not meet.
+    near: bool
+
+// One search along a set of motions taken together, as one body.
+private struct Search
+    doc: &Document
+    movers: Buf[Mover]
+    pairs: Buf[Pair]
+    speed: real
+
+    placed(&self, i: usize, t: real) -> &Manifold
+        val m = self.movers[i]
+
+        self.doc.placed_solid(m.node, m.at(t))
+
+    box(&self, i: usize, t: real) -> Aabb
+        val m = self.movers[i]
+
+        self.doc.mesh_of(m.node).bounds_after(m.at(t))
+
+    // The overlap of each pair at `t`, or nothing where one has grown past the least it has been. Only the pairs
+    // that are near are asked about, unless `all`: the others are further apart than the step that reached `t`.
+    overlaps(&self, t: real, all: bool = false) -> Option[Buf[real]]
+        var out: Buf[real] = buf()
+
+        for p in self.pairs.view()
+            var v = 0.0
+
+            if (all || p.near) && boxes_overlap(self.box(p.mover, t), p.bounds)
+                v = self.placed(p.mover, t).intersection(p.solid).volume()
+
+            // Never more than the least so far, give or take its rounding, and never past the tolerance from none:
+            // a tolerance added to whatever the last motion left would let a drag sink in a little more each frame.
+            if v > p.least.max(OVERLAP_TOLERANCE) + p.least * 1.0e-9 then return None
+
+            out.push(v)
+
+        Some(out)
+    end overlaps
+
+    free_at(&self, t: real) -> bool = self.overlaps(t).is_some()
+
+    // The furthest `t` the body reaches, from 0 to 1.
+    run(&self) -> real
+        var t = 0.0
+
+        // Where it starts, any overlap is allowed, and is the most it may have from there on.
+        for i in 0..<self.pairs.len() do self.pairs[i].least = real.infinity()
+
+        self.overlaps(0.0, all = true) match
+            Some(v) -> for i in 0..<v.len() do self.pairs[i].least = v[i]
+            None -> ()
+
+        for _ in 0..<MAX_SEARCH_STEPS
+            if t >= 1.0 then return 1.0
+
+            val remaining = (1.0 - t) * self.speed
+            var step = remaining
+            var touching = false
+            var solids: Buf[Option[&Manifold]] = buf()
+            var boxes: Buf[Aabb] = buf()
+
+            for i in 0..<self.movers.len()
+                solids.push(None)
+                boxes.push(self.box(i, t))
+
+            for i in 0..<self.pairs.len()
+                val p = self.pairs[i]
+                var near = false
+
+                val apart = box_distance(boxes[p.mover], p.bounds)
+
+                if apart < step
+                    if p.least > 0.0
+                        near = true
+                    elif apart >= GAP_SEARCH
+                        // No nearer than their boxes: far enough that the kernel need not be asked yet.
+                        step = apart
+                    else
+                        if solids[p.mover].is_none() then solids[p.mover] = Some(self.placed(p.mover, t))
+
+                        // The kernel's search costs more the further it looks, so it looks no further than one
+                        // long step; a gap past that is taken as that.
+                        val gap = solids[p.mover].unwrap().min_gap(p.solid, step.min(GAP_SEARCH))
+
+                        if gap < CONTACT_STEP then near = true else step = step.min(gap)
+
+                self.pairs[i].near = near
+
+                if near then touching = true
+
+            if touching then step = step.min(CONTACT_STEP)
+
+            val next = if step >= remaining then 1.0 else t + step / self.speed
+
+            if touching
+                self.overlaps(next) match
+                    Some(v) -> for i in 0..<v.len() do self.pairs[i].least = self.pairs[i].least.min(v[i])
+                    None -> return self.contact(t, next)
+
+            t = next
+
+        t
+    end run
+
+    // Between a free `from` and a pressing `to`, the last free position, found by halving. **Where a face of a
+    // moving box meets a face of a still one right there, the answer is exactly that meeting**, a little before or
+    // after the halving's: what halving finds may have sunk into a curved face by as much as the tolerance allows,
+    // and a box resting a hair too low would then catch on every box it slides along.
+    contact(&self, from: real, to: real) -> real
+        var lo = from
+        var hi = to
+        val first = from + STOP_PRECISION / self.speed
+
+        // Pressing at once, as a drag held against a contact does every frame: nothing to halve.
+        if first < hi && !self.free_at(first) then hi = first
+
+        while (hi - lo) * self.speed > STOP_PRECISION
+            val mid = (lo + hi) * 0.5
+
+            if self.free_at(mid) then lo = mid else hi = mid
+
+        val window = SNAP_DISTANCE / self.speed
+        var best: Option[real] = None
+
+        for p in self.pairs.view()
+            val a = self.box(p.mover, from)
+            val b = self.box(p.mover, to)
+
+            // Only a pair near enough to meet in this step can meet in it.
+            for axis in 0..<(if p.near then 3 else 0)
+                for (near, far, face) in [(a.max.axis(axis), b.max.axis(axis), p.bounds.min.axis(axis)),
+                                          (a.min.axis(axis), b.min.axis(axis), p.bounds.max.axis(axis))]
+                    if near != far
+                        val c = from + (to - from) * ((face - near) / (far - near))
+                        val better = best match
+                            Some(t) -> c > t
+                            None -> true
+
+                        if c >= from && c <= to && (c - lo).abs() <= window && better && self.free_at(c) then best = Some(c)
+
+        best.unwrap_or(lo)
+    end contact
+end Search
+
+// How far along these motions, all together, the things moving may go before a solid among them would press
+// into a solid that is not, as a fraction of the way: 1 for all of it, 0 for none. Holes, moving or still, are
+// passed through.
+reach(doc: &Document, motions: []const Motion) -> real
+    var movers: Buf[Mover] = buf()
+
+    for m in motions do if !m.node.hole then movers.push(mover_of(doc, m))
+
+    var speed = 0.0
+
+    for m in movers.view() do speed = speed.max(m.speed)
+
+    if movers.len() == 0 || !(speed > 0.0) then return 1.0
+
+    var pairs: Buf[Pair] = buf()
+
+    for item in doc.items()
+        if !item.hole && !moving(motions, item.id)
+            val b = doc.bounds_of(item)
+
+            for i in 0..<movers.len()
+                val m = movers[i]
+                val mesh = doc.mesh_of(m.node)
+                var swept = mesh.bounds_after(m.from).joined(mesh.bounds_after(m.to))
+
+                // A turn can carry a point outside both ends' boxes, but never further than half its travel.
+                if m.turn > 0.0 then swept = grown(swept, m.speed * 0.5)
+
+                if boxes_overlap(swept, b) then pairs.push(Pair(i, doc.solid_of(item), b, 0.0, false))
+
+    if pairs.len() == 0 then return 1.0
+
+    val search: &Search = Search(doc, movers, pairs, speed)
+    val t = search.run()
+
+    // A stop closer to where it began than the search can tell apart is no move, so pressing on a contact again
+    // changes nothing at all.
+    if t < 1.0 && t * speed < STOP_PRECISION then 0.0 else t
+end reach
+
+// Where each of these motions ends: all the way, or as far as `reach` lets them, and then, for motions that
+// only move, on along each axis in turn as far as each allows, so a drag into a wall slides along it.
+reached(doc: &Document, motions: []const Motion) -> Buf[Transform]
+    val t = reach(doc, motions)
+    var now: Buf[Transform] = buf()
+
+    for m in motions do now.push(mover_at(m, doc, t))
+
+    if t >= 1.0 then return now
+
+    for m in motions do if m.from.rotation != m.to.rotation || m.from.scale != m.to.scale then return now
+
+    for axis in 0..<3
+        var along: Buf[Motion] = buf()
+        var any = false
+
+        for i in 0..<motions.len
+            val m = motions[i]
+            val left = m.to.translation.axis(axis) - now[i].translation.axis(axis)
+
+            if left != 0.0 then any = true
+
+            along.push(Motion(m.node, now[i], Transform(now[i].translation.with_axis(axis, m.to.translation.axis(axis)),
+                                                         now[i].rotation, now[i].scale)))
+
+        if any
+            val k = reach(doc, along.view())
+
+            for i in 0..<along.len() do now[i] = mover_at(along[i], doc, k)
+
+    now
+end reached
+
+// Where a motion stands at `t`. A move stopped short is settled to the nanometre, so a face met at 10 mm reads
+// 10 and not the 9.999999999999998 the arithmetic of getting there left; the overlap that can add is far inside
+// the tolerance.
+private mover_at(m: Motion, doc: &Document, t: real) -> Transform
+    val mover = mover_of(doc, m)
+    val at = mover.at(t)
+
+    if t <= 0.0 || t >= 1.0 || !mover.moves_only then return at
+
+    val p = at.translation
+
+    Transform(Vec3(nanometres(p.x), nanometres(p.y), nanometres(p.z)), at.rotation, at.scale)
+end mover_at
+
+private nanometres(v: real) -> real = (v * 1.0e6).round() / 1.0e6 + 0.0
+
+// Whether a solid among `placed`, each a node standing where its transform puts it, overlaps a solid on the ground
+// or one among `others`. Touching is not overlapping, holes overlap nothing, and the ones in `placed` do not
+// collide with each other.
+overlaps_any(doc: &Document, placed: []const (&Node, Transform), others: []const (&Node, Transform)) -> bool
+    for (node, at) in placed
+        if !node.hole
+            val box = doc.mesh_of(node).bounds_after(at)
+            var solid: Option[&Manifold] = None
+
+            for item in doc.items()
+                if !item.hole && boxes_overlap(box, doc.bounds_of(item))
+                    if solid.is_none() then solid = Some(doc.placed_solid(node, at))
+
+                    if solid.unwrap().intersection(doc.solid_of(item)).volume() > OVERLAP_TOLERANCE then return true
+
+            for (other, t) in others
+                if !other.hole && boxes_overlap(box, doc.mesh_of(other).bounds_after(t))
+                    if solid.is_none() then solid = Some(doc.placed_solid(node, at))
+
+                    if solid.unwrap().intersection(doc.placed_solid(other, t)).volume() > OVERLAP_TOLERANCE then return true
+
+    false
+end overlaps_any
+
+// Where a thing placed by `t` comes to rest, lowered straight down from above everything beneath it until it
+// stands on a solid's top or on the ground; `t` as it is where it already stands clear on the ground.
+landed(doc: &Document, node: &Node, t: Transform) -> Transform
+    val box = doc.mesh_of(node).bounds_after(t)
+    var top = box.min.z
+    var under = false
+
+    for item in doc.items()
+        val b = doc.bounds_of(item)
+
+        if !item.hole && item.id != node.id && box.overlaps_plan(b)
+            under = true
+            top = top.max(b.max.z)
+
+    val drop = -box.min.z
+    val ground = Transform(t.translation + Vec3(0.0, 0.0, drop), t.rotation, t.scale)
+
+    if !under || node.hole then return ground
+
+    val above = Transform(t.translation + Vec3(0.0, 0.0, top - box.min.z), t.rotation, t.scale)
+
+    mover_at(Motion(node, above, ground), doc, reach(doc, [Motion(node, above, ground)]))
+end landed
+
+private moving(motions: []const Motion, id: int) -> bool
+    for m in motions do if m.node.id == id then return true
+
+    false
+end moving
+
+// Whether two boxes reach into each other, rather than only touching or standing apart.
+private boxes_overlap(a: Aabb, b: Aabb) -> bool =
+    a.min.x < b.max.x - BOX_TOLERANCE && b.min.x < a.max.x - BOX_TOLERANCE &&
+    a.min.y < b.max.y - BOX_TOLERANCE && b.min.y < a.max.y - BOX_TOLERANCE &&
+    a.min.z < b.max.z - BOX_TOLERANCE && b.min.z < a.max.z - BOX_TOLERANCE
+
+// How far apart two boxes stand at their nearest, 0 where they meet: no two points of what they hold are closer.
+private box_distance(a: Aabb, b: Aabb) -> real
+    var sum = 0.0
+
+    for i in 0..<3
+        val d = (a.min.axis(i) - b.max.axis(i)).max(b.min.axis(i) - a.max.axis(i)).max(0.0)
+
+        sum += d * d
+
+    sum.sqrt()
+end box_distance
+
+private grown(b: Aabb, by: real) -> Aabb = Aabb(b.min - Vec3(by, by, by), b.max + Vec3(by, by, by))

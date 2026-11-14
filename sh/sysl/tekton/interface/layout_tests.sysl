@@ -6,6 +6,7 @@ import sh.sysl.tekton.document.{Edge, PRIMITIVES, Primitive, Transform, primitiv
 import sh.sysl.tekton.settings.{Settings, default_settings, load_settings}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
+import sysl.buf.Buf
 import sysl.fs.{make_temp_dir, remove_dir_all}
 import sysl.path.join
 
@@ -149,10 +150,12 @@ the_toolbar_groups_ungroups_intersects_undoes_and_redoes()
     tap(w, &c, "redo")
     assert_eq(w.doc.items().len, 2, "redone")
 
+    w.doc.set_transform(b, Transform(Vec3(5.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
     w.doc.select(Some(a))
     w.doc.toggle_selected(b)
     tap(w, &c, "toolbar.intersect")
-    assert(w.doc.items()[0].intersects, "an intersection")
+    assert_eq(w.problem.read(), "")
+    assert(w.doc.items().len == 1 && w.doc.items()[0].intersects, "an intersection")
 
 @test
 a_disabled_tool_does_nothing_when_tapped()
@@ -214,6 +217,12 @@ mirror_and_split_open_their_axes()
     assert(!w.mirror_open.read(), "closed")
     assert(w.doc.find(a).unwrap().mirror.x, "mirrored along x")
 
+@test
+split_opens_its_axes()
+    val (w, a, _) = apart()
+    var c = recorder()
+
+    w.doc.select(Some(a))
     tap(w, &c, "toolbar.split")
     assert(shows(w, &c, "toolbar.split.z"), "the axes")
     tap(w, &c, "toolbar.split.z")
@@ -291,12 +300,25 @@ the_object_list_names_each_item_by_its_kind_and_count()
     w.doc.select(Some(w.doc.items()[0].id))
     w.doc.toggle_selected(w.doc.items()[2].id)
     w.group()
-    assert_eq(object_names(w.doc.items())[2], "Group 1", "a group, after what it did not take")
 
-    w.doc.select(Some(w.doc.items()[0].id))
-    w.doc.toggle_selected(w.doc.items()[1].id)
-    w.intersect()
-    assert_eq(object_names(w.doc.items())[1], "Intersection 1")
+    val grouped = object_names(w.doc.items())
+
+    assert_eq(grouped.len(), 3)
+    assert(named(grouped, "Group 1") && named(grouped, "Cylinder 1") && named(grouped, "Half sphere 1"), "a group")
+
+    val (o, a, b) = apart()
+
+    o.doc.set_transform(b, Transform(Vec3(5.0, 0.0, 0.0), Quaternion.identity(), Vec3(1.0, 1.0, 1.0)))
+    o.doc.toggle_selected(a)
+    o.intersect()
+    assert_eq(object_names(o.doc.items())[0], "Intersection 1", "an intersection counts apart from a group")
+
+private named(names: Buf[string], name: string) -> bool
+    for n in names.view()
+        if n == name then return true
+
+    false
+end named
 
 @test
 a_click_on_the_list_selects_and_shift_or_cmd_adds_or_takes_away()
@@ -345,11 +367,11 @@ a_long_list_scrolls_and_a_row_scrolled_to_still_selects()
 
     w.doc.select(None)
 
-    val before = look(w, &c, SCREEN).find(s"objects.${last}").unwrap()
+    assert(look(w, &c, SCREEN).find(s"objects.${last}").is_err(), "below the list's bottom")
 
-    assert(before.shown.h == 0 || before.shown != before.rect, "below the list's bottom")
+    val step = look(w, &c, SCREEN).find(s"objects.${w.doc.items()[0].id}").unwrap().rect.h + 1
 
-    w.objects_offset.set(10000)
+    w.objects_offset.set(step * 37)
 
     tap(w, &c, s"objects.${last}")
     assert(w.doc.selected == Some(last), "scrolled to and clicked")
@@ -369,7 +391,11 @@ a_hollow_tube_shows_every_field_whole_in_the_test_window()
     val w = new_workspace()
     var c = recorder()
 
-    w.doc.add_shape(Primitive.Tube)
+    val tube = w.doc.add_shape(Primitive.Tube)
+
+    w.doc.set_transform(tube, Transform(Vec3(0.0, 0.0, 0.0), Quaternion.identity(), Vec3(2.0, 2.0, 2.0)))
+    w.doc.set_tube_wall(tube, 4.0).unwrap()
+    w.doc.select(Some(tube))
     w.doc.hollow_selected(1.0, false).unwrap()
 
     val s = look(w, &c, SCREEN)
@@ -403,15 +429,16 @@ the_viewport_sits_between_the_panels_at_their_widths()
     var c = recorder()
     val r = look(w, &c, SCREEN).find("viewport").unwrap().rect
 
-    assert_eq(r.x, default_settings().library_width, "after the library")
-    assert_eq(SCREEN.w - (r.x + r.w), default_settings().inspector_width, "before the right-hand column")
+    // A one-point rule stands between each panel and the viewport.
+    assert_eq(r.x, default_settings().library_width + 1, "after the library")
+    assert_eq(SCREEN.w - (r.x + r.w), default_settings().inspector_width + 1, "before the right-hand column")
 
     w.use_settings(Settings(300, 320, 150), "")
 
     val wider = look(w, &c, SCREEN).find("viewport").unwrap().rect
 
-    assert_eq(wider.x, 300)
-    assert_eq(SCREEN.w - (wider.x + wider.w), 320)
+    assert_eq(wider.x, 301)
+    assert_eq(SCREEN.w - (wider.x + wider.w), 321)
 
 @test
 a_narrow_window_takes_room_from_the_panels_before_the_viewport()
@@ -467,3 +494,19 @@ a_workspace_with_no_settings_file_writes_nothing()
     w.library_width.set(300)
     w.next_frame(5.0)
     assert(w.remembered == Settings(300, 260, 200), "taken as remembered, with nowhere to write it")
+
+// ## Rigid
+
+@test
+the_rigid_tool_turns_the_same_setting_as_the_menu_row()
+    val w = new_workspace()
+    var c = recorder()
+    val was = w.doc.rigid
+
+    tap(w, &c, "toolbar.rigid")
+    assert(w.doc.rigid != was, "turned")
+    assert(look(w, &c, SCREEN).find("toolbar.rigid").unwrap().tip.index_of(if was then "(off)" else "(on)").is_some(),
+           "the tip says which")
+
+    tap(w, &c, "toolbar.rigid")
+    assert(w.doc.rigid == was, "and back")

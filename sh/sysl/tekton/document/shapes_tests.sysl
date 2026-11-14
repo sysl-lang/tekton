@@ -244,7 +244,8 @@ a_wedge_pyramid_half_sphere_and_polygon_prism_take_a_clearance_and_a_tube_does_n
 @test
 a_hole_of_each_new_shape_cuts_the_solid_it_is_grouped_with()
     for p in all_shapes()
-        val doc = new_document()
+        // Rigid off: the shape is moved into the block while it is still solid.
+        val doc = new_document(rigid = false)
         val block = doc.add_shape(Primitive.Box)
         val cut = doc.add_shape(p)
 

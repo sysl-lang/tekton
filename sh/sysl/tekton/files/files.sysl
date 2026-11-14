@@ -59,9 +59,10 @@ import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
 // says `edge_style = chamfer`; rounded and sharp say nothing. A box with finished edges says its `segments`, which
 // set how smooth its rounds are, and only such a box may.
 //
-// Format 3 added three keys. A group that keeps only what its solids share says `mode = intersect`; one that joins
+// Format 3 added four keys. A group that keeps only what its solids share says `mode = intersect`; one that joins
 // them says nothing. A solid hollowed into a shell says how thick its walls are, in millimetres, as `wall = 2.0`,
-// and one open at the top says `open_top = true`; a solid one says neither.
+// and one open at the top says `open_top = true`; a solid one says neither. A document with Rigid off says
+// `rigid = false`, after `last`; one with it on says nothing, so a file from before opens with Rigid on.
 
 // The newest format this reads. A key an older reader would refuse is a new format, so that reader says "too new"
 // rather than "unknown key"; and a document that uses none of format 3's keys is written as format 2, so that an
@@ -175,11 +176,15 @@ end write_node
 document_text(doc: &Document) -> string
     var b: &StrBuilder = str_builder()
 
-    b.push(s"tekton = ${if needs_format_3(doc.root) then FORMAT_VERSION else PLAIN_FORMAT}\nnext = ${doc.next_id}\n")
+    val format = if !doc.rigid || needs_format_3(doc.root) then FORMAT_VERSION else PLAIN_FORMAT
+
+    b.push(s"tekton = ${format}\nnext = ${doc.next_id}\n")
 
     doc.last_placed match
         Some(id) -> if doc.find(id).is_some() then b.push(s"last = ${id}\n")
         None -> ()
+
+    if !doc.rigid then b.push("rigid = false\n")
 
     if doc.items().len == 0
         b.push("nodes = []\n")
@@ -558,7 +563,7 @@ document_from_text(text: string, next_revision: int = 1) -> Result[&Document, st
     val root = parsed.root
 
     for f in root.fields().view()
-        if f.key != "tekton" && f.key != "next" && f.key != "last" && f.key != "nodes"
+        if f.key != "tekton" && f.key != "next" && f.key != "last" && f.key != "rigid" && f.key != "nodes"
             return Err(s"line ${src.locate(f.key_span.start).line}: unknown key `${f.key}`")
 
     val next_value = root.get("next").ok_or("line 1: this document has no `next`")?
@@ -588,7 +593,13 @@ document_from_text(text: string, next_revision: int = 1) -> Result[&Document, st
             last = Some(int(id))
         None -> ()
 
-    val doc = restored_document(items, int(next_id), last, next_revision)
+    var rigid = true
+
+    root.get("rigid") match
+        Some(v) -> rigid = v.as_bool().ok_or(reading.refusal(v.span, "`rigid` must be true or false"))?
+        None -> ()
+
+    val doc = restored_document(items, int(next_id), last, next_revision, rigid)
 
     doc.problem() match
         Some((id, why)) -> Err(s"line ${reading.line_of_id(id)}: ${why}")
