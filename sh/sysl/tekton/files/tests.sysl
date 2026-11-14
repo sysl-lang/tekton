@@ -44,14 +44,15 @@ private assert_same_node(a: &Node, b: &Node)
     assert_same_transform(a.transform, b.transform)
 
     a.operation match
-        Shape(p, n, e) ->
+        Shape(p, n, e, w) ->
             b.operation match
-                Shape(q, m, f) ->
+                Shape(q, m, f, x) ->
                     assert_eq(p, q, "primitive")
                     assert_eq(a.segments, b.segments, "segments")
                     assert_eq(n, m, "the number the kernel is given")
                     same_number(e.radius, f.radius, "edge radius")
                     assert_eq(e.chamfer, f.chamfer, "edge style")
+                    same_number(w, x, "tube wall")
                 Group -> assert(false, "a shape came back a group")
         Group -> ()
 
@@ -879,3 +880,102 @@ wrong_edges_are_refused_on_their_own_line()
               "line 13: a group has no `edge_radius`", "a group")
     assert_eq(refusal(with(after, s"${after}    segments = 12\n")), "line 13: a box has no `segments`", "a sharp box")
 end wrong_edges_are_refused_on_their_own_line
+
+// ## The wedge, pyramid, tube, half sphere and polygon prism
+
+@test
+the_new_shapes_come_back_under_their_own_names()
+    val doc = new_document()
+    var ids: Buf[int] = buf()
+
+    for p in [Primitive.Wedge, Primitive.Pyramid, Primitive.Tube, Primitive.HalfSphere, Primitive.PolygonPrism]
+        ids.push(doc.add_shape(p))
+
+    val text = document_text(doc)
+    val back = round_trip(doc)
+
+    for kind in ["wedge", "pyramid", "tube", "half_sphere", "polygon_prism"]
+        assert(text.contains(s"kind = ${kind}\n"), kind)
+
+    assert_same_document(doc, back)
+    assert_eq(document_text(back), text, "and the text is stable")
+    assert(!text.contains("sides"), "a default polygon prism says nothing of its sides")
+    assert(!text.contains("wall"), "a default tube says nothing of its wall")
+    assert(!text.contains("clearance"), "and none has a clearance")
+
+@test
+sides_and_a_wall_are_written_only_when_not_the_default_and_come_back()
+    val doc = new_document()
+    val prism = doc.add_shape(Primitive.PolygonPrism)
+    val tube = doc.add_shape(Primitive.Tube)
+
+    doc.set_sides(prism, 8).unwrap()
+    doc.set_wall(tube, 3.25).unwrap()
+
+    val text = document_text(doc)
+    val back = round_trip(doc)
+
+    assert(text.contains("    sides = 8\n"), text)
+    assert(text.contains("    wall = 3.25\n"), text)
+    assert(!text.contains("segments = 8"), "a prism's sides are not its segments")
+    assert_same_document(doc, back)
+    assert_eq(back.find(prism).unwrap().sides, Some(8), "the sides")
+    assert_eq(back.find(tube).unwrap().wall, Some(3.25), "the wall")
+    assert_eq(back.find(tube).unwrap().segments, Some(64), "the tube's own segments are kept too")
+
+    doc.set_sides(prism, 6).unwrap()
+    doc.set_wall(tube, 2.0).unwrap()
+    assert(!document_text(doc).contains("sides"), "back at the default, nothing is written")
+    assert(!document_text(doc).contains("wall"), "for either")
+
+@test
+a_hole_of_a_new_shape_keeps_its_clearance_and_a_tube_hole_has_none()
+    val doc = new_document()
+    var ids: Buf[int] = buf()
+
+    for p in [Primitive.Wedge, Primitive.Pyramid, Primitive.HalfSphere, Primitive.PolygonPrism]
+        val id = doc.add_shape(p)
+
+        doc.set_hole(true).unwrap()
+        doc.set_clearance(id, 0.3).unwrap()
+        ids.push(id)
+
+    val back = round_trip(doc)
+
+    assert_same_document(doc, back)
+
+    for id in ids do assert_eq(back.find(id).unwrap().clearance, 0.3, "kept")
+
+@test
+the_new_keys_are_refused_on_the_wrong_shape_and_out_of_range()
+    val doc = new_document()
+    val prism = doc.add_shape(Primitive.PolygonPrism)
+    val text = document_text(doc)
+    val at = "    hole = false\n"
+
+    for (put, why) in [("sides = 2", "`sides` must be from 3 to 64"), ("sides = 65", "`sides` must be from 3 to 64"),
+                       ("sides = 5.5", "`sides` must be a whole number"), ("sides = many", "`sides` must be a whole number"),
+                       ("segments = 12", "a polygon_prism has no `segments`"), ("wall = 1.0", "a polygon_prism has no `wall`")]
+        assert(refusal(replace_all(text, at, s"${at}    ${put}\n")).contains(why), put)
+
+    for (put, why) in [("wall = 0.1", "`wall` must be from 0.2 to 9.8 mm"), ("wall = 9.9", "`wall` must be from 0.2 to 9.8 mm"),
+                       ("wall = thick", "`wall` must be a number"), ("sides = 5", "a tube has no `sides`"),
+                       ("clearance = 0.2", "a tube has no `clearance`")]
+        assert(refusal(replace_all(replace_all(text, at, s"${at}    ${put}\n"), "kind = polygon_prism", "kind = tube"))
+                   .contains(why), put)
+
+    assert(refusal(replace_all(replace_all(text, at, s"${at}    sides = 5\n"), "kind = polygon_prism", "kind = wedge"))
+               .contains("a wedge has no `sides`"), "a wedge")
+    assert_eq(document_from_text(replace_all(text, at, s"${at}    sides = 3\n")).unwrap().find(prism).unwrap().sides,
+              Some(3), "the least")
+    assert_eq(document_from_text(replace_all(text, at, s"${at}    sides = 64\n")).unwrap().find(prism).unwrap().sides,
+              Some(64), "the most")
+
+@test
+a_polygon_prism_file_without_sides_has_six_and_old_files_are_untouched()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.PolygonPrism)
+    assert_eq(round_trip(doc).items()[0].sides, Some(6), "six")
+    assert(document_text(doc).starts_with("tekton = 2\n"), "still format 2")
+    assert_eq(document_from_text(GROUP_FILE).unwrap().find(2).unwrap().sides, None, "an old cylinder has none")

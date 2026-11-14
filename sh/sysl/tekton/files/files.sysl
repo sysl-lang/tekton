@@ -4,7 +4,7 @@ import sh.sysl.hocon.{Value, parse}
 import sh.sysl.parsing.{Source, Span, source_of}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.DialogResult
-import sh.sysl.tekton.document.{Document, Edges, MAX_CLEARANCE, MAX_SEGMENTS, MAX_SIZE, MIN_SEGMENTS, Mirror, NO_MIRROR, Node, Operation, PRIMITIVES, Primitive, ROUND_SEGMENTS, SHARP_EDGES, Transform, is_round, primitive_name, restored_document, restored_group, restored_shape, takes_edges}
+import sh.sysl.tekton.document.{DEFAULT_SIDES, Document, Edges, MAX_CLEARANCE, MAX_SEGMENTS, MAX_SIDES, MAX_SIZE, MAX_WALL, MIN_SEGMENTS, MIN_SIDES, MIN_WALL, TUBE_WALL, Mirror, NO_MIRROR, Node, Operation, PRIMITIVES, Primitive, ROUND_SEGMENTS, SHARP_EDGES, Transform, default_segments, is_round, primitive_key, restored_document, restored_group, restored_shape, takes_edges}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf, byte_sink}
 import sysl.container.{Set, set}
@@ -47,6 +47,10 @@ import sysl.text.{StrBuilder, from_utf8, str_builder, to_lower}
 
 // A round shape also says how many sides it has, as `segments`. Format 2 added it, so a format 1 file, which
 // never says, gives every round shape the number it was always drawn with.
+//
+// A polygon prism says how many sides it has, as `sides = 8`, and a tube how thick its wall is in millimetres at the
+// palette's size, as `wall = 3.0`; at their defaults, six sides and two millimetres, they say nothing. Neither is
+// said by any other shape.
 //
 // A box, cylinder, sphere or cone with a clearance says how much, in millimetres, as `clearance = 0.2`, solid or
 // hole; one without says nothing.
@@ -99,7 +103,7 @@ private write_node(b: &StrBuilder, node: &Node, indent: string)
     val t = node.transform
     val q = t.rotation
     val kind = node.operation match
-        Shape(p, _, _) -> to_lower(primitive_name(p))
+        Shape(p, _, _, _) -> primitive_key(p)
         Group -> "group"
 
     b.push(s"${indent}{\n${inner}id = ${node.id}\n${inner}kind = ${kind}\n${inner}tint = ${node.tint}\n")
@@ -110,11 +114,19 @@ private write_node(b: &StrBuilder, node: &Node, indent: string)
 
     // A box with finished edges says its segments while they are chamfered too, so a choice of round comes back.
     val segments = node.operation match
-        Shape(p, n, e) -> if is_round(p) || e != SHARP_EDGES then Some(n) else None
+        Shape(p, n, e, _) -> if is_round(p) || e != SHARP_EDGES then Some(n) else None
         Group -> None
 
     segments match
         Some(n) -> b.push(s"${inner}segments = ${n}\n")
+        None -> ()
+
+    node.sides match
+        Some(n) -> if n != DEFAULT_SIDES then b.push(s"${inner}sides = ${n}\n")
+        None -> ()
+
+    node.wall match
+        Some(w) -> if w != TUBE_WALL then b.push(s"${inner}wall = ${real_text(w)}\n")
         None -> ()
 
     if node.mirror.any then b.push(s"${inner}mirror = [${node.mirror.x}, ${node.mirror.y}, ${node.mirror.z}]\n")
@@ -289,11 +301,36 @@ private struct Reading
                     return Err(self.refusal(given.span, s"`segments` must be from ${MIN_SEGMENTS} to ${MAX_SEGMENTS}"))
 
                 int(n)
-            None -> ROUND_SEGMENTS
+            None -> default_segments(primitive)
+
+        val sides = v.get("sides") match
+            Some(given) ->
+                if primitive != Primitive.PolygonPrism then return Err(self.refusal(given.span, s"a ${kind} has no `sides`"))
+
+                val n = given.as_long().ok_or(self.refusal(given.span, "`sides` must be a whole number"))?
+
+                if n < long(MIN_SIDES) || n > long(MAX_SIDES)
+                    return Err(self.refusal(given.span, s"`sides` must be from ${MIN_SIDES} to ${MAX_SIDES}"))
+
+                int(n)
+            None -> segments
+
+        val wall = v.get("wall") match
+            Some(given) ->
+                if primitive != Primitive.Tube then return Err(self.refusal(given.span, s"a ${kind} has no `wall`"))
+
+                val w = given.as_real().ok_or(self.refusal(given.span, "`wall` must be a number"))?
+
+                if !(w >= MIN_WALL && w <= MAX_WALL)
+                    return Err(self.refusal(given.span, s"`wall` must be from ${MIN_WALL} to ${MAX_WALL} mm"))
+
+                w
+            None -> TUBE_WALL
 
         val clearance = v.get("clearance") match
             Some(given) ->
-                if primitive == Primitive.Torus then return Err(self.refusal(given.span, s"a ${kind} has no `clearance`"))
+                if primitive == Primitive.Torus || primitive == Primitive.Tube
+                    return Err(self.refusal(given.span, s"a ${kind} has no `clearance`"))
 
                 val c = given.as_real().ok_or(self.refusal(given.span, "`clearance` must be a number"))?
 
@@ -303,7 +340,7 @@ private struct Reading
                 c
             None -> 0.0
 
-        Ok(restored_shape(id, primitive, t, tint, hole, segments, mirror, clearance, edges))
+        Ok(restored_shape(id, primitive, t, tint, hole, sides, mirror, clearance, edges, wall))
     end node
 
     // How a shape's edges are finished, sharp where it does not say. A shape with no edges to finish may not say.
@@ -346,7 +383,7 @@ private struct Reading
 end Reading
 
 private is_node_key(key: string) -> bool
-    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "mirror", "segments", "clearance", "edge_radius",
+    for k in ["id", "kind", "tint", "hole", "at", "turn", "scale", "mirror", "segments", "sides", "wall", "clearance", "edge_radius",
               "edge_style", "parts"]
         if k == key then return true
 
@@ -355,7 +392,7 @@ end is_node_key
 
 private primitive_named(kind: string) -> Option[Primitive]
     for p in PRIMITIVES
-        if to_lower(primitive_name(p)) == kind then return Some(p)
+        if primitive_key(p) == kind then return Some(p)
 
     None
 end primitive_named

@@ -3,7 +3,7 @@ module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
-import sh.sysl.tekton.document.{PRIMITIVES, Primitive, Transform, primitive_name}
+import sh.sysl.tekton.document.{Operation, PRIMITIVES, Primitive, Transform, primitive_name}
 import sh.sysl.tekton.cube.view_cube
 import sh.sysl.tekton.handles.{Grip, Layout, layout}
 import sh.sysl.tekton.measure.Mark
@@ -1884,3 +1884,103 @@ the_round_and_chamfer_buttons_choose_the_finish_as_one_step()
     assert(w.doc.undo(), "undone")
     assert(w.doc.find(a).unwrap().edges.unwrap().chamfer, "chamfered again")
 end the_round_and_chamfer_buttons_choose_the_finish_as_one_step
+
+// ## The wedge, pyramid, tube, half sphere and polygon prism
+
+private sides_field(w: &Workspace) -> &NumberField = w.number_fields()[12]
+
+private wall_field(w: &Workspace) -> &NumberField = w.number_fields()[13]
+
+@test
+the_palette_has_a_button_for_each_new_shape_that_adds_it()
+    for (name, p) in [("wedge", Primitive.Wedge), ("pyramid", Primitive.Pyramid), ("tube", Primitive.Tube),
+                      ("half_sphere", Primitive.HalfSphere), ("polygon_prism", Primitive.PolygonPrism)]
+        val w = new_workspace()
+        var c = recorder()
+
+        assert(shows(w, &c, s"palette.${name}"), s"${name} is on the palette")
+        tap(w, &c, s"palette.${name}")
+        assert_eq(w.doc.items().len, 1, s"${name} added")
+        assert(w.doc.selected == Some(w.doc.items()[0].id), "and selected")
+        assert_eq(w.doc.find(w.doc.items()[0].id).unwrap().operation match
+                      Shape(q, _, _, _) -> q
+                      Group -> Primitive.Box,
+                  p, name)
+
+@test
+the_sides_and_wall_fields_show_only_for_their_own_shape()
+    val w = new_workspace()
+    var c = recorder()
+
+    for p in PRIMITIVES
+        w.doc.select(Some(w.doc.add_shape(p)))
+        assert_eq(shows(w, &c, "panel.sides"), p == Primitive.PolygonPrism, s"sides, ${primitive_name(p)}")
+        assert_eq(shows(w, &c, "panel.wall"), p == Primitive.Tube, s"wall, ${primitive_name(p)}")
+        assert_eq(shows(w, &c, "panel.segments"), p != Primitive.Box && p != Primitive.Wedge && p != Primitive.Pyramid
+                  && p != Primitive.PolygonPrism, s"segments, ${primitive_name(p)}")
+
+@test
+typing_sides_sets_them_held_to_the_range_as_one_step()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.PolygonPrism)
+    var c = recorder()
+    val f = sides_field(w)
+
+    paint_field(f, &c)
+    assert_eq(f.text.read(), "6", "the default")
+
+    val steps = w.doc.undos.len()
+
+    type_into(f, &c, "8", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().sides, Some(8), "set")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+    type_into(f, &c, "100", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().sides, Some(64), "held to the most")
+    type_into(f, &c, "1", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().sides, Some(3), "held to the fewest")
+
+    for bad in ["", "abc", "5.5", "nan"]
+        type_into(f, &c, bad, Key.Enter)
+        assert_eq(w.doc.find(a).unwrap().sides, Some(3), s"kept, for '${bad}'")
+        assert(f.wrong, s"marked, for '${bad}'")
+
+    assert(w.doc.undo(), "undone")
+    assert_eq(w.doc.find(a).unwrap().sides, Some(64), "one edit back")
+
+@test
+typing_a_wall_sets_it_held_to_leave_a_bore_as_one_step()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Tube)
+    var c = recorder()
+    val f = wall_field(w)
+
+    paint_field(f, &c)
+    assert_eq(f.text.read(), "2", "the default")
+
+    val steps = w.doc.undos.len()
+
+    type_into(f, &c, "3.5", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().wall, Some(3.5), "set")
+    assert_eq(w.doc.undos.len(), steps + 1, "one step")
+    type_into(f, &c, "50", Key.Enter)
+    assert_eq(w.doc.find(a).unwrap().wall, Some(9.8), "held to leave a bore")
+    paint_field(f, &c)
+    assert_eq(f.text.read(), "9.8", "and the field says so")
+
+    for bad in ["", "abc", "nan"]
+        type_into(f, &c, bad, Key.Enter)
+        assert_eq(w.doc.find(a).unwrap().wall, Some(9.8), s"kept, for '${bad}'")
+        assert(f.wrong, s"marked, for '${bad}'")
+
+    assert(w.doc.undo(), "undone")
+    assert_eq(w.doc.find(a).unwrap().wall, Some(3.5), "one edit back")
+
+@test
+the_clearance_field_shows_for_the_new_holes_that_take_one_and_not_for_a_tube()
+    val w = new_workspace()
+    var c = recorder()
+
+    for p in [Primitive.Wedge, Primitive.Pyramid, Primitive.HalfSphere, Primitive.PolygonPrism, Primitive.Tube]
+        w.doc.select(Some(w.doc.add_shape(p)))
+        w.doc.set_hole(true).unwrap()
+        assert_eq(shows(w, &c, "panel.clearance"), p != Primitive.Tube, primitive_name(p))

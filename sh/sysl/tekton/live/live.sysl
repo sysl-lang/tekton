@@ -6,13 +6,12 @@ module sh.sysl.tekton.live
 
 import sh.sysl.sdl3.control.{Pass, Request, Respond, Routed, error_response, json}
 import sh.sysl.tekton.camera.{Camera, view_name}
-import sh.sysl.tekton.document.{Document, Node, Operation, primitive_name}
+import sh.sysl.tekton.document.{Document, Node, Operation, primitive_key}
 import sh.sysl.tekton.interface.Workspace
 import sh.sysl.tekton.measure.{gaps, selection_box}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.space.Vec3
 import sysl.encoding.json.quoted
-import sysl.text.to_lower
 
 // A number as JSON. JSON has no spelling for infinity or NaN, so they are `null`.
 private number(x: real) -> string = if x.is_finite() then s"${x}" else "null"
@@ -24,7 +23,7 @@ private vector(v: Vec3) -> string = s"[${number(v.x)},${number(v.y)},${number(v.
 // round shape how many sides it has; a hole's clearance and a box's or cylinder's finished edges where it has them.
 private node_json(doc: &Document, node: &Node) -> string
     val kind = node.operation match
-        Shape(p, _, _) -> to_lower(primitive_name(p))
+        Shape(p, _, _, _) -> primitive_key(p)
         Group -> "group"
     val q = node.transform.rotation
     val size = doc.size_of(node)
@@ -35,6 +34,14 @@ private node_json(doc: &Document, node: &Node) -> string
 
     node.segments match
         Some(n) -> out = out + s",\"segments\":${n}"
+        None -> ()
+
+    node.sides match
+        Some(n) -> out = out + s",\"sides\":${n}"
+        None -> ()
+
+    node.wall match
+        Some(w) -> out = out + s",\"wall\":${number(w)}"
         None -> ()
 
     if node.clearance != 0.0 then out = out + s",\"clearance\":${number(node.clearance)}"

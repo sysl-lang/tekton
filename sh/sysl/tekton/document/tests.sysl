@@ -88,7 +88,7 @@ each_new_shape_clears_every_shape_already_placed()
             for i in 0..<items.len - 1
                 assert(!fresh.overlaps_plan(doc.bounds_of(items[i])), s"shape ${id} clear of ${items[i].id}")
 
-    assert_eq(doc.items().len, 40usize, "all of them are in the document")
+    assert_eq(doc.items().len, 8 * PRIMITIVES.len, "all of them are in the document")
 
 @test
 placement_goes_past_a_shape_standing_in_the_way()

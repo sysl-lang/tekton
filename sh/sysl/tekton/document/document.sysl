@@ -7,6 +7,7 @@ import sh.sysl.tekton.space.{Aabb, Mat4, Vec3, vec3}
 import sysl.buf.{Buf, buf}
 import sysl.container.{Set, set}
 import sysl.math.{max, min}
+import sysl.text.{replace_all, to_lower}
 
 // A document is a tree of operations, not a mesh.
 //
@@ -64,9 +65,15 @@ enum Primitive
     Sphere
     Cone
     Torus
+    Wedge
+    Pyramid
+    Tube
+    HalfSphere
+    PolygonPrism
 
 // Every primitive, in the order a palette shows them.
-val PRIMITIVES = [Primitive.Box, Primitive.Cylinder, Primitive.Sphere, Primitive.Cone, Primitive.Torus]
+val PRIMITIVES = [Primitive.Box, Primitive.Cylinder, Primitive.Sphere, Primitive.Cone, Primitive.Torus,
+                Primitive.Wedge, Primitive.Pyramid, Primitive.Tube, Primitive.HalfSphere, Primitive.PolygonPrism]
 
 primitive_name(p: Primitive) -> string =
     p match
@@ -75,12 +82,27 @@ primitive_name(p: Primitive) -> string =
         Sphere -> "Sphere"
         Cone -> "Cone"
         Torus -> "Torus"
+        Wedge -> "Wedge"
+        Pyramid -> "Pyramid"
+        Tube -> "Tube"
+        HalfSphere -> "Half sphere"
+        PolygonPrism -> "Polygon prism"
 
-// Whether a primitive is faceted around an axis, so that how many sides it has is its own to choose.
+// A primitive's name as a file, a driver and a palette button's name say it: lower case, one word.
+primitive_key(p: Primitive) -> string = replace_all(to_lower(primitive_name(p)), " ", "_")
+
+// Whether a primitive is faceted around an axis, so that how many sides it has is its own to choose. A polygon
+// prism's sides are a choice of their own, and a box, wedge and pyramid have none.
 is_round(p: Primitive) -> bool =
     p match
         Box -> false
+        Wedge -> false
+        Pyramid -> false
+        PolygonPrism -> false
         _ -> true
+
+// How many sides a primitive has when it is added: a round shape's smooth 64, a polygon prism's six.
+default_segments(p: Primitive) -> int = if p == Primitive.PolygonPrism then DEFAULT_SIDES else ROUND_SEGMENTS
 
 // The axes a node is reflected along, as a model's text says them: nothing where it is not reflected at all.
 private mirror_text(m: Mirror) -> string =
@@ -100,7 +122,7 @@ private edges_text(e: Edges) -> string =
 
 // What a node computes. A group's solid is its solid children joined, with its hole children cut out.
 enum Operation
-    Shape(primitive: Primitive, segments: int, edges: Edges)
+    Shape(primitive: Primitive, segments: int, edges: Edges, wall: real)
     Group
 
 // Where a node's solid goes in its parent's space: scaled, then rotated, then moved.
@@ -300,14 +322,26 @@ struct Node
     // box with rounded edges is round there, so it has them too.
     segments -> Option[int] =
         self.operation match
-            Shape(p, n, e) -> if is_round(p) || (e.radius > 0.0 && !e.chamfer) then Some(n) else None
+            Shape(p, n, e, _) -> if is_round(p) || (e.radius > 0.0 && !e.chamfer) then Some(n) else None
+            Group -> None
+
+    // How many sides a polygon prism has, or nothing for any other shape or a group.
+    sides -> Option[int] =
+        self.operation match
+            Shape(p, n, _, _) -> if p == Primitive.PolygonPrism then Some(n) else None
+            Group -> None
+
+    // How thick a tube's wall is, in millimetres at the palette's size, or nothing for any other shape or a group.
+    wall -> Option[real] =
+        self.operation match
+            Shape(p, _, _, w) -> if p == Primitive.Tube then Some(w) else None
             Group -> None
 
     // How the edges of a box or cylinder are finished, or nothing for a shape that has no straight edges to
     // finish, or a group.
     edges -> Option[Edges] =
         self.operation match
-            Shape(p, _, e) -> if takes_edges(p) then Some(e) else None
+            Shape(p, _, e, _) -> if takes_edges(p) then Some(e) else None
             Group -> None
 
     // Whether this node's own solid is built at its real size rather than at the palette's 20 mm, because its
@@ -315,7 +349,7 @@ struct Node
     // derives, so a new scale needs a new solid.
     sized_by_scale -> bool =
         self.operation match
-            Shape(_, _, e) -> e.radius > 0.0
+            Shape(_, _, e, _) -> e.radius > 0.0
             Group -> false
 
     // What a copy of this node placed by `t` may share of what it derived: all of it, unless its solid is built
@@ -328,12 +362,13 @@ struct Node
             Group -> true
             _ -> false
 
-    // Whether a clearance can grow this node: a box, cylinder, sphere or cone. A torus cannot, because stretching
-    // it widens its inner opening where a clearance must narrow it, and a group cannot, because stretching its box
-    // moves its parts apart instead of growing each of them.
+    // Whether a clearance can grow this node: every shape but a torus, a tube and a group. A torus and a tube
+    // cannot, because stretching one widens its inner opening where a clearance must narrow it, and a group
+    // cannot, because stretching its box moves its parts apart instead of growing each of them. A wedge and a
+    // pyramid grow by the clearance on each side of their box, their slopes by a little less.
     takes_clearance -> bool =
         self.operation match
-            Shape(p, _, _) -> p != Primitive.Torus
+            Shape(p, _, _, _) -> p != Primitive.Torus && p != Primitive.Tube
             Group -> false
 
     // This node somewhere else: the same triangles, unless they were built at a size `t` changes.
@@ -362,13 +397,19 @@ struct Node
     // This shape with another number of sides, so nothing derived from the old one holds.
     private with_segments(&self, segments: int) -> &Node =
         self.operation match
-            Shape(p, _, e) -> self.with_operation(Operation.Shape(p, segments, e))
+            Shape(p, _, e, w) -> self.with_operation(Operation.Shape(p, segments, e, w))
+            Group -> self
+
+    // This tube with another wall, so nothing derived from the old one holds.
+    private with_wall(&self, wall: real) -> &Node =
+        self.operation match
+            Shape(p, n, e, _) -> self.with_operation(Operation.Shape(p, n, e, wall))
             Group -> self
 
     // This shape with its edges finished otherwise, so nothing derived from the old ones holds.
     private with_edges(&self, edges: Edges) -> &Node =
         self.operation match
-            Shape(p, n, _) -> self.with_operation(Operation.Shape(p, n, edges))
+            Shape(p, n, _, w) -> self.with_operation(Operation.Shape(p, n, edges, w))
             Group -> self
 
     private with_operation(&self, operation: Operation) -> &Node =
@@ -405,7 +446,7 @@ struct Node
         val t = self.transform
         val q = t.rotation
         val name = self.operation match
-            Shape(p, n, e) -> s"${primitive_name(p)}/${n}${edges_text(e)}"
+            Shape(p, n, e, w) -> s"${primitive_name(p)}/${n}${edges_text(e)}${if p == Primitive.Tube then s"/${w}" else ""}"
             Group -> "Group"
         var parts = ""
 
@@ -671,7 +712,7 @@ struct Document
 
     // The command behind the palette: a new shape on the ground, clear of what is already there, selected.
     add_shape(&self, p: Primitive) -> int
-        val at = self.next_place(bounds_of_solid(primitive_solid(p)))
+        val at = self.next_place(bounds_of_solid(primitive_solid(p, default_segments(p), TUBE_WALL)))
         val id = self.next_id
         var items: Buf[&Node] = buf()
 
@@ -679,7 +720,7 @@ struct Document
 
         for item in self.items() do items.push(item)
 
-        items.push(Node(id, Operation.Shape(p, ROUND_SEGMENTS, SHARP_EDGES), moved_to(at), NO_MIRROR, id - 1, false, 0.0, buf(),
+        items.push(Node(id, Operation.Shape(p, default_segments(p), SHARP_EDGES, TUBE_WALL), moved_to(at), NO_MIRROR, id - 1, false, 0.0, buf(),
                         Derived(None, None), None, None))
         self.put_items(items)
         self.next_id += 1
@@ -716,6 +757,37 @@ struct Document
         self.put_node(node.with_segments(wanted))
         Ok(())
     end set_segments
+
+    // The command behind the sides field: how many sides a polygon prism has, held to what the shape may have. Any
+    // other shape is refused, and a number that changes nothing is not a step.
+    set_sides(&self, id: int, sides: int) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+        val now = node.sides.ok_or("Only a polygon prism has sides")?
+        val wanted = clamped_sides(sides)
+
+        if wanted == now then return Ok(())
+
+        self.record()
+        self.put_node(node.with_segments(wanted))
+        Ok(())
+    end set_sides
+
+    // The command behind the wall field: how thick a tube's wall is, held to what leaves it a bore. Any other
+    // shape is refused, and a number that changes nothing is not a step.
+    set_wall(&self, id: int, wall: real) -> Result[unit, string]
+        val node = self.find(id).ok_or("Nothing is selected")?
+        val now = node.wall.ok_or("Only a tube has a wall")?
+
+        if !wall.is_finite() then return Err("The wall must be a number")
+
+        val wanted = clamped_wall(wall)
+
+        if wanted == now then return Ok(())
+
+        self.record()
+        self.put_node(node.with_wall(wanted))
+        Ok(())
+    end set_wall
 
     // The command behind the clearance field: how far a hole grows on every side before it cuts, held to what a
     // printer needs. A shape a clearance cannot grow is refused, and so is a number that is no distance; one that
@@ -1409,8 +1481,8 @@ struct Document
         self.builds += 1
 
         val made = node.operation match
-            Shape(p, n, e) ->
-                if e.radius > 0.0 then edged_solid(p, n, e, self.cut_transform(node).scale) else primitive_solid(p, n)
+            Shape(p, n, e, w) ->
+                if e.radius > 0.0 then edged_solid(p, n, e, self.cut_transform(node).scale) else primitive_solid(p, n, w)
             Group ->
                 var solids: Buf[&Manifold] = buf()
                 var holes: Buf[&Manifold] = buf()
@@ -1574,8 +1646,9 @@ end restored_document
 
 // A shape as a file says it.
 restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool, segments: int = ROUND_SEGMENTS,
-               mirror: Mirror = NO_MIRROR, clearance: real = 0.0, edges: Edges = SHARP_EDGES) -> &Node =
-    Node(id, Operation.Shape(p, segments, edges), t, mirror, tint, hole, clearance, buf(), Derived(None, None), None, None)
+               mirror: Mirror = NO_MIRROR, clearance: real = 0.0, edges: Edges = SHARP_EDGES,
+               wall: real = TUBE_WALL) -> &Node =
+    Node(id, Operation.Shape(p, segments, edges, wall), t, mirror, tint, hole, clearance, buf(), Derived(None, None), None, None)
 
 // A group as a file says it.
 restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node], mirror: Mirror = NO_MIRROR) -> &Node =
@@ -1657,7 +1730,7 @@ private settled(v: real, per: real) -> real = (v * per).round() / per
 
 // The solid of a primitive as a palette makes it: 20 mm across, centred on the z axis, standing on the
 // ground.
-primitive_solid(p: Primitive, segments: int = ROUND_SEGMENTS) -> &Manifold =
+primitive_solid(p: Primitive, segments: int = ROUND_SEGMENTS, wall: real = TUBE_WALL) -> &Manifold =
     p match
         Box -> cube(20.0, 20.0, 20.0, center = true).translate(0.0, 0.0, 10.0)
         Cylinder -> cylinder(20.0, 10.0, 10.0, segments)
@@ -1665,6 +1738,13 @@ primitive_solid(p: Primitive, segments: int = ROUND_SEGMENTS) -> &Manifold =
         Cone -> cylinder(20.0, 10.0, 0.0, segments)
         Torus -> circle(TORUS_TUBE, torus_tube_segments(segments)).translate(TORUS_RING, 0.0).revolve(segments)
                  .translate(0.0, 0.0, TORUS_TUBE)
+        Wedge -> hull_points([KernelVec3(-10.0, -10.0, 0.0), KernelVec3(10.0, -10.0, 0.0), KernelVec3(-10.0, 10.0, 0.0),
+                              KernelVec3(10.0, 10.0, 0.0), KernelVec3(10.0, -10.0, 20.0), KernelVec3(10.0, 10.0, 20.0)])
+        Pyramid -> hull_points([KernelVec3(-10.0, -10.0, 0.0), KernelVec3(10.0, -10.0, 0.0), KernelVec3(-10.0, 10.0, 0.0),
+                                KernelVec3(10.0, 10.0, 0.0), KernelVec3(0.0, 0.0, 20.0)])
+        Tube -> square(clamped_wall(wall), 20.0).translate(10.0 - clamped_wall(wall), 0.0).revolve(segments)
+        HalfSphere -> sphere(10.0, segments).trim_by_plane(0.0, 0.0, 1.0, 0.0)
+        PolygonPrism -> cylinder(20.0, 10.0, 10.0, segments)
 
 // The side of the palette's shapes, and the box every box and cylinder fills before its transform.
 const PALETTE_SIDE: real = 20.0
@@ -1764,6 +1844,24 @@ clamped_clearance(c: real) -> real = MAX_CLEARANCE.min(c).max(0.0)
 
 // How many sides a torus's tube has: three eighths of its ring's, as many as a ring of 64 always gave it.
 torus_tube_segments(segments: int) -> int = max(MIN_SEGMENTS, segments * 3 / 8)
+
+// How many sides a polygon prism may have, and has when it is added.
+const MIN_SIDES: int = 3
+const MAX_SIDES: int = 64
+const DEFAULT_SIDES: int = 6
+
+// A number of sides held to the range a polygon prism may have.
+clamped_sides(n: int) -> int = max(MIN_SIDES, min(MAX_SIDES, n))
+
+// How thick a tube's wall is when it is added, and the thinnest it may be, in millimetres at the palette's size.
+// The widest is what leaves a bore of at least `MIN_BORE` across its radius, so there is always a hole.
+const TUBE_WALL: real = 2.0
+const MIN_WALL: real = 0.2
+const MIN_BORE: real = 0.2
+const MAX_WALL: real = 10.0 - MIN_BORE
+
+// A wall held to what a tube may have.
+clamped_wall(w: real) -> real = w.min(MAX_WALL).max(MIN_WALL)
 
 // The ring and tube radii of the palette's torus, in millimetres.
 const TORUS_RING: real = 7.0
