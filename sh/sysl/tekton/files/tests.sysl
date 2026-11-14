@@ -41,6 +41,9 @@ private assert_same_node(a: &Node, b: &Node)
     same_number(a.clearance, b.clearance, "clearance")
     assert_eq(a.is_group, b.is_group, "kind")
     assert(a.mirror == b.mirror, "mirror")
+    assert_eq(a.intersects, b.intersects, "mode")
+    same_number(a.shell.wall, b.shell.wall, "wall")
+    assert_eq(a.shell.open, b.shell.open, "open top")
     assert_same_transform(a.transform, b.transform)
 
     a.operation match
@@ -52,8 +55,8 @@ private assert_same_node(a: &Node, b: &Node)
                     assert_eq(n, m, "the number the kernel is given")
                     same_number(e.radius, f.radius, "edge radius")
                     assert_eq(e.chamfer, f.chamfer, "edge style")
-                Group -> assert(false, "a shape came back a group")
-        Group -> ()
+                Group(_) -> assert(false, "a shape came back a group")
+        Group(_) -> ()
 
     assert_eq(a.children.len(), b.children.len(), "parts")
 
@@ -203,7 +206,7 @@ end a_loaded_documents_meshes_go_on_from_the_revision_asked_for
 // Each way a first line can be wrong, each on line 1.
 @test
 a_wrong_first_line_is_refused_on_line_1()
-    val not_ours = "line 1: not a Tekton document: the first line must be `tekton = 2`"
+    val not_ours = "line 1: not a Tekton document: the first line must be `tekton = 3`"
 
     assert_eq(refusal(""), "line 1: the file is empty", "empty")
     assert_eq(refusal("hello there"), not_ours, "prose")
@@ -213,10 +216,10 @@ a_wrong_first_line_is_refused_on_line_1()
     assert_eq(refusal("tekton = -1\n"), not_ours, "negative")
     assert_eq(refusal("tekton = one\n"), not_ours, "a word")
     assert_eq(refusal("tekton = 1 next = 2\n"), not_ours, "more on the line")
-    assert_eq(refusal("tekton = 3\nnext = \"anything {[\n"),
-              "line 1: this file is format 3, from a newer Tekton; this one reads up to format 2", "too new")
+    assert_eq(refusal("tekton = 4\nnext = \"anything {[\n"),
+              "line 1: this file is format 4, from a newer Tekton; this one reads up to format 3", "too new")
     assert_eq(refusal("tekton = 99999999999999999999999\n"),
-              "line 1: this file is format 99999999999999999999999, from a newer Tekton; this one reads up to format 2",
+              "line 1: this file is format 99999999999999999999999, from a newer Tekton; this one reads up to format 3",
               "too new to count")
 end a_wrong_first_line_is_refused_on_line_1
 

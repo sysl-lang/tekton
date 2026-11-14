@@ -21,11 +21,12 @@ private vector(v: Vec3) -> string = s"[${number(v.x)},${number(v.y)},${number(v.
 
 // One node and everything under it: its id, what it is, whether it cuts or joins, where it is in its
 // parent's space, how big it is along its own axes in millimetres, how it is turned as a quaternion, and for a
-// round shape how many sides it has; a hole's clearance and a box's or cylinder's finished edges where it has them.
+// round shape how many sides it has; a hole's clearance and a box's or cylinder's finished edges where it has them; an
+// intersection's mode, and a hollow node's wall and open top.
 private node_json(doc: &Document, node: &Node) -> string
     val kind = node.operation match
         Shape(p, _, _) -> to_lower(primitive_name(p))
-        Group -> "group"
+        Group(_) -> "group"
     val q = node.transform.rotation
     val size = doc.size_of(node)
     var out = s"{\"id\":${node.id},\"kind\":${quoted(kind)},\"hole\":${node.hole},"
@@ -44,6 +45,13 @@ private node_json(doc: &Document, node: &Node) -> string
             if e.radius != 0.0 then out = out + s",\"edge_radius\":${number(e.radius)}"
             if e.chamfer then out = out + ",\"edge_style\":\"chamfer\""
         None -> ()
+
+    if node.intersects then out = out + ",\"mode\":\"intersect\""
+
+    if node.is_hollow
+        out = out + s",\"wall\":${number(node.shell.wall)}"
+
+        if node.shell.open then out = out + ",\"open_top\":true"
 
     if node.is_group
         out = out + ",\"children\":["

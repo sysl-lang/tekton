@@ -1,0 +1,188 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
+import sh.sysl.tekton.document.{Primitive, Shell, moved_to}
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+
+// Intersect in the Edit menu and on Cmd+Shift+I, Union and Intersect on a group's panel, Split in the Arrange
+// menu, and the hollow panel: what it shows, what OK and Cancel do, and the wall and top on a shell's panel.
+
+private val SCREEN: Rect = Rect(0, 0, 1280, 800)
+
+private tap(w: &Workspace, c: *Recorder, name: string)
+    val v = w.tree()
+
+    c.taps.reset()
+    render(v, c, SCREEN)
+
+    val (x, y) = snapshot(v, c, SCREEN).click_point(name).unwrap()
+
+    c.point(x, y, true)
+    render(w.tree(), c, SCREEN)
+    c.release(x, y)
+    render(w.tree(), c, SCREEN)
+end tap
+
+private shows(w: &Workspace, c: *Recorder, name: string) -> bool
+    val v = w.tree()
+
+    render(v, c, SCREEN)
+    snapshot(v, c, SCREEN).find(name).is_ok()
+end shows
+
+private row_live(w: &Workspace, c: *Recorder, title: string, label: string) -> bool
+    assert(w.show_menu(title), title)
+
+    val v = w.tree()
+
+    render(v, c, SCREEN)
+
+    val row = snapshot(v, c, SCREEN).find(s"menu.${title}.${label}").unwrap()
+
+    w.open_menu.set(NO_MENU)
+    row.marks.index_of("disabled").is_none()
+end row_live
+
+// Two boxes overlapping by half along x, both selected; or `apart`, sharing nothing.
+private two_boxes(apart: bool = false) -> &Workspace
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+
+    w.doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    w.doc.set_transform(b, moved_to(Vec3(if apart then 40.0 else 10.0, 0.0, 0.0)))
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+    w
+end two_boxes
+
+private chosen(w: &Workspace) -> &sh.sysl.tekton.document.Node = w.doc.find(w.doc.selection[0]).unwrap()
+
+@test
+edit_intersect_groups_the_selection_as_an_intersection()
+    var c = recorder()
+    val w = two_boxes()
+
+    assert(row_live(w, &c, "Edit", "Intersect"), "live with two")
+    tap(w, &c, "menu.Edit")
+    tap(w, &c, "menu.Edit.Intersect")
+    assert_eq(w.doc.items().len, 1, "one thing")
+    assert(chosen(w).intersects, "an intersection")
+    assert(!row_live(w, &c, "Edit", "Intersect"), "dimmed with one")
+end edit_intersect_groups_the_selection_as_an_intersection
+
+@test
+command_shift_i_intersects_and_an_empty_one_says_why()
+    val w = two_boxes(apart = true)
+
+    assert(!w.shortcut(u32(u8('i')), KMOD_GUI, false), "not without shift")
+    assert(w.shortcut(u32(u8('i')), KMOD_GUI | KMOD_SHIFT, false), "taken")
+    assert_eq(w.doc.items().len, 2, "refused")
+    assert(w.problem.read().contains("share nothing"), w.problem.read())
+
+    val v = two_boxes()
+
+    assert(v.shortcut(u32(u8('i')), KMOD_GUI | KMOD_SHIFT, false), "taken")
+    assert(chosen(v).intersects, "intersected")
+end command_shift_i_intersects_and_an_empty_one_says_why
+
+@test
+a_groups_panel_switches_between_union_and_intersect()
+    var c = recorder()
+    val w = two_boxes()
+
+    assert(!shows(w, &c, "panel.union"), "not for two things")
+    w.group()
+    assert(shows(w, &c, "panel.union") && shows(w, &c, "panel.intersect"), "a group's choice")
+    tap(w, &c, "panel.intersect")
+    assert(chosen(w).intersects, "intersect")
+    tap(w, &c, "panel.union")
+    assert(!chosen(w).intersects, "union again")
+
+    w.doc.add_shape(Primitive.Box)
+    assert(!shows(w, &c, "panel.union"), "not for a shape")
+end a_groups_panel_switches_between_union_and_intersect
+
+@test
+arrange_split_halves_the_selection_along_each_axis()
+    var c = recorder()
+
+    for axis in ["X", "Y", "Z"]
+        val w = new_workspace()
+
+        w.doc.add_shape(Primitive.Box)
+        assert(row_live(w, &c, "Arrange", s"Split ${axis}"), axis)
+        tap(w, &c, "menu.Arrange")
+        tap(w, &c, s"menu.Arrange.Split ${axis}")
+        assert_eq(w.doc.items().len, 2, s"${axis}: two halves")
+        assert_eq(w.doc.selection.len(), 2, "both selected")
+        w.doc.select(None)
+        assert(!row_live(w, &c, "Arrange", s"Split ${axis}"), "dimmed with nothing selected")
+end arrange_split_halves_the_selection_along_each_axis
+
+@test
+the_hollow_panel_makes_each_solid_a_shell_with_the_wall_and_top_asked_for()
+    var c = recorder()
+    val w = new_workspace()
+
+    w.doc.add_shape(Primitive.Box)
+    assert(row_live(w, &c, "Arrange", "Hollow…"), "live with a solid")
+    tap(w, &c, "menu.Arrange")
+    tap(w, &c, "menu.Arrange.Hollow…")
+    assert(w.hollow_open.read(), "up")
+
+    for name in ["hollow.wall", "hollow.top.0", "hollow.top.1", "hollow.ok", "hollow.cancel"]
+        assert(shows(w, &c, name), name)
+
+    w.hollow_wall.set("thick")
+    tap(w, &c, "hollow.ok")
+    assert(w.hollow_open.read(), "still up for a word")
+    assert(w.problem.read() != "", "and it says why")
+    w.hollow_wall.set("3")
+    tap(w, &c, "hollow.top.1")
+    tap(w, &c, "hollow.ok")
+    assert(!w.hollow_open.read(), "down")
+    assert(chosen(w).shell == Shell(3.0, true), "an open shell of 3 mm")
+    assert(shows(w, &c, "panel.wall") && shows(w, &c, "panel.open_top"), "the shell's own fields")
+    tap(w, &c, "panel.closed")
+    assert(!chosen(w).shell.open, "closed from the panel")
+end the_hollow_panel_makes_each_solid_a_shell_with_the_wall_and_top_asked_for
+
+@test
+the_hollow_panel_answers_escape_and_return_and_holds_everything_else()
+    var c = recorder()
+    val w = new_workspace()
+
+    w.doc.add_shape(Primitive.Box)
+
+    val before = w.doc.describe()
+
+    w.open_hollow()
+    assert(w.shortcut(u32(u8('d')), KMOD_GUI, false), "a shortcut is swallowed")
+    assert_eq(w.doc.items().len, 1, "and does nothing")
+    c.key(press(Key.Escape))
+    render(w.tree(), &c, SCREEN)
+    assert(!w.hollow_open.read(), "escape took it down")
+    assert_eq(w.doc.describe(), before, "untouched")
+
+    w.open_hollow()
+    c.key(press(Key.Enter))
+    render(w.tree(), &c, SCREEN)
+    assert(!w.hollow_open.read(), "return took it down")
+    assert(chosen(w).shell == Shell(2.0, false), "a closed 2 mm shell")
+end the_hollow_panel_answers_escape_and_return_and_holds_everything_else
+
+@test
+hollow_is_dimmed_and_refused_for_holes_alone()
+    var c = recorder()
+    val w = new_workspace()
+
+    w.doc.add_shape(Primitive.Box)
+    w.set_hole(true)
+    assert(!row_live(w, &c, "Arrange", "Hollow…"), "dimmed")
+    w.open_hollow()
+    assert(!w.hollow_open.read(), "stays down")
+    assert(w.problem.read() != "", "and says why")
+end hollow_is_dimmed_and_refused_for_holes_alone
