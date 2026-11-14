@@ -1,6 +1,6 @@
 module sh.sysl.tekton.camera
 
-import sh.sysl.quaternion.Quaternion
+import sh.sysl.quaternion.{Quaternion, slerp}
 import sh.sysl.tekton.space.{Mat4, Ray, Vec3, vec3}
 import sh.sysl.tekton.document.Document
 import sysl.math.{max, min}
@@ -11,6 +11,16 @@ import sysl.math.{max, min}
 // the tilt stays above the ground and short of straight down, so the view can neither flip over nor go
 // under the model. The quaternion is what turns them into directions, with no gimbal to fall into at the
 // top of the range.
+//
+// **A named view may stand outside the clamp a drag keeps to**: Top looks straight down and the side views
+// look level along the ground. A drag from there turns back into the range and never further out.
+//
+// **Going to a view turns there over a moment rather than jumping.** The turn and tilt are set to where the
+// view ends at once, so everything that asks where the camera is going has its answer; what is drawn, picked
+// and measured follows the orientation on the way, which is the short arc between the two.
+//
+// **Orthographic keeps the same scale at the target**: its view is as tall as the perspective view is at the
+// target's depth, so switching changes nothing there, and the distance is what zooming changes in either.
 
 const MIN_TILT: real = 0.07
 const MAX_TILT: real = 1.55
@@ -36,16 +46,109 @@ const FRAME_MARGIN: real = 1.05
 // The shape of the view a new shape's visibility is judged in. A placement has no viewport to ask.
 const ASSUMED_ASPECT: real = 1.5
 
+// How far behind the target an orthographic eye stands. Nothing is nearer or farther for it, so this only has
+// to put everything there is between the near and far planes.
+const ORTHO_BACK: real = 3000.0
+
+// How long going to a view takes, in seconds.
+const VIEW_SECONDS: real = 0.25
+
+// How near a turn and tilt must be to a named view's to be called that view.
+const VIEW_TOLERANCE: real = 1.0e-9
+
+// The views with names: where a new document starts, and straight at each side or down from above.
+enum NamedView
+    Home
+    Top
+    Front
+    Right
+    Back
+    Left
+end NamedView
+
+val NAMED_VIEWS: [6]NamedView = [NamedView.Home, NamedView.Top, NamedView.Front, NamedView.Right, NamedView.Back,
+                                 NamedView.Left]
+
+// What a view is called in a report.
+view_name(v: NamedView) -> string =
+    v match
+        Home -> "home"
+        Top -> "top"
+        Front -> "front"
+        Right -> "right"
+        Back -> "back"
+        Left -> "left"
+
+// The turn a view has. Turning by a positive angle swings the eye from the front round to the right.
+view_turn(v: NamedView) -> real =
+    v match
+        Home -> HOME_TURN
+        Top | Front -> 0.0
+        Right -> real.pi() * 0.5
+        Back -> real.pi()
+        Left -> -real.pi() * 0.5
+
+// The tilt a view has: down from level.
+view_tilt(v: NamedView) -> real =
+    v match
+        Home -> HOME_TILT
+        Top -> real.pi() * 0.5
+        _ -> 0.0
+
+const HOME_TURN: real = 0.3
+const HOME_TILT: real = 0.5
+
+// An angle brought within half a turn of nothing either way.
+private wrapped(a: real) -> real = a - (a / (2.0 * real.pi())).round() * 2.0 * real.pi()
+
+// How far through going to a view looks, from 0 to 1: slow at both ends.
+private eased(t: real) -> real = t * t * (3.0 - 2.0 * t)
+
 struct Camera
     target: Vec3
     turn: real
     tilt: real
     distance: real
     fov: real
+    orthographic: bool
 
-    private orientation(&self) -> Quaternion[real] =
-        Quaternion.from_axis_angle([0.0, 0.0, 1.0], self.turn) *
-        Quaternion.from_axis_angle([1.0, 0.0, 0.0], -self.tilt)
+    // Where going to a view set out from, and how far along it is, from 0 to 1 when it has arrived.
+    from: Quaternion[real]
+    progress: real
+
+    // Which way the view looks now, part way to a view or settled.
+    private orientation(&self) -> Quaternion[real]
+        val settled = Quaternion.from_axis_angle([0.0, 0.0, 1.0], self.turn) *
+                      Quaternion.from_axis_angle([1.0, 0.0, 0.0], -self.tilt)
+
+        if self.progress >= 1.0 then settled else slerp(self.from, settled, eased(self.progress))
+
+    // Set out for a view, keeping the target and the distance. The turn goes the short way round.
+    go_to(&self, v: NamedView)
+        self.from = self.orientation()
+        self.progress = 0.0
+        self.turn = self.turn + wrapped(view_turn(v) - self.turn)
+        self.tilt = view_tilt(v)
+
+    // Let this many seconds of going to a view pass.
+    advance(&self, seconds: real) =
+        if self.progress < 1.0 then self.progress = (self.progress + seconds / VIEW_SECONDS).clamp(0.0, 1.0)
+
+    // Whether it is still on the way to a view.
+    moving(&self) -> bool = self.progress < 1.0
+
+    // The named view it is at or going to, or nothing once it has been turned by hand.
+    named_view(&self) -> Option[NamedView]
+        for v in NAMED_VIEWS
+            val turned = wrapped(self.turn - view_turn(v)).abs()
+
+            if turned <= VIEW_TOLERANCE && (self.tilt - view_tilt(v)).abs() <= VIEW_TOLERANCE then return Some(v)
+
+        None
+    end named_view
+
+    // Switch between perspective and orthographic. What is at the target stays the size it was.
+    toggle_orthographic(&self) = self.orthographic = !self.orthographic
 
     forward(&self) -> Vec3 = vec3(self.orientation().rotate([0.0, 1.0, 0.0]))
 
@@ -53,12 +156,14 @@ struct Camera
 
     up(&self) -> Vec3 = vec3(self.orientation().rotate([0.0, 0.0, 1.0]))
 
-    eye(&self) -> Vec3 = self.target - self.forward() * self.distance
+    eye(&self) -> Vec3 = self.target - self.forward() * (if self.orthographic then ORTHO_BACK else self.distance)
 
-    // Turn the view by a drag of this many points. The model follows the pointer.
+    // Turn the view by a drag of this many points. The model follows the pointer. A view on its way arrives
+    // first, and a tilt outside the range a drag keeps to only comes back toward it.
     orbit(&self, dx: real, dy: real)
+        self.progress = 1.0
         self.turn -= dx * ORBIT_RATE
-        self.tilt = (self.tilt + dy * ORBIT_RATE).clamp(MIN_TILT, MAX_TILT)
+        self.tilt = (self.tilt + dy * ORBIT_RATE).clamp(MIN_TILT.min(self.tilt), MAX_TILT.max(self.tilt))
 
     // Slide the view by a drag of this many points, across a viewport this many points tall, so what is at
     // the target's depth stays under the pointer.
@@ -110,17 +215,22 @@ struct Camera
     private half_height(&self) -> real = self.distance * (self.fov * 0.5).tan()
 
     // How many world units one point of a viewport this many points tall covers, at the depth of `p`.
-    world_per_point(&self, p: Vec3, height: real) -> real =
-        (p - self.eye()).dot(self.forward()).max(NEAR_PLANE) * (self.fov * 0.5).tan() * 2.0 / height
+    world_per_point(&self, p: Vec3, height: real) -> real
+        val depth = if self.orthographic then self.distance else (p - self.eye()).dot(self.forward()).max(NEAR_PLANE)
 
-    // The ray through a point of a viewport of this size, with `y` running down it as a pointer's does.
+        depth * (self.fov * 0.5).tan() * 2.0 / height
+
+    // The ray through a point of a viewport of this size, with `y` running down it as a pointer's does. An
+    // orthographic ray runs straight ahead from a point beside the eye.
     ray(&self, x: real, y: real, width: real, height: real) -> Ray
         val tangent = (self.fov * 0.5).tan()
         val across = (x / width * 2.0 - 1.0) * tangent * width / height
         val down = (y / height * 2.0 - 1.0) * tangent
-        val direction = self.forward() + self.right() * across - self.up() * down
+        val aside = self.right() * across - self.up() * down
 
-        Ray(self.eye(), direction.unit())
+        if self.orthographic then return Ray(self.eye() + aside * self.distance, self.forward())
+
+        Ray(self.eye(), (self.forward() + aside).unit())
     end ray
 
     // Where a point lands in a viewport of this size, and whether it is in front of the camera at all.
@@ -143,6 +253,17 @@ struct Camera
                          r.z, u.z, f.z, 0.0,
                          -r.dot(e), -u.dot(e), -f.dot(e), 1.0])
         val focal = 1.0 / (self.fov * 0.5).tan()
+
+        if self.orthographic
+            val scale = focal / self.distance
+            val flat = 1.0 / (FAR_PLANE - NEAR_PLANE)
+            val projection = Mat4([scale / aspect, 0.0, 0.0, 0.0,
+                                   0.0, scale, 0.0, 0.0,
+                                   0.0, 0.0, flat, 0.0,
+                                   0.0, 0.0, -NEAR_PLANE * flat, 1.0])
+
+            return projection * view
+
         val depth = FAR_PLANE / (FAR_PLANE - NEAR_PLANE)
         val projection = Mat4([focal / aspect, 0.0, 0.0, 0.0,
                                0.0, focal, 0.0, 0.0,
@@ -154,4 +275,4 @@ struct Camera
 end Camera
 
 // The view a new document opens on: from the front and to the right, looking down a little.
-new_camera() -> &Camera = Camera(Vec3(0.0, 0.0, 8.0), 0.3, 0.5, 150.0, 0.7)
+new_camera() -> &Camera = Camera(Vec3(0.0, 0.0, 8.0), HOME_TURN, HOME_TILT, 150.0, 0.7, false, Quaternion.identity(), 1.0)

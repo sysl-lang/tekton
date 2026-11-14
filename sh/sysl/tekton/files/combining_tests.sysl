@@ -1,0 +1,110 @@
+module sh.sysl.tekton.files
+@tests
+
+import sh.sysl.tekton.document.{Document, Primitive, Shell, moved_to, new_document}
+import sh.sysl.tekton.space.Vec3
+import sysl.text.replace_all
+
+// Intersection groups and hollow shells in a file, and the format they need.
+
+private refused(text: string) -> string
+    document_from_text(text) match
+        Ok(_) ->
+            assert(false, s"this should have been refused:\n${text}")
+            ""
+        Err(why) -> why
+end refused
+
+// Two overlapping boxes intersected, a hollow open box, and a hollow group, with the selection on the last.
+private combined() -> &Document
+    val doc = new_document()
+    val a = doc.add_shape(Primitive.Box)
+    val b = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(a, moved_to(Vec3(0.0, 0.0, 0.0)))
+    doc.set_transform(b, moved_to(Vec3(10.0, 0.0, 0.0)))
+    doc.select(Some(a))
+    doc.toggle_selected(b)
+    doc.group_selected(intersect = true).unwrap()
+
+    val c = doc.add_shape(Primitive.Cylinder)
+
+    doc.hollow_selected(1.5, true).unwrap()
+
+    val d = doc.add_shape(Primitive.Box)
+    val e = doc.add_shape(Primitive.Box)
+
+    doc.select(Some(d))
+    doc.toggle_selected(e)
+    doc.group_selected().unwrap()
+    doc.hollow_selected(2.0, false).unwrap()
+    doc
+end combined
+
+@test
+intersections_and_shells_save_and_open_as_they_were()
+    val doc = combined()
+    val text = document_text(doc)
+
+    assert(text.starts_with("tekton = 3\n"), "format 3")
+    assert(text.contains("mode = intersect\n"), "the mode")
+    assert(text.contains("wall = 1.5\n") && text.contains("open_top = true\n"), "the open shell")
+    assert(text.contains("wall = 2.0\n"), "the group's shell")
+
+    val opened = document_from_text(text).unwrap()
+
+    assert_eq(document_text(opened), text, "the same text")
+    assert(!opened.is_dirty(), "nothing unsaved")
+    assert_eq(opened.final_solid().unwrap().volume(), doc.final_solid().unwrap().volume(), "the same solid")
+end intersections_and_shells_save_and_open_as_they_were
+
+@test
+a_document_without_them_is_still_written_as_format_2()
+    val doc = new_document()
+
+    doc.add_shape(Primitive.Box)
+    doc.hollow_selected(2.0, false).unwrap()
+    assert(document_text(doc).starts_with("tekton = 3\n"), "a shell needs format 3")
+    doc.set_wall(doc.selection[0], 0.0).unwrap()
+    assert(document_text(doc).starts_with("tekton = 2\n"), "solid again, an older Tekton opens it")
+    assert(!document_text(doc).contains("wall"), "and says nothing of a wall")
+end a_document_without_them_is_still_written_as_format_2
+
+@test
+a_split_document_saves_and_opens_as_it_was()
+    val doc = combined()
+
+    doc.split_selected(2).unwrap()
+
+    val text = document_text(doc)
+    val opened = document_from_text(text).unwrap()
+
+    assert_eq(document_text(opened), text, "the halves")
+    assert_eq(opened.final_solid().unwrap().volume(), doc.final_solid().unwrap().volume(), "the same solid")
+end a_split_document_saves_and_opens_as_it_was
+
+@test
+a_bad_mode_wall_or_top_is_refused_on_its_line()
+    val text = document_text(combined())
+
+    assert(refused(replace_all(text, "mode = intersect", "mode = both")).contains("`mode` must be union or intersect"),
+           "a mode")
+    assert(refused(replace_all(text, "wall = 1.5", "wall = 0.1")).contains("`wall` must be from 0.4 to 20 mm"), "thin")
+    assert(refused(replace_all(text, "wall = 1.5", "wall = 25")).contains("`wall` must be from"), "thick")
+    assert(refused(replace_all(text, "wall = 1.5", "wall = yes")).contains("`wall` must be a number"), "a word")
+    assert(refused(replace_all(text, "wall = 1.5\n", "")).contains("only a hollow node has `open_top`"), "no wall")
+    assert(refused(replace_all(text, "open_top = true", "open_top = 3")).contains("`open_top` must be true or false"),
+           "a number")
+    assert(refused(replace_all(text, "wall = 1.5", "wall = 1.5\n    mode = intersect")).contains("has no `mode`"),
+           "a shape with a mode")
+    assert(document_from_text(replace_all(text, "mode = intersect", "mode = union")).is_ok(), "union is said too")
+end a_bad_mode_wall_or_top_is_refused_on_its_line
+
+@test
+an_empty_intersection_in_a_file_is_refused_naming_it()
+    val text = document_text(combined())
+    val apart = replace_all(text, "at = [5.0, 0.0, 0.0]", "at = [55.0, 0.0, 0.0]")
+
+    assert(apart != text, "the fixture has the second box's place")
+    assert(refused(apart).contains("The solids in this intersection share nothing"), refused(apart))
+end an_empty_intersection_in_a_file_is_refused_naming_it

@@ -1,6 +1,7 @@
 module sh.sysl.tekton.interface
 @tests
 
+import sh.sysl.tekton.camera.NamedView
 import sh.sysl.tekton.document.{Primitive, moved_to}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
@@ -126,3 +127,26 @@ shift_drags_straight_through()
     drag_past(w, &c, a, b, true)
     assert(w.doc.find(a).unwrap().transform.translation.x > 60.0, s"through and beyond: ${w.doc.find(a).unwrap().transform}")
 end shift_drags_straight_through
+
+@test
+a_drag_in_an_orthographic_view_stops_the_same_way()
+    // Straight from the front, and from the home view's angle; from straight above a press on a box's middle takes
+    // its lift arrow, with Rigid on or off.
+    for view in [NamedView.Front, NamedView.Home]
+        val (w, a, b) = two_boxes()
+        var c = recorder()
+
+        w.look_from(view)
+        w.toggle_orthographic()
+        w.next_frame(1.0)
+        assert(w.camera.orthographic && w.camera.named_view() == Some(view), "looking straight on, orthographic")
+
+        drag_past(w, &c, a, b, false)
+
+        val box = w.doc.bounds_of(w.doc.find(a).unwrap())
+
+        assert(box.max.x > 15.0, s"it moved toward the other: ${box}")
+        assert(w.doc.solid_of(w.doc.find(a).unwrap()).intersection(w.doc.solid_of(w.doc.find(b).unwrap())).volume() <= 1.0e-4,
+               s"and not into it: ${box}")
+        assert_eq(w.doc.find(b).unwrap().transform.translation, Vec3(40.0, 0.0, 0.0), "the other stays")
+end a_drag_in_an_orthographic_view_stops_the_same_way

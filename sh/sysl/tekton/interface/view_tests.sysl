@@ -1,0 +1,273 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
+import sh.sysl.tekton.camera.NamedView
+import sh.sysl.tekton.cube.view_cube
+import sh.sysl.tekton.document.{Primitive, moved_to}
+import sh.sysl.tekton.picking.pick
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+
+// The View menu's views and projection, their keys, and the view cube in the corner of the viewport.
+
+private val WHOLE: Rect = Rect(0, 0, 1280, 800)
+private val PORT: Rect = Rect(0, 0, 900, 600)
+
+private press(w: &Workspace, c: *Recorder, name: string)
+    val v = w.tree()
+
+    c.taps.reset()
+    render(v, c, WHOLE)
+
+    val (x, y) = snapshot(v, c, WHOLE).click_point(name).unwrap()
+
+    c.point(x, y, true)
+    render(w.tree(), c, WHOLE)
+    c.release(x, y)
+    render(w.tree(), c, WHOLE)
+end press
+
+private choose_view(w: &Workspace, c: *Recorder, label: string)
+    press(w, c, "menu.View")
+    press(w, c, s"menu.View.${label}")
+
+// A row of the View menu, read with the menu open and left closed.
+private view_row(w: &Workspace, c: *Recorder, label: string) -> Entry
+    assert(w.show_menu("View"), "a View menu")
+
+    val v = w.tree()
+
+    render(v, c, WHOLE)
+
+    val row = snapshot(v, c, WHOLE).find(s"menu.View.${label}").unwrap()
+
+    w.open_menu.set(NO_MENU)
+    row
+end view_row
+
+private frame_port(w: &Workspace, c: *Recorder) = render(w.viewport(), c, PORT)
+
+private click_port(w: &Workspace, c: *Recorder, x: int, y: int)
+    frame_port(w, c)
+    c.point(x, y, true)
+    frame_port(w, c)
+    c.release(x, y)
+    frame_port(w, c)
+end click_port
+
+private drag_port(w: &Workspace, c: *Recorder, x: int, y: int, to_x: int, to_y: int)
+    frame_port(w, c)
+    c.point(x, y, true)
+    frame_port(w, c)
+    c.point(to_x, to_y, true)
+    frame_port(w, c)
+    c.release(to_x, to_y)
+    frame_port(w, c)
+end drag_port
+
+private key(w: &Workspace, ch: u8, mods: u16 = KMOD_GUI, repeat: bool = false) -> bool =
+    w.shortcut(u32(ch), mods, repeat)
+
+private settle(w: &Workspace) = w.next_frame(1.0)
+
+private val LABELS = ["Home", "Top", "Front", "Right", "Back", "Left"]
+
+@test
+each_view_row_is_live_shows_its_key_and_goes_there()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.doc.add_shape(Primitive.Box)
+
+    for i in 0..<VIEW_KEYS.len
+        val row = view_row(w, &c, LABELS[i])
+
+        assert(row.marks.index_of("disabled").is_none(), s"${LABELS[i]} is live")
+
+    for i in [1, 2, 3, 4, 5, 0]
+        choose_view(w, &c, LABELS[i])
+        assert(w.camera.named_view() == Some(VIEW_KEYS[i]), s"${LABELS[i]} chosen")
+
+@test
+the_digits_with_cmd_go_to_the_views_in_menu_order()
+    val w = new_workspace()
+
+    for i in [1, 2, 3, 4, 5, 0]
+        assert(key(w, u8('0') + u8(i)), "taken as a shortcut")
+        settle(w)
+        assert(w.camera.named_view() == Some(VIEW_KEYS[i]), s"Cmd+${i}")
+
+    assert(!key(w, u8('6')), "a digit with no view is not taken")
+    assert(!key(w, u8('1'), 0u16), "and without Cmd a digit is no view")
+    assert(w.camera.named_view() == Some(NamedView.Home), "still home")
+
+@test
+a_held_view_key_does_not_start_the_turn_over_again()
+    val w = new_workspace()
+
+    key(w, u8('1'))
+    w.next_frame(0.1)
+
+    val progress = w.camera.progress
+
+    assert(key(w, u8('1'), KMOD_GUI, true), "a repeat is still the shortcut's")
+    assert_eq(w.camera.progress, progress, "but does not set out again")
+
+@test
+a_view_turns_there_over_frames()
+    val w = new_workspace()
+
+    key(w, u8('1'))
+    assert(w.camera.moving(), "on the way")
+    w.next_frame(0.1)
+    assert(w.camera.moving(), "still on the way")
+    w.next_frame(0.2)
+    assert(!w.camera.moving(), "there")
+
+@test
+orthographic_is_a_setting_ticked_while_on_and_cmd_p_switches_it()
+    val w = new_workspace()
+    var c = recorder()
+
+    assert(view_row(w, &c, "Orthographic").marks.index_of("checked").is_none(), "perspective to begin with")
+    choose_view(w, &c, "Orthographic")
+    assert(w.camera.orthographic, "chosen")
+    assert(view_row(w, &c, "Orthographic").marks.index_of("checked").is_some(), "and ticked")
+    assert(key(w, u8('p')), "Cmd+P")
+    assert(!w.camera.orthographic, "switches back")
+    assert(!key(w, u8('p'), 0u16), "and P alone is no shortcut")
+    assert(view_row(w, &c, "Top").marks.index_of("checked").is_none(), "a view is not a setting")
+
+@test
+neither_a_view_nor_the_projection_changes_in_the_middle_of_a_drag()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val centre = w.doc.bounds_of(w.doc.find(a).unwrap()).center()
+    val (x, y) = w.camera.project(centre, 900.0, 600.0).unwrap()
+
+    frame_port(w, &c)
+    c.point(int(x), int(y), true)
+    frame_port(w, &c)
+    c.point(int(x) + 30, int(y), true)
+    frame_port(w, &c)
+    assert(w.is_editing(), "dragging the box")
+
+    key(w, u8('1'))
+    key(w, u8('p'))
+    assert(w.camera.named_view() == Some(NamedView.Home) && !w.camera.orthographic, "the view held still")
+
+    c.release(int(x) + 30, int(y))
+    frame_port(w, &c)
+
+@test
+a_view_changes_nothing_in_the_document()
+    val w = new_workspace()
+
+    w.doc.add_shape(Primitive.Box)
+
+    val steps = w.doc.undos.len()
+    val dirty = w.doc.is_dirty()
+
+    key(w, u8('2'))
+    key(w, u8('p'))
+    settle(w)
+    assert_eq(w.doc.undos.len(), steps, "no undo step: the view is not the document's")
+    assert_eq(w.doc.is_dirty(), dirty, "and nothing to save")
+
+// ## The view cube
+
+@test
+a_click_on_a_face_of_the_cube_goes_to_that_view_and_selects_nothing_new()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    for (name, v) in [("Front", NamedView.Front), ("Top", NamedView.Top)]
+        w.camera.go_to(NamedView.Home)
+        settle(w)
+
+        val (x, y) = view_cube(w.camera, 900.0, 600.0).spot(name).unwrap()
+
+        click_port(w, &c, int(x), int(y))
+        assert(w.camera.named_view() == Some(v), name)
+        assert(w.doc.selected == Some(a), "the selection stays")
+
+@test
+a_click_on_the_cube_beside_its_faces_does_nothing()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val cube = view_cube(w.camera, 900.0, 600.0)
+    var x = -1
+    var y = -1
+
+    // A point on the cube's disc that no face covers.
+    for dx in -40..<40
+        for dy in -40..<40
+            val px = int(cube.x) + dx
+            val py = int(cube.y) + dy
+
+            if x < 0 && cube.holds(real(px), real(py)) && cube.face_at(real(px), real(py)).is_none()
+                x = px
+                y = py
+
+    assert(x >= 0, "there is room beside the faces")
+    click_port(w, &c, x, y)
+    assert(w.camera.named_view() == Some(NamedView.Home), "the view stays")
+    assert(w.doc.selected == Some(a), "and so does the selection")
+
+@test
+a_drag_on_the_cube_turns_the_view_even_over_a_shape()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+    val cube = view_cube(w.camera, 900.0, 600.0)
+
+    // The box moved to stand right behind the cube.
+    val ray = w.camera.ray(cube.x, cube.y, 900.0, 600.0)
+
+    w.doc.set_transform(a, moved_to(ray.at(w.camera.distance) - Vec3(0.0, 0.0, 10.0)))
+    assert(pick(w.doc, ray) == Some(a), "the box is under the cube")
+    frame_port(w, &c)
+
+    val was = w.doc.find(a).unwrap().transform
+    val turn = w.camera.turn
+
+    drag_port(w, &c, int(cube.x), int(cube.y), int(cube.x) - 40, int(cube.y))
+    assert(w.camera.turn != turn, "it orbited")
+    assert(w.doc.find(a).unwrap().transform == was, "and the shape stayed")
+    assert(w.camera.named_view().is_none(), "now a view of its own")
+
+@test
+the_cube_is_drawn_over_the_viewport_with_the_handles()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.doc.add_shape(Primitive.Box)
+    frame_port(w, &c)
+
+    val cube = view_cube(w.camera, 900.0, 600.0)
+    val handles = w.overlay.strokes.len() - cube.strokes.len()
+
+    assert(handles > 0, "the handles are there")
+    assert(w.overlay.strokes[w.overlay.strokes.len() - 1].ax == cube.strokes[cube.strokes.len() - 1].ax, "the cube last, on top")
+
+    w.doc.select(None)
+    frame_port(w, &c)
+    assert_eq(w.overlay.strokes.len(), cube.strokes.len(), "and with nothing selected only the cube")
+
+@test
+a_click_away_from_the_cube_still_picks_in_orthographic()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    w.doc.select(None)
+    key(w, u8('p'))
+
+    val (x, y) = w.camera.project(w.doc.bounds_of(w.doc.find(a).unwrap()).center(), 900.0, 600.0).unwrap()
+
+    click_port(w, &c, int(x), int(y))
+    assert(w.doc.selected == Some(a), "the box, straight ahead of the pointer")

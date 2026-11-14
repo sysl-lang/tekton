@@ -15,6 +15,7 @@ rigid_off_is_written_and_comes_back_off()
     val text = document_text(doc)
 
     assert(text.contains("\nrigid = false\n"), text)
+    assert(text.starts_with("tekton = 3\n"), "format 3, which an older reader refuses as too new")
 
     val back = document_from_text(text).unwrap()
 
@@ -29,6 +30,7 @@ rigid_on_says_nothing_and_a_file_that_says_nothing_opens_with_it_on()
 
     doc.add_shape(Primitive.Box)
     assert(!document_text(doc).contains("rigid"), "on says nothing")
+    assert(document_text(doc).starts_with("tekton = 2\n"), "and needs no newer format")
 
     val old = "tekton = 2\nnext = 1\nnodes = []\n"
 

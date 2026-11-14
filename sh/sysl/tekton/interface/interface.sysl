@@ -1,23 +1,25 @@
 module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
-import sh.sysl.tekton.camera.{Camera, new_camera}
-import sh.sysl.sdl3.{DialogResult, FileFilter, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
+import sh.sysl.tekton.camera.{Camera, NamedView, new_camera}
+import sh.sysl.tekton.cube.view_cube
+import sh.sysl.sdl3.{DialogResult, FileFilter, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KMOD_GUI, KMOD_SHIFT, MessageButton, MessageKind, Window, ask, ask_open_file,
                      ask_save_file, message_button}
-import sh.sysl.tekton.document.{Document, Edge, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_name}
+import sh.sysl.tekton.document.{Document, Edge, MAX_WALL, MIN_WALL, Node, PRIMITIVES, Pattern, Primitive, Transform, new_document, primitive_key, primitive_name}
 import sh.sysl.tekton.export.{export_3mf, export_stl}
 import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer, save_file}
-import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, drag_body, drag_grip, layout}
+import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, Stroke, drag_body, drag_grip, layout}
 import sh.sysl.tekton.measure.{Mark, Measures, measures}
-import sh.sysl.tekton.picking.{pick, pick_hit}
+import sh.sysl.tekton.picking.{box_pick, pick, pick_hit}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
+import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
 import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, set_title, stop, viewport, viewport_depth_format, window}
 import sysl.buf.{Buf, buf}
 import sysl.math.{max, min}
 import sysl.path.file_name
-import sysl.text.{parse_real, split, to_lower}
+import sysl.text.{parse_real, split}
 
 // The window: a menu bar over a palette beside one viewport.
 //
@@ -33,7 +35,17 @@ const CLICK_SLOP: int = 3
 // The grid a drag snaps to unless told otherwise, in millimetres.
 const DEFAULT_GRID: real = 1.0
 
+// A box selection's colours, those of a selected shape, and its fill's band and outline's radius in points.
+val BOX_INK: [4]f32 = [0.04, 0.48, 1.0, 1.0]
+val BOX_FILL: [4]f32 = [0.04, 0.48, 1.0, 0.16]
+const BOX_BAND: real = 8.0
+const BOX_LINE: real = 0.75
+
 const RADIANS_PER_DEGREE: real = real.pi() / 180.0
+
+// The named views in the order of the View menu, which is also the digit each is on with Cmd: Home on 0.
+val VIEW_KEYS: [6]NamedView = [NamedView.Home, NamedView.Top, NamedView.Front, NamedView.Right, NamedView.Back,
+                               NamedView.Left]
 
 // How wide each of a row of three number fields is, and the keyboard id of the first.
 const NUMBER_WIDTH: int = 52
@@ -50,6 +62,10 @@ const FIRST_RING: int = 3
 const ARRAY_COUNT_ID: int = 120
 const ARRAY_SPACING_ID: int = 121
 const ARRAY_ANGLE_ID: int = 122
+
+// The keyboard id of the hollow panel's wall field, and the choices of its top.
+const HOLLOW_WALL_ID: int = 123
+val HOLLOW_TOPS = ["Closed", "Open top"]
 
 // What the question about unsaved changes answers for each of its buttons, and the line under its title.
 const SAVE_ANSWER: i32 = 1
@@ -86,6 +102,7 @@ enum Gesture
     Idle
     Orbit
     Edit(drag: Drag)
+    Box(x: real, y: real)
 
 // Which of the selection's numbers a field shows.
 enum Quantity
@@ -95,6 +112,9 @@ enum Quantity
     Segments
     Clearance
     EdgeRadius
+    Sides
+    TubeWall
+    Wall
 
 // A click selected or cleared the selection, or the palette added a shape. What a document's panel
 // shows follows this.
@@ -186,10 +206,22 @@ struct Workspace
     show_dimensions: bool
     measured: &Measures
 
+    // What Copy and Cut kept, how many times it has been pasted since, and the rectangle being dragged over the
+    // viewport, as two corners in its points. The clipboard outlives a document: it is the window's.
+    clipboard: Buf[&Node]
+    pastes: int
+    box: Option[(real, real, real, real)]
+
+    // Whether the hollow panel is up, what is typed into its wall field, and which of `HOLLOW_TOPS` it has chosen.
+    hollow_open: &Signal[bool]
+    hollow_wall: &Signal[string]
+    hollow_top: &Signal[int]
+
     private changed(&self) = self.changes.set(self.changes.read() + 1)
 
     // Whether something is over the viewport that the pointer belongs to instead.
-    private covered(&self) -> bool = self.open_menu.read() != NO_MENU || self.in_dialog.read() || self.array_open.read()
+    private covered(&self) -> bool =
+        self.open_menu.read() != NO_MENU || self.in_dialog.read() || self.array_open.read() || self.hollow_open.read()
 
     // Ask first if this would lose anything, and otherwise do it. A drag or an open dialog finishes first.
     private guarded(&self, intent: Intent)
@@ -209,9 +241,11 @@ struct Workspace
         self.changed()
     end guarded
 
-    // Once a frame: the window's title follows the file and its unsaved mark, and a close may be asked about again.
-    next_frame(&self)
+    // Once a frame, `seconds` after the last: the window's title follows the file and its unsaved mark, a close may
+    // be asked about again, and a view on its way moves along.
+    next_frame(&self, seconds: real = 0.0)
         self.quit_asked = false
+        self.camera.advance(seconds)
 
         val t = self.title()
 
@@ -410,6 +444,61 @@ struct Workspace
 
     group(&self) = if !self.is_editing() then self.answer(self.doc.group_selected().map(id -> ()))
 
+    // Groups the selection as an intersection: only what all of its solids share.
+    intersect(&self) = if !self.is_editing() then self.answer(self.doc.group_selected(intersect = true).map(id -> ()))
+
+    // Whether the selected group joins its solids or keeps only what they share.
+    set_group_mode(&self, intersect: bool)
+        if self.is_editing() then return
+
+        self.answer(self.doc.selected.ok_or("Nothing is selected").and_then(id -> self.doc.set_group_mode(id, intersect)))
+
+    // Whether the selected hollow solid is open at its top.
+    set_open_top(&self, open: bool)
+        if self.is_editing() then return
+
+        self.answer(self.doc.selected.ok_or("Nothing is selected").and_then(id -> self.doc.set_open_top(id, open)))
+
+    split(&self, axis: int) = if !self.is_editing() then self.answer(self.doc.split_selected(axis))
+
+    // Put up the hollow panel over everything, with nothing typing anywhere else.
+    open_hollow(&self)
+        if self.is_editing() then return
+
+        self.open_menu.set(NO_MENU)
+
+        if !self.doc.can_hollow() then return self.answer(Err("Only a solid can be hollowed"))
+
+        self.release_keyboard = true
+        self.problem.set("")
+        self.hollow_open.set(true)
+        self.changed()
+    end open_hollow
+
+    // Take the hollow panel down and leave the document as it was.
+    cancel_hollow(&self)
+        self.release_keyboard = true
+        self.problem.set("")
+        self.hollow_open.set(false)
+        self.changed()
+    end cancel_hollow
+
+    // The hollow panel's OK: each selected solid made a shell. A wall that is no number, or one the document
+    // refuses, keeps the panel up and says why.
+    accept_hollow(&self)
+        val typed = self.hollow_wall.read()
+        val made = parse_real(typed).map_err(e -> s"\"${typed}\" is not a number")
+            .and_then(wall -> self.doc.hollow_selected(wall, self.hollow_top.read() == 1))
+
+        made match
+            Ok(_) ->
+                self.release_keyboard = true
+                self.hollow_open.set(false)
+            Err(_) -> ()
+
+        self.answer(made)
+    end accept_hollow
+
     ungroup(&self) = if !self.is_editing() then self.answer(self.doc.ungroup_selected())
 
     delete(&self) = if !self.is_editing() then self.answer(self.doc.delete_selected())
@@ -425,6 +514,58 @@ struct Workspace
 
     // A copy of the selection one grid step to the right, selected.
     duplicate(&self) = if !self.is_editing() then self.answer(self.doc.duplicate_selected(self.grid))
+
+    // Keep a copy of everything selected for Paste, which the window holds across New and Open.
+    copy(&self)
+        if self.is_editing() then return
+
+        self.doc.copy_selected() match
+            Ok(kept) ->
+                self.clipboard = kept
+                self.pastes = 0
+                self.answer(Ok(()))
+            Err(why) -> self.answer(Err(why))
+    end copy
+
+    // Copy, and then delete: one step.
+    cut(&self)
+        if self.is_editing() then return
+
+        self.doc.copy_selected() match
+            Ok(kept) ->
+                self.clipboard = kept
+                self.pastes = 0
+                self.answer(self.doc.delete_selected())
+            Err(why) -> self.answer(Err(why))
+    end cut
+
+    // What was copied, one grid step along x further for each time it is pasted, selected.
+    paste(&self)
+        if self.is_editing() || self.clipboard.len() == 0 then return
+
+        val made = self.doc.paste(self.clipboard.view(), self.pastes + 1, self.grid)
+
+        made match
+            Ok(_) -> self.pastes += 1
+            Err(_) -> ()
+
+        self.answer(made)
+    end paste
+
+    select_all(&self)
+        if self.is_editing() then return
+
+        self.doc.select_all()
+        self.problem.set("")
+        self.changed()
+    end select_all
+
+    // The selection moved by this many of the grid's steps along an axis, or this many millimetres.
+    nudge(&self, by: Vec3)
+        if self.is_editing() || self.doc.selection.len() == 0 then return
+
+        self.answer(self.doc.nudge_selected(by))
+    end nudge
 
     // Put up the array panel over everything, with nothing typing anywhere else.
     open_array(&self)
@@ -496,6 +637,21 @@ struct Workspace
         self.changed()
     end frame_all
 
+    // Turn to a named view, keeping what is in the middle of it and how far away. Not while a shape is being
+    // dragged: the view holding still is what keeps the shape under the pointer.
+    look_from(&self, v: NamedView)
+        if self.is_editing() then return
+
+        self.camera.go_to(v)
+        self.changed()
+
+    // Switch between perspective and orthographic, under the same rule.
+    toggle_orthographic(&self)
+        if self.is_editing() then return
+
+        self.camera.toggle_orthographic()
+        self.changed()
+
     // Show the build volume's outline if it is hidden, and hide it if it shows.
     toggle_volume(&self)
         self.show_volume = !self.show_volume
@@ -514,6 +670,11 @@ struct Workspace
         self.measured = if self.show_dimensions then measures(self.doc, self.camera, w, h) else Measures(buf(), buf())
 
         for s in self.measured.strokes.view() do self.overlay.strokes.push(s)
+        for s in view_cube(self.camera, w, h).strokes.view() do self.overlay.strokes.push(s)
+
+        self.box match
+            Some((ax, ay, bx, by)) -> for s in box_strokes(ax, ay, bx, by) do self.overlay.strokes.push(s)
+            None -> ()
     end lay_out
 
     // A key the toolkit does not see, as the window reports it: `code` is the layout's own, so the letters are
@@ -521,12 +682,29 @@ struct Workspace
     shortcut(&self, code: u32, mods: u16, repeat: bool) -> bool
         if self.in_dialog.read() then return true
 
+        val shift = (mods & KMOD_SHIFT) != 0u16
+
+        // An arrow moves the selection, unless the keyboard is a field's or a menu is open over it. With Command
+        // it goes up and down, with Shift a millimetre, and otherwise a grid step along the ground.
+        if code == KEY_LEFT || code == KEY_RIGHT || code == KEY_UP || code == KEY_DOWN
+            if self.typing || self.covered() then return false
+
+            val step = if shift then 1.0 else self.grid
+            val sign = if code == KEY_LEFT || code == KEY_DOWN then -1.0 else 1.0
+
+            if (mods & KMOD_GUI) != 0u16
+                if code == KEY_UP || code == KEY_DOWN then self.nudge(Vec3(0.0, 0.0, sign * step))
+            elif code == KEY_LEFT || code == KEY_RIGHT
+                self.nudge(Vec3(sign * step, 0.0, 0.0))
+            else
+                self.nudge(Vec3(0.0, sign * step, 0.0))
+
+            return true
+
         if (mods & KMOD_GUI) == 0u16 || self.typing then return false
 
-        // The array panel is answered before anything else is asked for.
-        if self.array_open.read() then return true
-
-        val shift = (mods & KMOD_SHIFT) != 0u16
+        // The array and hollow panels are answered before anything else is asked for.
+        if self.array_open.read() || self.hollow_open.read() then return true
 
         if code == u32(u8('n')) || code == u32(u8('o')) || code == u32(u8('s'))
             if !repeat
@@ -552,6 +730,11 @@ struct Workspace
 
             return true
 
+        if code == u32(u8('i')) && shift
+            if !repeat then self.intersect()
+
+            return true
+
         if code == u32(u8('b'))
             if !repeat then self.drop_to_bed()
 
@@ -559,6 +742,29 @@ struct Workspace
 
         if code == u32(u8('d'))
             if !repeat then self.duplicate()
+
+            return true
+
+        if code >= u32(u8('0')) && code < u32(u8('0')) + u32(VIEW_KEYS.len)
+            if !repeat then self.look_from(VIEW_KEYS[code - u32(u8('0'))])
+
+            return true
+
+        if code == u32(u8('p'))
+            if !repeat then self.toggle_orthographic()
+
+            return true
+
+        if code == u32(u8('x')) || code == u32(u8('c')) || code == u32(u8('v')) || code == u32(u8('a'))
+            if !repeat
+                if code == u32(u8('x'))
+                    self.cut()
+                elif code == u32(u8('c'))
+                    self.copy()
+                elif code == u32(u8('v'))
+                    self.paste()
+                else
+                    self.select_all()
 
             return true
 
@@ -572,6 +778,17 @@ struct Workspace
         val lx = real(x - r.x)
         val ly = real(y - r.y)
 
+        // A click on the view cube is the cube's, drawn over everything else: on a face it turns to that view,
+        // and beside one it does nothing.
+        val cube = view_cube(self.camera, real(r.w), real(r.h))
+
+        if cube.holds(lx, ly)
+            cube.face_at(lx, ly) match
+                Some(v) -> self.look_from(v)
+                None -> ()
+
+            return
+
         if layout(self.doc, self.camera, real(r.w), real(r.h)).grip_at(lx, ly).is_some() then return
 
         val ray = self.camera.ray(lx, ly, real(r.w), real(r.h))
@@ -584,13 +801,19 @@ struct Workspace
         self.changed()
     end click
 
-    // A drag has just begun at this point. A handle of the selection comes first, whatever stands in front
-    // of it, then the nearest shape, which it selects, and failing both the view.
-    private begin(&self, x: int, y: int, r: Rect)
+    // A drag has just begun at this point. On the view cube it turns the view; otherwise a handle of the
+    // selection comes first, whatever stands in front of it, then the nearest shape, which it selects, and
+    // failing both the view, or with `adding` a rectangle that selects what it touches.
+    private begin(&self, x: int, y: int, r: Rect, adding: bool)
         val lx = real(x - r.x)
         val ly = real(y - r.y)
         val w = real(r.w)
         val h = real(r.h)
+
+        if view_cube(self.camera, w, h).holds(lx, ly)
+            self.gesture = Gesture.Orbit
+
+            return
 
         layout(self.doc, self.camera, w, h).grip_at(lx, ly) match
             Some(grip) ->
@@ -614,8 +837,19 @@ struct Workspace
                 drag_body(self.doc, p.id, ray.at(p.distance), lx, ly) match
                     Some(d) -> self.start_edit(d)
                     None -> ()
-            None -> self.gesture = Gesture.Orbit
+            None -> self.gesture = if adding then Gesture.Box(lx, ly) else Gesture.Orbit
     end begin
+
+    // The rectangle is let go: everything whose projection touches it joins the selection.
+    private finish_box(&self, w: real, h: real)
+        self.box match
+            Some((ax, ay, bx, by)) -> self.doc.select_more(box_pick(self.doc, self.camera, w, h, ax, ay, bx, by))
+            None -> ()
+
+        self.box = None
+        self.problem.set("")
+        self.changed()
+    end finish_box
 
     // However many frames it takes, a drag is one undo step.
     private start_edit(&self, d: Drag)
@@ -687,6 +921,11 @@ struct Workspace
                     if p.key == Key.Enter then self.accept_array()
                     if p.key == Key.Escape then self.cancel_array()
 
+            if self.hollow_open.read()
+                for p in c.keys()
+                    if p.key == Key.Enter then self.accept_hollow()
+                    if p.key == Key.Escape then self.cancel_hollow()
+
             self.lay_out(real(r.w), real(r.h))
 
             return
@@ -698,13 +937,17 @@ struct Workspace
                 Idle ->
                     val (bx, by) = c.press_origin()
 
-                    self.begin(bx, by, r)
+                    self.begin(bx, by, r, c.modifiers().shift)
                 _ -> ()
 
         self.gesture match
             Idle -> ()
             Orbit -> if ox != 0 || oy != 0 then self.camera.orbit(real(ox), real(oy))
             Edit(d) -> self.follow(d, c, r)
+            Box(sx, sy) ->
+                val (px, py) = c.pointer()
+
+                self.box = Some((sx, sy, real(px - r.x), real(py - r.y)))
 
         // The other buttons and the wheel are still read while a shape is being dragged, so they are taken
         // from whatever would have them, and do nothing: the view holding still is what keeps the shape
@@ -719,6 +962,10 @@ struct Workspace
         if wheel != 0 && !self.is_editing() then self.camera.zoom(real(wheel))
 
         if !c.held(PointerButton.Primary)
+            self.gesture match
+                Box(_, _) -> self.finish_box(real(r.w), real(r.h))
+                _ -> ()
+
             if self.is_editing()
                 self.doc.end_step()
                 self.changed()
@@ -750,6 +997,7 @@ struct Workspace
         self.gesture match
             Edit(d) -> return d.grip
             Orbit -> return None
+            Box(_, _) -> return None
             Idle -> ()
 
         val (x, y) = c.pointer()
@@ -789,6 +1037,7 @@ struct Workspace
         column([menu_bar(menus.view(), self.open_menu).restyle(t -> light()),
                 row([self.panel(), self.dimensioned().flex()]).flex()], 0)
             .modal(self.array_open, self.array_panel())
+            .modal(self.hollow_open, self.hollow_panel())
             .modal(self.in_dialog, spacer().frame(0, 0))
     end tree
 
@@ -822,6 +1071,25 @@ struct Workspace
         column(parts.view(), 6).padding(16).background(0xFFFFFFu32, 8).border(0xCBD2DCu32, 1, 8).restyle(t -> light())
     end array_panel
 
+    // The hollow panel: how thick the walls are, closed or open at the top, and OK or Cancel.
+    private hollow_panel(&self) -> &View
+        var parts: Buf[&View] = buf()
+
+        parts.push(text("Hollow").font_size(16.0))
+        parts.push(text(s"Wall, mm (${MIN_WALL} to ${MAX_WALL.round()})").font_size(11.0))
+        parts.push(text_field(self.hollow_wall, HOLLOW_WALL_ID, NUMBER_WIDTH).font_size(11.0).named("hollow.wall"))
+
+        for i in 0..<HOLLOW_TOPS.len do parts.push(radio(self.hollow_top, int(i), HOLLOW_TOPS[i]).named(s"hollow.top.${i}"))
+
+        for line in split(wrapped(self.problem.read(), PROBLEM_ROOM), "\n")
+            if line != "" then parts.push(text(line).font_size(11.0).foreground(WRONG_INK))
+
+        parts.push(row([button("Cancel", () -> self.cancel_hollow(), Role.Primary, Variant.Soft).named("hollow.cancel").flex(),
+                        button("OK", () -> self.accept_hollow(), Role.Primary, Variant.Filled).named("hollow.ok").flex()], 6))
+
+        column(parts.view(), 6).padding(16).background(0xFFFFFFu32, 8).border(0xCBD2DCu32, 1, 8).restyle(t -> light())
+    end hollow_panel
+
     // The menus, each row live only where its command would do something now.
     private menus(&self) -> Buf[Menu]
         val doc = self.doc
@@ -839,11 +1107,17 @@ struct Workspace
         all.push(menu("Edit", [item("Undo", () -> self.undo(), "Cmd+Z", enabled = doc.can_undo),
                                item("Redo", () -> self.redo(), "Cmd+Shift+Z", enabled = doc.can_redo),
                                separator(),
+                               item("Cut", () -> self.cut(), "Cmd+X", enabled = doc.can_delete),
+                               item("Copy", () -> self.copy(), "Cmd+C", enabled = doc.can_delete),
+                               item("Paste", () -> self.paste(), "Cmd+V", enabled = self.clipboard.len() > 0),
+                               item("Select All", () -> self.select_all(), "Cmd+A", enabled = doc.items().len > 0),
+                               separator(),
                                item("Delete", () -> self.delete(), "Delete", enabled = doc.can_delete),
                                item("Duplicate", () -> self.duplicate(), "Cmd+D", enabled = doc.can_arrange),
                                separator(),
                                item("Group", () -> self.group(), "Cmd+G", enabled = doc.can_group()),
                                item("Ungroup", () -> self.ungroup(), "Cmd+Shift+G", enabled = doc.can_ungroup()),
+                               item("Intersect", () -> self.intersect(), "Cmd+Shift+I", enabled = doc.can_group()),
                                separator(),
                                item("Solid", () -> self.set_hole(false), enabled = doc.can_set_hole(false)),
                                item("Hole", () -> self.set_hole(true), enabled = doc.can_set_hole(true))]))
@@ -864,9 +1138,23 @@ struct Workspace
                                   item("Drop to Bed", () -> self.drop_to_bed(), "Cmd+B", enabled = doc.can_arrange),
                                   separator(),
                                   item("Array…", () -> self.open_array(), enabled = doc.can_arrange),
+                                  item("Hollow…", () -> self.open_hollow(), enabled = doc.can_hollow()),
+                                  separator(),
+                                  item("Split X", () -> self.split(0), enabled = doc.can_arrange),
+                                  item("Split Y", () -> self.split(1), enabled = doc.can_arrange),
+                                  item("Split Z", () -> self.split(2), enabled = doc.can_arrange),
                                   separator(),
                                   toggle("Rigid", () -> self.toggle_rigid(), doc.rigid)]))
         all.push(menu("View", [item("Frame All", () -> self.frame_all(), enabled = doc.items().len > 0),
+                               separator(),
+                               item("Home", () -> self.look_from(NamedView.Home), "Cmd+0"),
+                               item("Top", () -> self.look_from(NamedView.Top), "Cmd+1"),
+                               item("Front", () -> self.look_from(NamedView.Front), "Cmd+2"),
+                               item("Right", () -> self.look_from(NamedView.Right), "Cmd+3"),
+                               item("Back", () -> self.look_from(NamedView.Back), "Cmd+4"),
+                               item("Left", () -> self.look_from(NamedView.Left), "Cmd+5"),
+                               toggle("Orthographic", () -> self.toggle_orthographic(), self.camera.orthographic, "Cmd+P"),
+                               separator(),
                                toggle("Build Volume", () -> self.toggle_volume(), self.show_volume),
                                toggle("Dimensions", () -> self.toggle_dimensions(), self.show_dimensions)]))
         all
@@ -894,9 +1182,15 @@ struct Workspace
 
         parts.push(text("Shapes"))
 
-        for p in PRIMITIVES
-            parts.push(button(primitive_name(p), () -> self.add(p), Role.Primary, Variant.Soft)
-                .named(s"palette.${to_lower(primitive_name(p))}"))
+        // Two to a row, so ten shapes take the height of five.
+        for i in 0..<PRIMITIVES.len / 2
+            var pair: Buf[&View] = buf()
+
+            for p in [PRIMITIVES[2 * i], PRIMITIVES[2 * i + 1]]
+                pair.push(button(if p == Primitive.PolygonPrism then "Polygon" else primitive_name(p), () -> self.add(p),
+                                 Role.Primary, Variant.Soft).named(s"palette.${primitive_key(p)}").frame(84, 33))
+
+            parts.push(row(pair.view(), 6))
 
         parts.push(row([self.small_button("Undo", () -> self.undo(), "undo", self.doc.can_undo).flex(),
                         self.small_button("Redo", () -> self.redo(), "redo", self.doc.can_redo).flex()], 6))
@@ -917,7 +1211,7 @@ struct Workspace
              spacer().frame(1, 0).background(0xCBD2DCu32)])
     end panel
 
-    // The nine number fields, the segments field, the clearance field and the edge radius field, made once,
+    // The nine number fields, the segments, clearance, edge radius, sides, tube wall and shell wall fields, made once,
     // because each remembers what is being typed in it.
     number_fields(&self) -> []const &NumberField
         if self.fields.len() == 0
@@ -927,7 +1221,8 @@ struct Workspace
 
                     self.fields.push(new_number_field(self, q, axis, id))
 
-            for q in [Quantity.Segments, Quantity.Clearance, Quantity.EdgeRadius]
+            for q in [Quantity.Segments, Quantity.Clearance, Quantity.EdgeRadius, Quantity.Sides, Quantity.TubeWall,
+                      Quantity.Wall]
                 self.fields.push(new_number_field(self, q, 0, FIRST_FIELD_ID + int(self.fields.len())))
 
         self.fields.view()
@@ -961,6 +1256,20 @@ struct Workspace
              button("Chamfer", () -> self.set_edge_chamfer(true), Role.Primary,
                     if chamfer then Variant.Filled else Variant.Outline).named("panel.edge.chamfer").flex()], 6)
 
+    // Whether a group joins its solids or keeps only what they share: filled, and the other quiet.
+    private union_or_intersect(&self, intersect: bool) -> &View =
+        row([button("Union", () -> self.set_group_mode(false), Role.Primary,
+                    if intersect then Variant.Outline else Variant.Filled).named("panel.union").flex(),
+             button("Intersect", () -> self.set_group_mode(true), Role.Primary,
+                    if intersect then Variant.Filled else Variant.Outline).named("panel.intersect").flex()], 6)
+
+    // Whether a hollow solid is closed or open at its top: filled, and the other quiet.
+    private closed_or_open(&self, open: bool) -> &View =
+        row([button("Closed", () -> self.set_open_top(false), Role.Primary,
+                    if open then Variant.Outline else Variant.Filled).named("panel.closed").flex(),
+             button("Open top", () -> self.set_open_top(true), Role.Primary,
+                    if open then Variant.Filled else Variant.Outline).named("panel.open_top").flex()], 6)
+
     private selection_panel(&self) -> &View
         val count = self.doc.selection.len()
 
@@ -971,8 +1280,8 @@ struct Workspace
         self.doc.selected.and_then(id -> self.doc.find(id)) match
             Some(node) ->
                 val name = node.operation match
-                    Shape(p, _, _) -> primitive_name(p)
-                    Group -> "Group"
+                    Shape(p, _, _, _) -> primitive_name(p)
+                    Group(i) -> if i then "Intersection" else "Group"
                 val fields = self.number_fields()
 
                 parts.push(text(name).font_size(16.0))
@@ -986,6 +1295,14 @@ struct Workspace
                     parts.push(text("Segments").font_size(11.0))
                     parts.push(row([fields[9].view().named("panel.segments")], 3))
 
+                if node.sides.is_some()
+                    parts.push(text("Sides").font_size(11.0))
+                    parts.push(row([fields[12].view().named("panel.sides")], 3))
+
+                if node.tube_wall.is_some()
+                    parts.push(text("Tube wall, mm").font_size(11.0))
+                    parts.push(row([fields[13].view().named("panel.tube_wall")], 3))
+
                 if node.hole && node.takes_clearance
                     parts.push(text("Clearance, mm").font_size(11.0))
                     parts.push(row([fields[10].view().named("panel.clearance")], 3))
@@ -997,6 +1314,13 @@ struct Workspace
                         parts.push(text("Edge").font_size(11.0))
                         parts.push(self.round_or_chamfer(e.chamfer))
                     None -> ()
+
+                if node.is_group then parts.push(self.union_or_intersect(node.intersects))
+
+                if node.is_hollow
+                    parts.push(text("Shell wall, mm").font_size(11.0))
+                    parts.push(row([fields[14].view().named("panel.wall")], 3))
+                    parts.push(self.closed_or_open(node.shell.open))
 
                 if node.is_group
                     parts.push(row([self.small_button("Ungroup", () -> self.ungroup(), "panel.ungroup", true).flex(),
@@ -1022,7 +1346,10 @@ struct Workspace
             Rotation -> euler_degrees(node.transform.rotation)[axis]
             Segments -> real(node.segments?)
             Clearance -> node.clearance
-            EdgeRadius -> node.edges?.radius)
+            EdgeRadius -> node.edges?.radius
+            Sides -> real(node.sides?)
+            TubeWall -> node.tube_wall?
+            Wall -> node.shell.wall)
     end number
 
     // The command behind a number typed into a field.
@@ -1039,8 +1366,15 @@ struct Workspace
                 else
                     // Held to what an int holds; the document holds it to what a shape may have.
                     self.doc.set_segments(id, int(value.clamp(-1.0e6, 1.0e6)))
+            Sides ->
+                if !value.is_finite() || value != value.round()
+                    Err("Sides must be a whole number")
+                else
+                    self.doc.set_sides(id, int(value.clamp(-1.0e6, 1.0e6)))
+            TubeWall -> self.doc.set_tube_wall(id, value)
             Clearance -> self.doc.set_clearance(id, value)
             EdgeRadius -> self.doc.set_edge_radius(id, value)
+            Wall -> self.doc.set_wall(id, value)
             Rotation ->
                 if !value.is_finite()
                     Err("Rotation must be a number of degrees")
@@ -1194,8 +1528,11 @@ const MARK_BACK: u32 = 0xFFFFFFu32
 const MARK_EDGE: u32 = 0xC9D1DCu32
 const MARK_INK: u32 = 0x1F2937u32
 
-// The viewport with the selection's marks written over it, each on a light label of its own. They are painted
-// after the viewport, so they land on its picture rather than in the hole cut for it.
+// The type the view cube's faces are named in, in points.
+const CUBE_FONT: real = 10.0
+
+// The viewport with the view cube's names and the selection's marks written over it, each mark on a light label
+// of its own. They are painted after the viewport, so they land on its picture rather than in the hole cut for it.
 struct Dimensioned
     owner: &Workspace
     inner: &Viewport
@@ -1205,6 +1542,18 @@ impl View for Dimensioned
 
     paint(&self, c: *Canvas, r: Rect)
         self.inner.paint(c, r)
+        c.clip(r)
+        c.push_font_size(CUBE_FONT)
+        c.ink(MARK_INK)
+
+        for l in view_cube(self.owner.camera, real(r.w), real(r.h)).labels.view()
+            val size = c.text_size(l.words)
+
+            c.text(Rect(r.x + int(l.x) - size.w / 2, r.y + int(l.y) - size.h / 2, size.w, size.h), l.words)
+
+        c.unink()
+        c.pop_font_size()
+        c.unclip()
 
         if !self.owner.show_dimensions then return
 
@@ -1310,6 +1659,40 @@ unsaved_answer(r: Result[Option[i32], string]) -> Unsaved =
         Ok(None) -> Unsaved.Stay("")
         Err(why) -> Unsaved.Stay(s"Could not ask about the unsaved changes: ${why}")
 
+// The rectangle of a box selection: a translucent fill and a thin outline, in the colour a selected shape has.
+//
+// The fill is a run of thick strokes laid side by side along the rectangle's longer side, each as wide as the
+// pitch, so their soft edges meet and the colour is even, and each stops a radius short of the ends the
+// outline covers.
+box_strokes(ax: real, ay: real, bx: real, by: real) -> Buf[Stroke]
+    var out: Buf[Stroke] = buf()
+    val left = ax.min(bx)
+    val right = ax.max(bx)
+    val top = ay.min(by)
+    val bottom = ay.max(by)
+    val across = (right - left).min(bottom - top)
+    val bands = int((across / BOX_BAND).ceil())
+
+    if bands >= 1 && across >= 1.0
+        val pitch = across / real(bands)
+        val wide = right - left >= bottom - top
+
+        for i in 0..<bands
+            val at = (real(i) + 0.5) * pitch
+            val inset = pitch * 0.5
+
+            if wide
+                out.push(Stroke(left + inset, top + at, right - inset, top + at, inset, BOX_FILL))
+            else
+                out.push(Stroke(left + at, top + inset, left + at, bottom - inset, inset, BOX_FILL))
+
+    out.push(Stroke(left, top, right, top, BOX_LINE, BOX_INK))
+    out.push(Stroke(right, top, right, bottom, BOX_LINE, BOX_INK))
+    out.push(Stroke(right, bottom, left, bottom, BOX_LINE, BOX_INK))
+    out.push(Stroke(left, bottom, left, top, BOX_LINE, BOX_INK))
+    out
+end box_strokes
+
 new_workspace() -> &Workspace =
     Workspace(new_document(), new_camera(), new_renderer(), None, signal(0), 0, 0, false, Gesture.Idle, DEFAULT_GRID,
               layout(new_document(), new_camera(), 0.0, 0.0), buf(), signal(""), buf(), None, false, signal(NO_MENU), false,
@@ -1321,4 +1704,5 @@ new_workspace() -> &Workspace =
               (answer, parent) -> ask_save_file(answer, parent, stl_filters().view(), title = "Export STL"),
               (answer, parent) -> ask_save_file(answer, parent, three_mf_filters().view(), title = "Export 3MF"), false,
               () -> window(), title -> set_title(title), "", false, CORE_ONE, true, signal(false), signal(0), signal("3"),
-              signal("25"), signal("90"), true, Measures(buf(), buf()))
+              signal("25"), signal("90"), true, Measures(buf(), buf()), buf(), 0, None, signal(false), signal("2"),
+              signal(0))

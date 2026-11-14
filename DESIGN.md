@@ -20,7 +20,11 @@ panel for the selection. Undo reaches everything. There are no modes: no edit mo
 vertex editing.
 
 The bar holds File, Edit and View. File has New, Open, Save, Save As, Export STL… and Quit, with Cmd+N, Cmd+O,
-Cmd+S and Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Solid and Hole. View has Frame All. A
+Cmd+S and Cmd+Shift+S. Every other row is a command the palette, the panel or a key already reaches. Edit has Undo, Redo, Delete, Group, Ungroup, Intersect, Solid and Hole. View has Frame All, the named
+views Home, Top, Front, Right, Back and Left (Cmd+0 to Cmd+5, each turning there over a quarter second and
+keeping the target and distance), Orthographic (Cmd+P, keeping the scale at the target) and the Build Volume and
+Dimensions settings. A view cube in the viewport's top-right corner shows the orientation: a click on a face goes
+to that view and a drag on it orbits. The view is a session's, like the selection: it is not saved. A
 row is dimmed where its command would do nothing now, and its shortcut is shown only where that key works.
 While a menu is open the viewport takes no input at all, so a press, a drag or the wheel over a menu or
 beside it never reaches the model or the camera.
@@ -39,7 +43,7 @@ group a hole cuts at any depth, grown by its clearance.
 
 ## Files
 
-A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 3`, the format
+A document is saved as plain text in `sh.sysl.tekton.files`: HOCON whose first line is `tekton = 2` (or `3` when it holds an intersection, a hollow shell or Rigid off), the format
 version, read by itself before anything else, so a newer format is told "too new" whatever else it holds. It
 holds the tree, `next` (the id the next node gets) and `last` (what the next shape is placed beside). Meshes are
 derived, and the selection and the history belong to a session. Every number is written as the shortest text
@@ -131,8 +135,11 @@ Everything runs without a window, so a test or an agent can use the application 
   - `GET /tekton/state` answers one line of JSON: `items` (the document's tree: each node's `id`, `kind`,
     `hole`, `position`, `size` in millimetres along its own axes, `rotation` as `[w,x,y,z]`, for a round shape
     its `segments`, for one with a hole clearance its `clearance`, for a box or cylinder with finished edges its
-    `edge_radius` and (chamfered) `edge_style`, and for a group its `children`), `selection` (ids, in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`,
-    `fov`), `file` (the path, or `null`), `dirty` and `rigid`. A number JSON cannot spell is `null`.
+    `edge_radius` and (chamfered) `edge_style`, for a polygon prism its `sides`, for a tube its `tube_wall`, for an
+    intersection `mode`, for a hollow node `wall` and `open_top`, and for a group its `children`), `selection` (ids,
+    in the order chosen), `camera` (`target`, `distance`, `yaw`, `tilt`, `fov`, `projection` as `perspective` or
+    `orthographic`, and `view`: the named view it is at or turning to, or `custom`), `file` (the path, or `null`),
+    `dirty` and `rigid`. A number JSON cannot spell is `null`.
   - `POST /tekton/quit` quits at once, asking nothing about unsaved changes, so a session nobody can answer
     can be ended; the answer is sent, and the program exits on the next frame. A `GET` of it is refused.
     The window's own close still asks.
@@ -213,16 +220,38 @@ their own tests, so most changes never need the whole application linked or a wi
      pushed further in. Duplicate and Array push a set of copies that would overlap on by further steps (a grid
      step, the spacing, the angle) until clear, and the next set follows it; where no step clears it (no
      spacing, or a ring turning a thing in its own place) the command is refused and says to turn Rigid off.
-     Mirror and Align, being explicit, may overlap, as may turning a hole back into a solid. Toggling Rigid is
-     one undo step, a change to save, and `/tekton/state` says `rigid`.
+     Paste pushes its copies on the same way, and the arrow keys stop at contact as a drag does. Mirror, Align and
+     Split, being explicit, may overlap or touch (Split's halves meet along the cut and stay there), as may turning
+     a hole back into a solid. Everything collides by its own solid: an intersection by what it keeps, a tube's
+     bore lets a peg through, and a hollow shell by its walls, so a box open at the top holds what is dropped into
+     it. Toggling Rigid is one undo step, a change to save, and `/tekton/state` says `rigid`.
    - **Editing**: Cut, Copy, Paste (Cmd+X/C/V; a paste lands beside the original, a second paste beside that),
      Select All (Cmd+A), arrow keys nudge the selection one grid step in the plan (Shift: one millimetre; Up and
      Down with Cmd: along z), and Shift+drag on empty space selects every item its rectangle touches.
-   - **Combining**: a group can be a Union (today's), or an Intersection (only what all its solids share);
-     Split cuts the selection in two along a plane through its middle; Hollow turns a solid into a shell of a
-     given wall thickness, open at the top or closed.
-   - **Shapes**: wedge, pyramid, tube (wall thickness), half sphere, polygon prism (3–64 sides), each with the
+   - **Combining is done**: a group is a Union (the default) or an Intersection, which keeps only what all its
+     solids share, its holes then cutting that (the order makes no difference: cutting each part first leaves the
+     same). Edit → Intersect (Cmd+Shift+I) groups the selection as one; a group's panel has a Union / Intersect pair.
+     One whose solids share nothing is refused, by name, as a group cut away entirely is. Arrange → Split X/Y/Z cuts
+     each selected thing the plane through the middle of the selection's box passes through, square to that axis;
+     each half is a group of the thing and a box-shaped hole that cuts the other half off, so a half is anything a
+     group can be and ungroups back to the whole thing and its cutter (a hole is halved into hole halves, its
+     clearance spent on its transform). Arrange → Hollow… (a panel: wall 0.4–20 mm, Closed or Open top) makes each
+     selected solid a shell; the wall is the node's, so its panel has a "Shell wall, mm" field (0 fills it again) and a
+     Closed / Open top pair, and a resize rebuilds it keeping the wall. A box, cylinder, sphere or cone builds its
+     cavity exactly (moved in by the wall, rounds and chamfers with it, a cone's slope parallel); a torus, wedge,
+     pyramid, tube, half sphere, polygon prism or group is eroded by a ball (Minkowski difference; about a second for
+     a torus); a tube's shell is made inside its own wall, which stays the tube's. Open carries the cavity straight up
+     through the node's own top. A wall that leaves no room is refused. Each command is one undo step; the file
+     says `mode = intersect`, `wall` and `open_top` (format 3, written only when used); `/tekton/state` reports
+     `mode`, `wall` and `open_top`.
+   - **Shapes**: wedge, pyramid, tube (its own wall thickness: "Tube wall, mm", `tube_wall` in the file and in
+     `/tekton/state`, apart from a shell's `wall`), half sphere, polygon prism (3–64 sides), each with the
      fields its shape needs, and text (a line of characters, font size, depth) once its kerning is settled.
+   - **Interface redesign**: the shape library on the left as icon tiles (a drawn glyph and a short label)
+     in collapsible groups — Basic, More, Threads & Text, Imported; on the right the object list above the
+     selection's properties; along the top, under the menus, a toolbar of icon buttons with tooltips (undo,
+     redo, group, ungroup, align, mirror, Rigid, snap step); a status line along the bottom for the hints the
+     panel prints today. Both side panels' widths are dragged, and remembered. The viewport keeps the middle.
    - **Object list**: a panel naming every top-level item (renamable), with hide, show and lock; a hidden item
      is not drawn, picked or exported; a locked one cannot be selected by a click in the viewport.
    - **Workplane**: a new shape is placed on the face under the pointer, standing on it; a Workplane tool
@@ -232,7 +261,29 @@ their own tests, so most changes never need the whole application linked or a wi
    - **Views**: Top, Front, Right and Home views, perspective or orthographic, and a view cube in the corner.
    - **Files**: import STL, OBJ and 3MF as mesh shapes (moved, turned, scaled, grouped and cut like any
      other), import an SVG's outlines extruded to a depth, export OBJ, and a colour per item carried into 3MF.
-   - **Sketching**: on the workplane, draw a closed profile from lines, rectangles, circles and arcs with
-     typed lengths; Extrude it to a height or Revolve it about an axis by an angle. The result is a shape like
-     any other that keeps its profile, so it can be opened and edited again.
+   - **Threads**: a thread shape, outside (a bolt, a bottle's neck) or inside (a nut, a lid), from a diameter,
+     a pitch, a length and a profile (ISO metric, or a rounder container thread), with a clearance so a lid
+     printed with an inside thread fits a neck printed with the matching outside one. It is a shape like any
+     other, so it is grouped with a cylinder to make a neck, or with a hole to make a lid.
+   - **Section view**: View → Section cuts the view (not the model) along a plane the user drags, so the walls,
+     the fit of a lid and the inside of a hollow are seen in cross-section, the cut faces filled.
+   - **Push/pull**: dragging a flat face of a shape moves that face along its normal, lengthening or
+     shortening the shape on that side only, the opposite face staying where it was.
+   - **Printability check**: View → Check for Printing marks walls thinner than the nozzle allows, overhangs
+     steeper than the printer bridges without support, and parts too small to print, from the `Printer` value.
+   - **Sketching**: on the workplane, draw a closed profile from lines, rectangles, circles, arcs and spline
+     curves with typed lengths; Extrude it to a height (straight or tapered) or Revolve it about an axis by an
+     angle, or Loft between two profiles on parallel planes. The result is a shape like any other that keeps
+     its profiles, so it can be opened and edited again. **Edit Profile** turns a round shape (cylinder, cone,
+     sphere, half sphere, tube, polygon prism) into the sketch that makes it, so a body started from the palette
+     can be given a curved, waisted or flared side without being rebuilt.
+   - **Edit Mesh**: any item (a shape, a group, an import) can be turned into an editable mesh, a kind of item
+     like any other: grouped, cut by holes, arrayed, mirrored, saved. Opened for editing, its vertices, edges
+     and faces are selected and moved with the same handles, snapping and typed values as items, and faces are
+     extruded and inset, edge loops cut, and edges bevelled. **It stays printable by construction**: every edit
+     is checked for a closed, non-self-intersecting surface, and one that would break it is refused with the
+     reason, rather than left for the slicer to find.
+   - **Smooth**: an editable mesh can be smoothed by subdivision (levels 0–4), its edited cage staying the
+     thing that is edited, so organic shapes, a grip that fits a hand, are made by shaping a rough cage. Edges
+     can be marked sharp so a smooth body keeps a crisp rim.
 8. nex scripting.

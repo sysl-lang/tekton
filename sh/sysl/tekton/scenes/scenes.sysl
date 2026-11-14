@@ -3,16 +3,19 @@ module sh.sysl.tekton.scenes
 // The documents `--demo` and `--holes` start with, for a first look, a screenshot or an export.
 
 import sh.sysl.quaternion.Quaternion
-import sh.sysl.tekton.document.{Document, PRIMITIVES, Primitive, Transform}
+import sh.sysl.tekton.document.{Document, Primitive, Transform}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf}
 
-// One of each shape in a row, in the palette's order, the row centred on the bed so every shape stands on it,
+// The shapes the demo scene shows: the palette's first five, which the scene's screenshot was made with.
+val DEMO_PRIMITIVES = [Primitive.Box, Primitive.Cylinder, Primitive.Sphere, Primitive.Cone, Primitive.Torus]
+
+// One of each of these shapes in a row, in the palette's order, the row centred on the bed so every shape stands on it,
 // and the second selected.
 add_demo_scene(doc: &Document)
     var ids: Buf[int] = buf()
 
-    for p in PRIMITIVES do ids.push(doc.add_shape(p))
+    for p in DEMO_PRIMITIVES do ids.push(doc.add_shape(p))
 
     var row = doc.bounds_of(doc.find(ids[0]).unwrap())
 
