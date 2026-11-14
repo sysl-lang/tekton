@@ -413,3 +413,22 @@ private the_state_route_reports_outside_volume()
     assert(body.contains("\"outside_volume\":true"), body)
     assert(sysl.encoding.json.parse(body).is_ok(), "still JSON")
 end the_state_route_reports_outside_volume
+
+@test
+private the_new_shapes_report_their_kind_sides_and_wall()
+    val w = new_workspace()
+    val prism = put(w, Primitive.PolygonPrism, Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+    val tube = put(w, Primitive.Tube, Vec3(40.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+    val half = put(w, Primitive.HalfSphere, Vec3(80.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0))
+
+    w.doc.set_sides(prism, 9).unwrap()
+    w.doc.set_wall(tube, 3.0).unwrap()
+
+    val text = report(w)
+
+    assert(text.contains("\"kind\":\"polygon_prism\",\"hole\":false,\"position\":[0,0,0],\"size\":[19.39"), text)
+    assert(text.contains("\"rotation\":[1,0,0,0],\"sides\":9}"), text)
+    assert(text.contains("\"segments\":64,\"wall\":3}"), text)
+    assert(text.contains("\"kind\":\"half_sphere\",\"hole\":false,\"position\":[80,0,0],\"size\":[20,20,10]"), text)
+    assert(sysl.encoding.json.parse(text).is_ok(), "valid json")
+    assert(half > 0, "added")

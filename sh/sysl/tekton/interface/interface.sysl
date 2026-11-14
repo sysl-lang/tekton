@@ -885,9 +885,15 @@ struct Workspace
 
         parts.push(text("Shapes"))
 
-        for p in PRIMITIVES
-            parts.push(button(primitive_name(p), () -> self.add(p), Role.Primary, Variant.Soft)
-                .named(s"palette.${primitive_key(p)}"))
+        // Two to a row, so ten shapes take the height of five.
+        for i in 0..<PRIMITIVES.len / 2
+            var pair: Buf[&View] = buf()
+
+            for p in [PRIMITIVES[2 * i], PRIMITIVES[2 * i + 1]]
+                pair.push(button(if p == Primitive.PolygonPrism then "Polygon" else primitive_name(p), () -> self.add(p),
+                                 Role.Primary, Variant.Soft).named(s"palette.${primitive_key(p)}").frame(84, 33))
+
+            parts.push(row(pair.view(), 6))
 
         parts.push(row([self.small_button("Undo", () -> self.undo(), "undo", self.doc.can_undo).flex(),
                         self.small_button("Redo", () -> self.redo(), "redo", self.doc.can_redo).flex()], 6))
