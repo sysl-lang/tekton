@@ -4,7 +4,7 @@ import sh.sysl.manifold.{Manifold, circle, cube, cylinder, sphere, batch, batch_
                          hull_of_points, hull_points, square, Vec2, Vec3 as KernelVec3, Op}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.space.{Aabb, Mat4, Vec3, vec3}
-import sysl.buf.{Buf, buf}
+import sysl.buf.{Buf, buf, Frozen}
 import sysl.container.{Set, set}
 import sysl.math.{max, min}
 import sysl.text.{replace_all, to_lower}
@@ -324,7 +324,10 @@ struct Node
 
     // How this node's own solid is hollowed, after its parts are combined and before its transform places it.
     shell: Shell
-    children: Buf[&Node]
+
+    // Frozen, so a node made from this one shares them and nothing can grow or replace them: a committed
+    // document, and the undo history holding it, stays exactly as it was committed.
+    children: &Frozen[&Node]
     derived: &Derived
 
     // The solid in its parent's space, and the box of the triangles where they land.
@@ -454,7 +457,7 @@ struct Node
     // This node made of other children, so nothing derived from the old ones holds.
     private with_children(&self, children: Buf[&Node]) -> &Node =
         Node(self.id, self.operation, self.transform, self.mirror, self.tint, self.hole, self.clearance, self.shell,
-             children, Derived(None, None), None, None)
+             children.freeze(), Derived(None, None), None, None)
 
     // This tree with the node of `with`'s id replaced by `with`, sharing everything off the path to it; or
     // nothing, if that id is not here.
@@ -777,7 +780,7 @@ struct Document
         for item in self.items() do items.push(item)
 
         val made: &Node = Node(id, Operation.Shape(p, default_segments(p), SHARP_EDGES, TUBE_WALL), moved_to(at), NO_MIRROR,
-                               id - 1, false, 0.0, NO_SHELL, buf(), Derived(None, None), None, None)
+                               id - 1, false, 0.0, NO_SHELL, buf().freeze(), Derived(None, None), None, None)
 
         items.push(if self.rigid then made.with_transform(landed(self, made, made.transform)) else made)
         self.put_items(items)
@@ -1008,7 +1011,7 @@ struct Document
                 if tint.is_none() && !item.hole then tint = Some(item.tint)
 
         val group = Node(self.next_id, Operation.Group(intersect), moved_to(origin), NO_MIRROR, tint.unwrap(), false, 0.0,
-                         NO_SHELL, parts, Derived(None, None), None, None)
+                         NO_SHELL, parts.freeze(), Derived(None, None), None, None)
         val joined = self.local_of(group)
 
         joined.status() match
@@ -1104,7 +1107,7 @@ struct Document
 
         self.next_id += 1
 
-        Node(id, Operation.Group(false), group.transform, group.mirror, part.tint, part.hole, 0.0, NO_SHELL, inside,
+        Node(id, Operation.Group(false), group.transform, group.mirror, part.tint, part.hole, 0.0, NO_SHELL, inside.freeze(),
              Derived(None, None), None, None)
     end wrapped_part
 
@@ -1364,13 +1367,13 @@ struct Document
         parts.push(solid.with_transform(Transform(t.translation - origin, t.rotation, t.scale)))
         parts.push(Node(self.next_id, Operation.Shape(Primitive.Box, ROUND_SEGMENTS, SHARP_EDGES, TUBE_WALL),
                         Transform(cutter_at, Quaternion.identity(), cutter_scale), NO_MIRROR, thing.tint, true, 0.0,
-                        NO_SHELL, buf(), Derived(None, None), None, None))
+                        NO_SHELL, buf().freeze(), Derived(None, None), None, None))
 
         val id = self.next_id + 1
 
         self.next_id += 2
 
-        Node(id, Operation.Group(false), moved_to(origin), NO_MIRROR, thing.tint, thing.hole, 0.0, NO_SHELL, parts,
+        Node(id, Operation.Group(false), moved_to(origin), NO_MIRROR, thing.tint, thing.hole, 0.0, NO_SHELL, parts.freeze(),
              Derived(None, None), None, None)
     end half
 
@@ -1561,7 +1564,7 @@ struct Document
 
         val same = t == node.transform
 
-        Node(id, node.operation, t, node.mirror, node.tint, node.hole, node.clearance, node.shell, parts,
+        Node(id, node.operation, t, node.mirror, node.tint, node.hole, node.clearance, node.shell, parts.freeze(),
              node.derived_at(t),
              if same then node.solid else None, if same then node.bounds else None)
     end fresh_copy
@@ -1973,7 +1976,7 @@ new_document(next_revision: int = 1, rigid: bool = true) -> &Document =
 // **`next_revision` goes on from the document this one replaces**, because a renderer knows a mesh by its node's
 // id and its revision, and a new document's first shape has the id an old one's did.
 restored_document(items: Buf[&Node], next_id: int, last_placed: Option[int], next_revision: int, rigid: bool = true) -> &Document
-    val root = Node(0, Operation.Group(false), identity_transform(), NO_MIRROR, 0, false, 0.0, NO_SHELL, items,
+    val root = Node(0, Operation.Group(false), identity_transform(), NO_MIRROR, 0, false, 0.0, NO_SHELL, items.freeze(),
                     Derived(None, None),
                     None, None)
 
@@ -1985,13 +1988,13 @@ end restored_document
 restored_shape(id: int, p: Primitive, t: Transform, tint: int, hole: bool, segments: int = ROUND_SEGMENTS,
                mirror: Mirror = NO_MIRROR, clearance: real = 0.0, edges: Edges = SHARP_EDGES,
                wall: real = TUBE_WALL, shell: Shell = NO_SHELL) -> &Node =
-    Node(id, Operation.Shape(p, segments, edges, wall), t, mirror, tint, hole, clearance, shell, buf(), Derived(None, None),
+    Node(id, Operation.Shape(p, segments, edges, wall), t, mirror, tint, hole, clearance, shell, buf().freeze(), Derived(None, None),
          None, None)
 
 // A group as a file says it.
 restored_group(id: int, t: Transform, tint: int, hole: bool, parts: Buf[&Node], mirror: Mirror = NO_MIRROR,
                intersect: bool = false, shell: Shell = NO_SHELL) -> &Node =
-    Node(id, Operation.Group(intersect), t, mirror, tint, hole, 0.0, shell, parts, Derived(None, None), None, None)
+    Node(id, Operation.Group(intersect), t, mirror, tint, hole, 0.0, shell, parts.freeze(), Derived(None, None), None, None)
 
 // What makes a tree what it is, as text.
 private model_text(node: &Node) -> string = node.model()
