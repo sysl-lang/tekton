@@ -10,13 +10,40 @@ the_defaults_are_the_layout_the_window_opens_with()
     assert_eq(s.library_width, 230)
     assert_eq(s.inspector_width, 260)
     assert_eq(s.objects_height, 200)
+    assert(s.scheme == Scheme.System, "the appearance follows the system")
 
 @test
 written_settings_read_back_the_same()
-    val s = Settings(300, 340, 150)
+    val s = Settings(300, 340, 150, Scheme.Dark)
 
     assert(parse_settings(settings_text(s)) == s, "round trip")
-    assert_eq(settings_text(s), "library_width = 300\ninspector_width = 340\nobjects_height = 150\n")
+    assert_eq(settings_text(s), "library_width = 300\ninspector_width = 340\nobjects_height = 150\nappearance = dark\n")
+
+@test
+each_appearance_reads_back_as_itself()
+    for scheme in [Scheme.System, Scheme.Light, Scheme.Dark]
+        val s = Settings(230, 260, 200, scheme)
+
+        assert(parse_settings(settings_text(s)) == s, scheme_word(scheme))
+        assert(parse_scheme(scheme_word(scheme)) == Some(scheme), "the word names it")
+
+    assert(parse_scheme("Dark").is_none(), "the words are lower case")
+    assert(parse_scheme("").is_none(), "nothing names nothing")
+
+@test
+a_file_written_before_there_was_an_appearance_follows_the_system()
+    val s = parse_settings("library_width = 300\ninspector_width = 340\nobjects_height = 150\n")
+
+    assert(s == Settings(300, 340, 150, Scheme.System), "the widths, and the system's appearance")
+
+@test
+an_appearance_it_does_not_know_is_the_system_and_leaves_the_rest()
+    val s = parse_settings("appearance = purple\nlibrary_width = 300\n")
+
+    assert(s.scheme == Scheme.System, "unknown")
+    assert_eq(s.library_width, 300)
+    assert(parse_settings("appearance = light\nappearance = 5\n").scheme == Scheme.Light, "a number is not a scheme")
+    assert(parse_settings("  appearance=dark  \n").scheme == Scheme.Dark, "spaces")
 
 @test
 a_key_left_out_keeps_its_default()
@@ -60,7 +87,7 @@ a_missing_or_unreadable_file_gives_the_defaults()
 saving_makes_the_folder_and_loading_reads_it_back()
     val dir = make_temp_dir("tekton-settings").unwrap()
     val file = join(join(join(dir, "Application Support"), "Tekton"), "settings")
-    val s = Settings(200, 400, 120)
+    val s = Settings(200, 400, 120, Scheme.Light)
 
     assert(save_settings(file, s).is_ok(), "saved")
     assert(load_settings(file) == s, "read back")

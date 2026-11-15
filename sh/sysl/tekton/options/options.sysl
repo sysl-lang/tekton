@@ -2,6 +2,7 @@ module sh.sysl.tekton.options
 
 // The command line: what `tekton` was asked to open and how to run it.
 
+import sh.sysl.tekton.settings.{Scheme, parse_scheme}
 import sysl.text.{parse_int, parse_real}
 
 struct Options
@@ -21,6 +22,9 @@ struct Options
 
     // Where to write the document as STL or 3MF, chosen by the extension, instead of opening a window.
     export: string
+
+    // The appearance to draw in over what the settings file says, or nothing to take the file's.
+    appearance: Option[Scheme]
 end Options
 
 // `WxH`, if it is that.
@@ -43,7 +47,7 @@ end parse_view
 
 // The options in `args`, whose first is the program's own name; or what is wrong with them.
 parse_options(args: []const string) -> Result[Options, string]
-    var o = Options("", 1280, 800, false, false, "", None, "", "", "", false, "")
+    var o = Options("", 1280, 800, false, false, "", None, "", "", "", false, "", None)
     var i = 1
 
     while i < args.len
@@ -86,6 +90,11 @@ parse_options(args: []const string) -> Result[Options, string]
                 if i >= args.len then return Err("--export takes a file")
 
                 o.export = args[i]
+            "--appearance" ->
+                i += 1
+                if i >= args.len then return Err("--appearance takes system, light or dark")
+
+                o.appearance = Some(parse_scheme(args[i]).ok_or(s"not an appearance: ${args[i]}")?)
             other ->
                 if other.starts_with("--") then return Err(s"unknown option: ${other}")
 

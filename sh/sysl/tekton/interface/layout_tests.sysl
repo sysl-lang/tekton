@@ -4,7 +4,7 @@ module sh.sysl.tekton.interface
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.document.{Edge, PRIMITIVES, Primitive, Transform, primitive_key}
 import sh.sysl.tekton.settings.{MAX_INSPECTOR_WIDTH, MAX_LIBRARY_WIDTH, MAX_OBJECTS_HEIGHT, MIN_INSPECTOR_WIDTH,
-                                MIN_LIBRARY_WIDTH, MIN_OBJECTS_HEIGHT, Settings, default_settings, load_settings}
+                                MIN_LIBRARY_WIDTH, MIN_OBJECTS_HEIGHT, Scheme, Settings, default_settings, load_settings}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
 import sysl.buf.{Buf, buf}
@@ -464,7 +464,7 @@ the_viewport_sits_between_the_panels_at_their_widths()
     assert_eq(r.x, default_settings().library_width + 1, "after the library")
     assert_eq(SCREEN.w - (r.x + r.w), default_settings().inspector_width + 1, "before the right-hand column")
 
-    w.use_settings(Settings(300, 320, 150), "")
+    w.use_settings(Settings(300, 320, 150, Scheme.System), "")
 
     val wider = look(w, &c, SCREEN).find("viewport").unwrap().rect
 
@@ -515,7 +515,7 @@ dragged_widths_are_written_once_they_settle_and_read_back()
     val again = new_workspace()
 
     again.use_settings(load_settings(file), file)
-    assert(again.layout_settings() == Settings(310, 300, 120), "the next launch opens as it was left")
+    assert(again.layout_settings() == Settings(310, 300, 120, Scheme.System), "the next launch opens as it was left")
     remove_dir_all(dir).unwrap()
 
 @test
@@ -524,7 +524,7 @@ a_workspace_with_no_settings_file_writes_nothing()
 
     w.library_width.set(300)
     w.next_frame(5.0)
-    assert(w.remembered == Settings(300, 260, 200), "taken as remembered, with nowhere to write it")
+    assert(w.remembered == Settings(300, 260, 200, Scheme.System), "taken as remembered, with nowhere to write it")
 
 // The window's draggable rules, left to right across it and then the one under the object list.
 private rules(w: &Workspace, c: *Recorder, at: Rect) -> (Rect, Rect, Rect)

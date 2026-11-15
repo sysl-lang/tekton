@@ -1,0 +1,232 @@
+module sh.sysl.tekton.interface
+@tests
+
+import sh.sysl.tekton.document.Primitive
+import sh.sysl.tekton.settings.{Scheme, default_settings, load_settings}
+import sh.sysl.tekton.space.Vec3
+import sh.sysl.ui.*
+import sh.sysl.ui_sdl.Appearance
+import sysl.fs.{make_temp_dir, remove_dir_all}
+import sysl.path.join
+
+// The window drawn light, dark, or as the system is set: the choice, the View menu's three rows, and every colour
+// the window paints for itself following it.
+
+private val WHOLE: Rect = Rect(0, 0, 1280, 800)
+private val VIEW: Rect = Rect(0, 0, 900, 600)
+private val FIELD: Rect = Rect(0, 0, 52, 30)
+
+private tap(w: &Workspace, c: *Recorder, name: string)
+    val v = w.tree()
+
+    c.taps.reset()
+    render(v, c, WHOLE)
+
+    val (x, y) = snapshot(v, c, WHOLE).click_point(name).unwrap()
+
+    c.point(x, y, true)
+    render(w.tree(), c, WHOLE)
+    c.release(x, y)
+    render(w.tree(), c, WHOLE)
+end tap
+
+private choose(w: &Workspace, c: *Recorder, label: string)
+    tap(w, c, "menu.View")
+    tap(w, c, s"menu.View.${label}")
+
+// Which of the View menu's three appearance rows carry a tick, read with the menu open and leaving it closed.
+private ticks(w: &Workspace, c: *Recorder) -> (bool, bool, bool)
+    assert(w.show_menu("View"), "a View menu")
+
+    val v = w.tree()
+
+    render(v, c, WHOLE)
+
+    val s = snapshot(v, c, WHOLE)
+    val on = (label: string) -> s.find(s"menu.View.${label} Appearance").unwrap().marks.index_of("checked").is_some()
+    val all = (on("System"), on("Light"), on("Dark"))
+
+    w.open_menu.set(NO_MENU)
+    all
+end ticks
+
+// The whole window's paint.
+private painted(w: &Workspace) -> string
+    var c = recorder()
+
+    render(w.tree(), &c, WHOLE)
+    c.dump()
+end painted
+
+private drawn_dark(w: &Workspace) -> bool
+    val paint = painted(w)
+
+    paint.contains(s"#${dark().panel}") && !paint.contains(s"#${light().panel}")
+end drawn_dark
+
+private drawn_light(w: &Workspace) -> bool
+    val paint = painted(w)
+
+    paint.contains(s"#${light().panel}") && !paint.contains(s"#${dark().panel}")
+end drawn_light
+
+// How bright a colour looks, 0 to 255, weighting the channels as the eye does.
+private brightness(c: u32) -> int =
+    (int((c >> 16) & 0xFF) * 299 + int((c >> 8) & 0xFF) * 587 + int(c & 0xFF) * 114) / 1000
+
+private apart(a: u32, b: u32) -> int
+    val d = brightness(a) - brightness(b)
+
+    if d < 0 then -d else d
+end apart
+
+@test
+each_setting_chooses_its_look_on_either_system()
+    assert(look_for(Scheme.Light, Appearance.Light) == LIGHT_LOOK, "light, on a light system")
+    assert(look_for(Scheme.Light, Appearance.Dark) == LIGHT_LOOK, "light, on a dark system")
+    assert(look_for(Scheme.Dark, Appearance.Light) == DARK_LOOK, "dark, on a light system")
+    assert(look_for(Scheme.Dark, Appearance.Dark) == DARK_LOOK, "dark, on a dark system")
+    assert(look_for(Scheme.System, Appearance.Light) == LIGHT_LOOK, "the system's, light")
+    assert(look_for(Scheme.System, Appearance.Dark) == DARK_LOOK, "the system's, dark")
+    assert(LIGHT_LOOK.theme == light() && DARK_LOOK.theme == dark(), "in the two themes")
+
+@test
+the_light_look_paints_what_the_window_always_painted()
+    assert_eq(LIGHT_LOOK.wrong, 0xD92D20u32, "a mistake")
+    assert_eq(LIGHT_LOOK.mark_back, 0xFFFFFFu32, "a mark's label")
+    assert_eq(LIGHT_LOOK.mark_edge, 0xC9D1DCu32, "its edge")
+    assert_eq(LIGHT_LOOK.mark_ink, 0x1F2937u32, "its words")
+    assert_eq(LIGHT_LOOK.clear, 0xDDE2E9u32, "the window's ground")
+
+@test
+every_colour_of_the_dark_look_is_its_own_and_reads_on_its_ground()
+    for (l, d) in [(LIGHT_LOOK.wrong, DARK_LOOK.wrong), (LIGHT_LOOK.mark_back, DARK_LOOK.mark_back),
+                   (LIGHT_LOOK.mark_edge, DARK_LOOK.mark_edge), (LIGHT_LOOK.mark_ink, DARK_LOOK.mark_ink),
+                   (LIGHT_LOOK.clear, DARK_LOOK.clear)]
+        assert(l != d, s"#${d} is not the light #${l}")
+
+    for look in [LIGHT_LOOK, DARK_LOOK]
+        assert(apart(look.wrong, look.theme.panel) >= 90, s"a mistake reads on the status line: #${look.wrong}")
+        assert(apart(look.wrong, look.theme.ground) >= 90, s"and on a dialog: #${look.wrong}")
+        assert(apart(look.mark_ink, look.mark_back) >= 150, s"a mark's words read on its label: #${look.mark_ink}")
+        assert(apart(look.clear, look.theme.ink) >= 150, s"the window's ground is the theme's side: #${look.clear}")
+
+@test
+the_window_follows_the_system_until_an_appearance_is_chosen()
+    val w = new_workspace()
+
+    assert(w.scheme == Scheme.System, "the system's, to begin with")
+
+    w.system = () -> Appearance.Dark
+    assert(drawn_dark(w), "dark, while the system is")
+    assert(w.look().clear == DARK_LOOK.clear, "on a dark ground")
+
+    w.system = () -> Appearance.Light
+    assert(drawn_light(w), "light again as soon as the system is")
+
+    w.choose_scheme(Scheme.Dark)
+    assert(drawn_dark(w), "dark when chosen, on a light system")
+
+    w.system = () -> Appearance.Dark
+    w.choose_scheme(Scheme.Light)
+    assert(drawn_light(w), "light when chosen, on a dark system")
+    assert(w.look().clear == LIGHT_LOOK.clear, "on a light ground")
+
+@test
+the_view_menu_ticks_the_appearance_in_use_and_choosing_one_writes_it()
+    val dir = make_temp_dir("tekton-appearance").unwrap()
+    val file = join(join(dir, "Tekton"), "settings")
+    val w = new_workspace()
+    var c = recorder()
+
+    w.system = () -> Appearance.Light
+    w.use_settings(default_settings(), file)
+    assert(ticks(w, &c) == (true, false, false), "the system's")
+
+    choose(w, &c, "Dark Appearance")
+    assert(w.scheme == Scheme.Dark, "dark")
+    assert(ticks(w, &c) == (false, false, true), "only dark is ticked")
+    assert(load_settings(file).scheme == Scheme.Dark, "written straight away")
+    assert(drawn_dark(w), "and drawn")
+
+    choose(w, &c, "Light Appearance")
+    assert(ticks(w, &c) == (false, true, false), "only light is ticked")
+    assert(load_settings(file).scheme == Scheme.Light, "written")
+
+    w.system = () -> Appearance.Dark
+    assert(drawn_light(w), "light although the system is dark")
+
+    choose(w, &c, "System Appearance")
+    assert(ticks(w, &c) == (true, false, false), "back to the system's")
+    assert(load_settings(file).scheme == Scheme.System, "written")
+    assert(drawn_dark(w), "which is dark now")
+
+    w.choose_scheme(Scheme.Dark)
+
+    val again = new_workspace()
+
+    again.use_settings(load_settings(file), file)
+    assert(again.scheme == Scheme.Dark, "the next launch opens in the appearance it was left in")
+    remove_dir_all(dir).unwrap()
+
+@test
+a_refused_number_and_its_words_are_in_the_dark_red_under_dark()
+    val w = new_workspace()
+    var c = recorder()
+
+    w.choose_scheme(Scheme.Dark)
+    w.doc.add_shape(Primitive.Box)
+
+    val f = w.number_fields()[3]
+
+    render(f.view(), &c, FIELD)
+    c.take_focus(f.id)
+    render(f.view(), &c, FIELD)
+    f.text.set("abc")
+    c.key(press(Key.Enter))
+    render(f.view(), &c, FIELD)
+    assert(f.wrong, "refused")
+    render(f.view(), &c, FIELD)
+    assert(c.dump().contains(s"stroke 0,0 52x30 #${DARK_LOOK.wrong} w2"), "outlined in the dark red")
+    assert(!c.dump().contains(s"#${LIGHT_LOOK.wrong}"), "not the light one")
+
+    val paint = painted(w)
+
+    assert(paint.contains(s"ink #${DARK_LOOK.wrong}"), "the status line says it in the dark red")
+    assert(!paint.contains(s"#${LIGHT_LOOK.wrong}"), "and nowhere in the light one")
+
+    for dialog in [w.array_open, w.hollow_open]
+        dialog.set(true)
+
+        val shown = painted(w)
+
+        assert(shown.contains(s"'${w.problem.read()}'"), "the dialog repeats the words")
+        assert(!shown.contains(s"#${LIGHT_LOOK.wrong}"), "in the dark red too")
+        dialog.set(false)
+
+    w.choose_scheme(Scheme.Light)
+    assert(painted(w).contains(s"ink #${LIGHT_LOOK.wrong}"), "and in the light red under light")
+
+@test
+the_marks_over_the_viewport_are_on_labels_of_the_look()
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+    val b = w.doc.add_shape(Primitive.Box)
+
+    w.doc.move_to(b, w.doc.find(a).unwrap().transform.translation + Vec3(30.0, 0.0, 0.0)).unwrap()
+    w.doc.toggle_selected(a)
+
+    for (scheme, look, other) in [(Scheme.Dark, DARK_LOOK, LIGHT_LOOK), (Scheme.Light, LIGHT_LOOK, DARK_LOOK)]
+        var c = recorder()
+
+        w.choose_scheme(scheme)
+        render(w.dimensioned(), &c, VIEW)
+
+        val paint = c.dump()
+
+        assert(w.measured.marks.len() > 0, "there are marks")
+        assert(paint.contains(s"#${look.mark_back} r3"), s"on the look's label: #${look.mark_back}")
+        assert(paint.contains(s"#${look.mark_edge} w1 r3"), s"in the look's edge: #${look.mark_edge}")
+        assert(paint.contains(s"ink #${look.mark_ink}"), s"in the look's words: #${look.mark_ink}")
+        assert(!paint.contains(s"#${other.mark_back} r3"), s"not on the other's label: #${other.mark_back}")
+        assert(!paint.contains(s"#${other.mark_edge}"), s"nor in its edge: #${other.mark_edge}")

@@ -15,10 +15,11 @@ import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.glyphs.*
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
 import sh.sysl.tekton.settings.{MAX_INSPECTOR_WIDTH, MAX_LIBRARY_WIDTH, MAX_OBJECTS_HEIGHT, MIN_INSPECTOR_WIDTH, MIN_LIBRARY_WIDTH,
-                                MIN_OBJECTS_HEIGHT, Settings, default_settings, save_settings}
+                                MIN_OBJECTS_HEIGHT, Scheme, Settings, default_settings, save_settings}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
-import sh.sysl.ui_sdl.{VIEWPORT_COLOR_FORMAT, Viewport, set_title, stop, viewport, viewport_depth_format, window}
+import sh.sysl.ui_sdl.{Appearance, VIEWPORT_COLOR_FORMAT, Viewport, appearance, set_title, stop, viewport, viewport_depth_format,
+                       window}
 import sysl.buf.{Buf, buf}
 import sysl.math.{max, min}
 import sysl.path.file_name
@@ -54,10 +55,30 @@ val VIEW_KEYS: [6]NamedView = [NamedView.Home, NamedView.Top, NamedView.Front, N
 const NUMBER_WIDTH: int = 52
 const FIRST_FIELD_ID: int = 100
 
-const WRONG_INK: u32 = 0xD92D20u32
+// How the window looks in one appearance: the theme the panels, the toolbar and the status line are drawn in,
+// whose surfaces and rules they take, and the colours the window paints for itself, which no theme names: what
+// a mistake is written and outlined in, the labels of the measurements over the viewport, and the window's own
+// ground behind everything.
+struct Look derives Eq
+    theme: Theme
+    wrong: u32
+    mark_back: u32
+    mark_edge: u32
+    mark_ink: u32
+    clear: u32
+end Look
 
-// The theme the panels, the toolbar and the status line are drawn in, whose surfaces and rules they take.
-val CHROME = light()
+val LIGHT_LOOK = Look(light(), 0xD92D20u32, 0xFFFFFFu32, 0xC9D1DCu32, 0x1F2937u32, 0xDDE2E9u32)
+
+// A brighter red than the light one, since a dark red on a dark panel is the one mistake nobody would see.
+val DARK_LOOK = Look(dark(), 0xF97066u32, 0x22262Fu32, 0x3A3F4Bu32, 0xE6E8EFu32, 0x1C2030u32)
+
+// The look a scheme gives where the system is set to `system`: the one it names, or the system's own.
+look_for(scheme: Scheme, system: Appearance) -> Look =
+    scheme match
+        Light -> LIGHT_LOOK
+        Dark -> DARK_LOOK
+        System -> if system == Appearance.Dark then DARK_LOOK else LIGHT_LOOK
 
 // How long a dragged panel width must stand before it is written to the settings file, in seconds.
 const SETTLE_SECONDS: real = 0.5
@@ -250,6 +271,11 @@ struct Workspace
     remembered: Settings
     unsettled: real
 
+    // Which appearance the window is drawn in, and how the system is set, asked each time it is drawn so that a
+    // change in System Settings is followed at once.
+    scheme: Scheme
+    system: &Fn() -> Appearance
+
     // Which of the library's sections are open, and how far the object list and the inspector are scrolled.
     basic_open: &Signal[bool]
     more_open: &Signal[bool]
@@ -308,15 +334,17 @@ struct Workspace
             if self.unsettled >= SETTLE_SECONDS then self.remember_layout()
     end next_frame
 
-    // The panels' sizes as they stand.
+    // The panels' sizes and the appearance as they stand.
     layout_settings(&self) -> Settings =
-        Settings(self.library_width.read(), self.inspector_width.read(), self.objects_height.read())
+        Settings(self.library_width.read(), self.inspector_width.read(), self.objects_height.read(), self.scheme)
 
-    // Take these sizes, and remember them in this file from now on, or nowhere for an empty name.
+    // Take these sizes and this appearance, and remember them in this file from now on, or nowhere for an empty
+    // name.
     use_settings(&self, s: Settings, file: string)
         self.library_width.set(s.library_width)
         self.inspector_width.set(s.inspector_width)
         self.objects_height.set(s.objects_height)
+        self.scheme = s.scheme
         self.settings_file = file
         self.remembered = s
         self.unsettled = 0.0
@@ -332,6 +360,15 @@ struct Workspace
         self.remembered = now
         self.unsettled = 0.0
     end remember_layout
+
+    // How the window looks now: as its scheme names, or as the system is set.
+    look(&self) -> Look = look_for(self.scheme, (self.system)())
+
+    // Draw the window in this appearance from now on, and write it to the settings file straight away.
+    choose_scheme(&self, s: Scheme)
+        self.scheme = s
+        self.remember_layout()
+        self.changed()
 
     // What the window is called now.
     title(&self) -> string = window_title(self.file, self.doc.is_dirty())
@@ -1109,8 +1146,8 @@ struct Workspace
     // The viewport with the selection's marks over it.
     dimensioned(&self) -> &Dimensioned = Dimensioned(self, self.viewport())
 
-    // The whole window, in the chrome's theme.
-    tree(&self) -> &View = self.unthemed().restyle(t -> CHROME)
+    // The whole window, in the theme of its look.
+    tree(&self) -> &View = self.unthemed().restyle(t -> self.look().theme)
 
     // The whole window in whatever theme is current where it is drawn: every ground, rule and outline in it is
     // picked from that theme, so the one `restyle` in `tree` is the only place the theme is named.
@@ -1154,7 +1191,7 @@ struct Workspace
                 .named("array.spacing"))
 
         for line in split(wrapped(self.problem.read(), PROBLEM_ROOM), "\n")
-            if line != "" then parts.push(text(line).font_size(11.0).foreground(WRONG_INK))
+            if line != "" then parts.push(text(line).font_size(11.0).foreground(self.look().wrong))
 
         parts.push(row([button("Cancel", () -> self.cancel_array(), Role.Primary, Variant.Soft).named("array.cancel").flex(),
                         button("OK", () -> self.accept_array(), Role.Primary, Variant.Filled).named("array.ok").flex()], 6))
@@ -1173,7 +1210,7 @@ struct Workspace
         for i in 0..<HOLLOW_TOPS.len do parts.push(radio(self.hollow_top, int(i), HOLLOW_TOPS[i]).named(s"hollow.top.${i}"))
 
         for line in split(wrapped(self.problem.read(), PROBLEM_ROOM), "\n")
-            if line != "" then parts.push(text(line).font_size(11.0).foreground(WRONG_INK))
+            if line != "" then parts.push(text(line).font_size(11.0).foreground(self.look().wrong))
 
         parts.push(row([button("Cancel", () -> self.cancel_hollow(), Role.Primary, Variant.Soft).named("hollow.cancel").flex(),
                         button("OK", () -> self.accept_hollow(), Role.Primary, Variant.Filled).named("hollow.ok").flex()], 6))
@@ -1247,7 +1284,12 @@ struct Workspace
                                toggle("Orthographic", () -> self.toggle_orthographic(), self.camera.orthographic, "Cmd+P"),
                                separator(),
                                toggle("Build Volume", () -> self.toggle_volume(), self.show_volume),
-                               toggle("Dimensions", () -> self.toggle_dimensions(), self.show_dimensions)]))
+                               toggle("Dimensions", () -> self.toggle_dimensions(), self.show_dimensions),
+                               separator(),
+                               toggle("System Appearance", () -> self.choose_scheme(Scheme.System),
+                                      self.scheme == Scheme.System),
+                               toggle("Light Appearance", () -> self.choose_scheme(Scheme.Light), self.scheme == Scheme.Light),
+                               toggle("Dark Appearance", () -> self.choose_scheme(Scheme.Dark), self.scheme == Scheme.Dark)]))
         all
     end menus
 
@@ -1452,7 +1494,7 @@ struct Workspace
 
     // The line along the bottom: what is wrong, or else what the pointer and the keys do.
     private status_line(&self) -> &View
-        val said: &View = if self.problem.read() != "" then paragraph(self.status()).foreground(WRONG_INK)
+        val said: &View = if self.problem.read() != "" then paragraph(self.status()).foreground(self.look().wrong)
                           else paragraph(self.status())
 
         said.text_style(TextStyle.Caption).pad(top = 4, right = 12, bottom = 4, left = 12).panel(0)
@@ -1763,7 +1805,7 @@ impl View for NumberField
 
         self.field.paint(c, r)
 
-        if self.wrong then c.stroke(r, WRONG_INK, 2, c.theme().radius)
+        if self.wrong then c.stroke(r, self.owner.look().wrong, 2, c.theme().radius)
     end paint
 end NumberField
 
@@ -1771,18 +1813,18 @@ end NumberField
 mark_text(m: Mark) -> string =
     if m.gap then s"${["X", "Y", "Z"][m.axis]} gap ${format_number(m.value)}" else format_number(m.value)
 
-// A mark's label, in points: its type, the room around its words, and its colours.
+// A mark's label, in points: its type and the room around its words. Its colours are the look's.
 const MARK_FONT: real = 11.0
 const MARK_PAD: int = 3
-const MARK_BACK: u32 = 0xFFFFFFu32
-const MARK_EDGE: u32 = 0xC9D1DCu32
-const MARK_INK: u32 = 0x1F2937u32
 
-// The type the view cube's faces are named in, in points.
+// The type the view cube's faces are named in, in points, and its colour. The cube is part of the picture and
+// is drawn alike in either appearance, so its names are too.
 const CUBE_FONT: real = 10.0
+const CUBE_INK: u32 = 0x1F2937u32
 
-// The viewport with the view cube's names and the selection's marks written over it, each mark on a light label
-// of its own. They are painted after the viewport, so they land on its picture rather than in the hole cut for it.
+// The viewport with the view cube's names and the selection's marks written over it, each mark on a label of its
+// own in the look's colours. They are painted after the viewport, so they land on its picture rather than in the
+// hole cut for it.
 struct Dimensioned
     owner: &Workspace
     inner: &Viewport
@@ -1794,7 +1836,7 @@ impl View for Dimensioned
         self.inner.paint(c, r)
         c.clip(r)
         c.push_font_size(CUBE_FONT)
-        c.ink(MARK_INK)
+        c.ink(CUBE_INK)
 
         for l in view_cube(self.owner.camera, real(r.w), real(r.h)).labels.view()
             val size = c.text_size(l.words)
@@ -1808,8 +1850,10 @@ impl View for Dimensioned
         if !self.owner.show_dimensions then return
 
         c.clip(r)
+        val look = self.owner.look()
+
         c.push_font_size(MARK_FONT)
-        c.ink(MARK_INK)
+        c.ink(look.mark_ink)
 
         for m in self.owner.measured.marks.view()
             val words = mark_text(m)
@@ -1818,8 +1862,8 @@ impl View for Dimensioned
             val y = r.y + int(m.y) - size.h / 2
             val label = Rect(x - MARK_PAD, y - MARK_PAD / 2, size.w + 2 * MARK_PAD, size.h + MARK_PAD)
 
-            c.fill(label, MARK_BACK, MARK_PAD)
-            c.stroke(label, MARK_EDGE, 1, MARK_PAD)
+            c.fill(label, look.mark_back, MARK_PAD)
+            c.stroke(label, look.mark_edge, 1, MARK_PAD)
             c.text(Rect(x, y, size.w, size.h), words)
 
         c.unink()
@@ -1906,9 +1950,12 @@ end object_row
 // The rule between two of the toolbar's groups.
 private rule() -> &View = spacer().frame(1, 22).ground(t -> t.edge).pad(left = 4, right = 4)
 
+// How round a toolbar choice's corners are: as both themes round a control's.
+const CHOICE_RADIUS: int = 6
+
 // A toolbar choice's box: its buttons one under another on the ground, with an edge round it.
 private choices(cells: []const &View) -> &View =
-    column(cells, 4).padding(8).ground(t -> t.ground, CHROME.radius).outline(t -> t.edge, 1, CHROME.radius)
+    column(cells, 4).padding(8).ground(t -> t.ground, CHOICE_RADIUS).outline(t -> t.edge, 1, CHOICE_RADIUS)
 
 // A length as the toolbar writes it: "0.1 mm", "1 mm".
 millimetres(v: real) -> string =
@@ -2034,7 +2081,8 @@ new_workspace() -> &Workspace =
               signal("25"), signal("90"), true, Measures(buf(), buf()), buf(), 0, None, signal(false), signal("2"),
               signal(0),
               signal(default_settings().library_width), signal(default_settings().inspector_width),
-              signal(default_settings().objects_height), "", default_settings(), 0.0,
+              signal(default_settings().objects_height), "", default_settings(), 0.0, default_settings().scheme,
+              () -> appearance(),
               signal(true), signal(true), signal(0), signal(0),
               signal(false), signal(false), signal(false), signal(false),
               no_modifiers())

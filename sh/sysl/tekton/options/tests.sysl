@@ -1,5 +1,7 @@
 module sh.sysl.tekton.options
 
+import sh.sysl.tekton.settings.Scheme
+
 private parsed(args: []const string) -> Options = parse_options(args).unwrap()
 
 private why(args: []string) -> string
@@ -78,4 +80,14 @@ private an_option_missing_its_value_is_refused_not_read_past_the_end()
     assert_eq(why(["tekton", "--view"]), "--view takes TURN,TILT")
     assert_eq(why(["tekton", "--menu"]), "--menu takes a menu's title")
     assert_eq(why(["tekton", "--export"]), "--export takes a file")
+    assert_eq(why(["tekton", "--appearance"]), "--appearance takes system, light or dark")
 end an_option_missing_its_value_is_refused_not_read_past_the_end
+
+@test
+private appearance_names_one_of_the_three_or_is_left_to_the_settings()
+    assert(parsed(["tekton"]).appearance.is_none(), "the settings file's")
+    assert(parsed(["tekton", "--appearance", "dark"]).appearance == Some(Scheme.Dark), "dark")
+    assert(parsed(["tekton", "--appearance", "light"]).appearance == Some(Scheme.Light), "light")
+    assert(parsed(["tekton", "--demo", "--appearance", "system"]).appearance == Some(Scheme.System), "system")
+    assert_eq(why(["tekton", "--appearance", "dim"]), "not an appearance: dim")
+end appearance_names_one_of_the_three_or_is_left_to_the_settings

@@ -650,7 +650,7 @@ the_refusal_draws_a_mark_on_the_field()
 
     type_into(f, &c, "abc", Key.Enter)
     paint_field(f, &c)
-    assert(c.dump().contains(s"stroke 0,0 52x30 #${WRONG_INK} w2"), "in the colour of a mistake")
+    assert(c.dump().contains(s"stroke 0,0 52x30 #${LIGHT_LOOK.wrong} w2"), "in the colour of a mistake")
 
 @test
 leaving_a_field_sends_what_is_in_it()

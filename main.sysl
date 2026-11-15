@@ -6,6 +6,7 @@
 //     tekton --demo --shot frame.png --size 1400x900  a few frames, the last written to a PNG
 //     tekton --demo --select 3 --view 0.3,0.5         which demo shape is selected; the camera's turn and tilt
 //     tekton --demo --menu Edit                       with that menu of the bar open
+//     tekton --demo --appearance dark                 drawn dark, light, or as the system is set, as View chooses
 //     tekton --holes                                a part with a hole cut in it, and a hole not yet grouped
 //     tekton --demo --control /tmp/tekton.sock        driven over HTTP on that socket, in the window as usual
 //     tekton --demo --control /tmp/tekton.sock --hidden   the same with no window on the screen
@@ -86,7 +87,12 @@ main(args: []string) -> Result[unit, string]
             Some(f) -> w.use_settings(load_settings(f), f)
             None -> ()
 
-    val ran = run(app(w.title(), () -> w.tree(), () -> 0xDDE2E9u32, o.width, o.height, gpu = GPU_SHADERFORMAT_MSL,
+    // An appearance on the command line is chosen as the View menu chooses it.
+    o.appearance match
+        Some(scheme) -> w.choose_scheme(scheme)
+        None -> ()
+
+    val ran = run(app(w.title(), () -> w.tree(), () -> w.look().clear, o.width, o.height, gpu = GPU_SHADERFORMAT_MSL,
             control = o.control, routes = routes, hidden = o.hidden, on_event = e ->
         e.kind() match
             Quit | WindowCloseRequested ->
