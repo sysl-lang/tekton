@@ -1,0 +1,9 @@
+// A scene is a list of things that grows; can an array of structs be built and appended to?
+struct Part
+  name: string
+  mass: real<g>
+
+def main() =
+  var parts = [Part("piston", 300g)]
+  parts = [parts, [Part("rod", 450g)]]
+  print(length(parts))

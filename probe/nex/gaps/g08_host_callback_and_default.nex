@@ -1,0 +1,6 @@
+// A per-step driver handed to the host as a function, and a host function with a default.
+@host struct Sim
+@host extern def drive(s: Sim, step: integer -> real<deg>): Sim
+@host extern def translate(x: real<mm>, y: real<mm> = 0mm): real<mm>
+
+def main() = print(1)

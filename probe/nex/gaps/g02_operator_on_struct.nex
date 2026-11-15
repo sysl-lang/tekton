@@ -1,0 +1,8 @@
+// CSG with + : can a user type take an operator?
+struct V
+  x: real
+
+def main() =
+  val a = V(1.0)
+  val b = V(2.0)
+  print(a + b)

@@ -1,0 +1,7 @@
+// A mistake only a run can see: a loft with one height too few. Run from probe/nex/.
+import tekton.*
+
+def body(r: real<mm>): Solid = loft([Circle(r), Circle(0.8 * r), Circle(r)], [0mm, 50mm])
+
+def main() =
+  describe(body(30mm))

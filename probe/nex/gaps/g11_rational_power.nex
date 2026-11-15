@@ -1,0 +1,10 @@
+// A cube root of a volume, as a counterweight's size wants: `^` with a rational constant exponent
+// (spec §13.3: "a rational power is allowed (real<m^(1/2)>)").
+def main() =
+  val v = 27.0<cm^3>
+  val side: real<cm> = v^(1/3)
+  print(side)
+  val a = 16.0<mm^2>
+  print(sqrt(a))
+  print(a^(1/2))
+  print(2^(1/2))

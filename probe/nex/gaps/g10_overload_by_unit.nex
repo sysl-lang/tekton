@@ -1,0 +1,11 @@
+// Overloading one name on the unit of a parameter (spec §6.4: "Several defs may share a name if
+// their parameter types differ"; §3.17: real<mm> and real<deg> are types). And on string vs real.
+def label(v: real<mm>): string = "a length"
+def label(v: real<deg>): string = "an angle"
+
+def kind(v: real): string = "a number"
+def kind(v: string): string = "text"
+
+def main() =
+  print(label(3mm))
+  print(kind(1.0))

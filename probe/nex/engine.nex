@@ -1,0 +1,361 @@
+// A single-cylinder four-stroke engine and its inline-four variant: parametric parts, a slider-crank
+// mechanism driven through 720 degrees, a 0-D Otto cycle with Wiebe heat release, and a sweep of the
+// compression ratio.
+//
+//     nex run --interp engine.nex -- [parts | kinematics | cycle | four | sweep | all]
+
+import tekton.*
+
+// ---------------------------------------------------------------------------------------------
+// Parameters: what the inspector would show as sliders.
+
+var bore = 86mm
+var stroke = 86mm
+var rod_length = 143.5mm
+var compression = 10.0
+var head_dome = 44.0<cm^3>      // the head casting's chamber, fixed; the deck moves to suit
+var gasket = 0.9mm              // compressed thickness, bore-sized
+var spark = 20deg               // before firing TDC
+var burn = 55deg                // the Wiebe function's duration
+var speed = 3000.0<turn/s> / 60.0
+
+def sliders(): [Slider] = [
+  slider_mm("bore", bore, 60mm, 110mm),
+  slider_mm("stroke", stroke, 50mm, 110mm),
+  slider_mm("rod length", rod_length, 100mm, 200mm),
+  slider("compression", compression, 8.0, 12.0),
+  slider_deg("spark advance", spark, 0deg, 45deg),
+  slider_deg("burn duration", burn, 30deg, 90deg)]
+
+// Fixed design choices.
+val compression_height = 32mm   // wrist pin to crown
+val skirt = 30mm                // wrist pin to skirt bottom
+val pin_r = 11mm
+val rod_beam = 22mm             // the rod's width in the plane it swings in
+val min_clearance = 0.8mm       // piston to head at TDC, the least that may be built
+val pitch_y = 96mm              // cylinder spacing along the crank
+
+// Gas and fuel.
+val n_poly = 1.3                // polytropic index, compression and expansion
+val r_air = 287.0<J/(kg K)>
+val lhv = 44.0e6<J/kg>
+val afr = 14.7
+val heat_used = 0.65            // of the fuel's heat: ~0.95 burnt, ~30% of that lost to the walls
+val p_intake = 1.0bar
+val p_exhaust = 1.05bar
+val t_intake = 330K
+val wiebe_a = 5.0
+val wiebe_m = 2.0
+
+// ---------------------------------------------------------------------------------------------
+// Derived geometry. The compression ratio fixes the clearance volume; with the head's chamber and
+// the gasket fixed, it fixes how far the crown stops below the deck, and so the block's deck height.
+
+def throw(): real<mm> = stroke / 2
+def piston_area(): real<cm^2> = pi * bore^2 / 4
+def swept(): real<cm^3> = piston_area() * stroke
+def clearance_volume(c: real): real<cm^3> = swept() / (c - 1.0)
+def deck_gap(c: real): real<mm> = (clearance_volume(c) - head_dome - piston_area() * gasket) / piston_area()
+def tdc_clearance(c: real): real<mm> = deck_gap(c) + gasket
+def deck_height(c: real): real<mm> = throw() + rod_length + compression_height + deck_gap(c)
+
+// The dome's depth: a spherical cap of base radius 0.42 bore holding `head_dome`, by Newton.
+def dome_depth(): real<mm> =
+  val a = 0.42 * bore
+  var h = 10mm
+  for iter in 1..40
+    val v: real<cm^3> = pi * h * (3 * a^2 + h^2) / 6
+    val dv: real<cm^2> = pi * (a^2 + h^2) / 2
+    h = h - (v - head_dome) / dv
+  h
+
+// The slider-crank: the crown's drop from TDC and the wrist pin's height above the crank axis.
+def pin_height(th: real<deg>): real<mm> =
+  val r = throw()
+  r * cos(th) + sqrt(rod_length^2 - r^2 * sin(th)^2)
+
+def drop(th: real<deg>): real<mm> = throw() + rod_length - pin_height(th)
+
+// d(drop)/d(theta), per radian: the moment arm of the gas force on the crank.
+def arm(th: real<deg>): real<mm> =
+  val r = throw()
+  r * sin(th) * (1.0 + r * cos(th) / sqrt(rod_length^2 - r^2 * sin(th)^2))
+
+def cylinder_volume(c: real, th: real<deg>): real<cm^3> = clearance_volume(c) + piston_area() * drop(th)
+
+// ---------------------------------------------------------------------------------------------
+// Parts. Each is built in its own frame: the piston's origin at the wrist pin, the rod's at its big
+// end along +Z, the crank's on its axis along Y, the block and head in the world's frame.
+
+def piston(): Solid =
+  val r = bore / 2 - 0.04mm
+  val body = translate(cylinder(r, compression_height + skirt), z = -skirt)
+  // Three ring grooves: top, second, oil; each a width and a depth below the crown.
+  val grooves = map([(4.0mm, 1.2mm), (7.5mm, 1.5mm), (11.0mm, 2.5mm)], g ->
+    val (below, width) = g
+    translate(cut(cylinder(r + 1mm, width), cylinder(r - 4mm, width)), z = compression_height - below - width))
+  val pin_hole = rotate(translate(cylinder(pin_r, bore), z = -bore / 2), X, 90deg)
+  val hollow = shell(body, 3mm, open = [Bottom])
+  named(cut_all(hollow, [union_all(grooves), pin_hole]), "piston")
+
+def rod(): Solid =
+  val beam = translate(cube(rod_beam, 18mm, rod_length), z = 0mm)
+  val big = rotate(translate(cylinder(0.32 * stroke, 22mm), z = -11mm), X, 90deg)
+  val small = translate(rotate(translate(cylinder(pin_r + 5mm, 22mm), z = -11mm), X, 90deg), z = rod_length)
+  val bores = [rotate(translate(cylinder(0.24 * stroke, 30mm), z = -15mm), X, 90deg),
+               translate(rotate(translate(cylinder(pin_r, 30mm), z = -15mm), X, 90deg), z = rod_length)]
+  named(cut_all(union_all([beam, big, small]), bores), "rod")
+
+// Counterweights balance the rotating mass and half the reciprocating mass of each throw. Each web
+// carries half; a web's weight is a half-disc of steel of radius R, whose m * centroid is
+// rho t (2/3) R^3.
+val piston_mass = 320g
+val rod_mass = 520g
+val steel = 7.85<g/cm^3>
+val web_t = 16mm
+
+def counterweight_radius(): real<mm> =
+  val m_rot = 2.0 / 3.0 * rod_mass
+  val m_rec = piston_mass + rod_mass / 3.0
+  val moment = (m_rot + 0.5 * m_rec) * throw() / 2
+  val r3: real<cm^3> = 3.0 * moment / (2.0 * steel * web_t)
+  r3^(1/3)
+
+// A crank of `n` throws; throw `k`'s pin at angle `phase(k)` from TDC.
+def crankshaft(n: integer, phase: integer -> real<deg>): Solid =
+  val r = throw()
+  val journal = rotate(cylinder(30mm, 24mm), X, 90deg)
+  val cw = counterweight_radius()
+  val throws = map(1..n, k ->
+    val y = (k - 1) * pitch_y
+    val pin = translate(rotate(translate(cylinder(0.24 * stroke, 24mm), z = -12mm), X, 90deg), z = r)
+    val web = translate(cube(50mm, web_t, r + 25mm), z = -10mm)
+    val weight = intersect(rotate(cylinder(cw, web_t), X, 90deg), translate(cube(2 * cw, web_t, cw), z = -cw))
+    val webs = [translate(union(web, weight), y = -20mm), translate(union(web, weight), y = 20mm)]
+    translate(rotate(union_all([pin, union_all(webs)]), Y, phase(k)), y = y))
+  val journals = map(1..n + 1, k -> translate(journal, y = (k - 1.5) * pitch_y))
+  named(union_all([union_all(throws), union_all(journals)]), "crankshaft")
+
+def block(n: integer, c: real): Solid =
+  val h = deck_height(c)
+  val shell_box = translate(cube(bore + 30mm, n * pitch_y, h - 60mm), y = (n - 1) * pitch_y / 2, z = 60mm)
+  val bores = map(1..n, k -> translate(cylinder(bore / 2, h), y = (k - 1) * pitch_y, z = 60mm))
+  named(cut_all(shell_box, bores), "block")
+
+def head(n: integer, c: real): Solid =
+  val z0 = deck_height(c) + gasket
+  val depth = dome_depth()
+  val a = 0.42 * bore
+  // The sphere whose cap of base radius `a` is `depth` deep.
+  val sr = (a^2 + depth^2) / (2 * depth)
+  val slab = translate(cube(bore + 30mm, n * pitch_y, 90mm), y = (n - 1) * pitch_y / 2, z = z0)
+  val domes = map(1..n, k -> translate(sphere(sr), y = (k - 1) * pitch_y, z = z0 + depth - sr))
+  named(cut_all(slab, domes), "head")
+
+// ---------------------------------------------------------------------------------------------
+// The mechanism: crank on a driven revolute, a rod on each pin, a piston on each rod sliding in Z.
+
+// Inline-four pins: 1 and 4 up, 2 and 3 down. Firing order 1-3-4-2, so cylinder k fires `offset(k)`
+// after cylinder 1.
+def pin_phase(n: integer, k: integer): real<deg> =
+  if n == 1 then 0deg else if k == 1 or k == 4 then 0deg else 180deg
+
+def firing_offset(n: integer, k: integer): integer =
+  if n == 1 then 0
+  else [0, 540, 180, 360][k]
+
+def mechanism(n: integer, c: real): Mechanism =
+  val r = throw()
+  val pin_at = (k: integer) -> turn_point([0mm, (k - 1) * pitch_y, r], Y, pin_phase(n, k))
+  val crank = Body("crank", crankshaft(n, k -> pin_phase(n, k)), 14000g)
+  // Natural: `[ground, crank, head] ++ rods ++ pistons`. nex has no array concatenation, so the
+  // lists are made in one flatMap whose first element stands for the fixed bodies.
+  val bodies = flatMap(0..n, k ->
+    if k == 0 then [Body("ground", block(n, c), 30000g), crank, Body("head", head(n, c), 12000g)]
+    else [Body(s"rod$k", rod(), rod_mass), Body(s"piston$k", piston(), piston_mass)])
+  val joints = flatMap(0..n, k ->
+    if k == 0 then [Revolute("main", "ground", "crank", [0mm, 0mm, 0mm], [0mm, 0mm, 0mm])]
+    else [Revolute(s"crankpin$k", "crank", s"rod$k", pin_at(k), [0mm, 0mm, 0mm]),
+          Revolute(s"wristpin$k", s"rod$k", s"piston$k", [0mm, 0mm, rod_length], [0mm, 0mm, 0mm]),
+          Prismatic(s"bore$k", "ground", s"piston$k", Z, [0mm, (k - 1) * pitch_y, 0mm])])
+  Mechanism(bodies, joints, "main")
+
+// The rod's clearance to the bore's bottom edge, at the liner's bottom `z_liner`: the rod's beam is
+// `rod_beam` wide, and leans by the angle between its pins.
+def rod_wall_clearance(st: State, k: integer, z_liner: real<mm>): real<mm> =
+  val a = placed(pose_of(st, s"rod$k"), [0mm, 0mm, 0mm])
+  val b = position_of(st, s"piston$k")
+  val y0 = (k - 1) * pitch_y
+  val x = a[1] + (b[1] - a[1]) * (z_liner - a[3]) / (b[3] - a[3])
+  val lean = angle_of(st, s"rod$k")
+  bore / 2 - (abs(x) + rod_beam / 2 / cos(lean))
+
+struct Kinematics
+  worst_follow: real<mm>        // largest |solver - slider-crank| over the run
+  head_gap: real<mm>            // least crown-to-head distance, from the slider-crank
+  head_gap_query: real<mm>      // the same, from the mechanism's min_gap query
+  wall_gap: real<mm>            // least rod-to-bore-edge clearance
+  wall_gap_at: real<deg>
+
+def run_kinematics(n: integer, c: real): Kinematics =
+  val m = mechanism(n, c)
+  val z_liner = rod_length - skirt + 3mm - throw()
+  val z_head = deck_height(c) + gasket
+  var worst = 0mm
+  var head_gap = 1e9mm
+  var head_query = 1e9mm
+  var wall = 1e9mm
+  var wall_at = 0deg
+  var st = solve(m, 0deg)
+  for i in 0..720
+    val th = i * 1deg
+    for k in 1..n
+      val local = th + pin_phase(n, k)
+      val z = position_of(st, s"piston$k")[3]
+      worst = max(worst, abs(z - pin_height(local)))
+      head_gap = min(head_gap, z_head - (z + compression_height))
+      val w = rod_wall_clearance(st, k, z_liner)
+      if w < wall then
+        wall = w
+        wall_at = th
+    if i % 360 == 0 then head_query = min(head_query, min_gap(st, "piston1", "head"))
+    st = step(st, 1deg)
+  Kinematics(worst, head_gap, head_query, wall, wall_at)
+
+// ---------------------------------------------------------------------------------------------
+// The Otto cycle, single zone. Crank angle from 0 at the intake TDC; firing TDC at 360. Intake and
+// exhaust are at constant pressure; from intake BDC (180) to exhaust BDC (540) the pressure follows
+//     dp/dθ = -n p/V dV/dθ + (n - 1)/V dQ/dθ
+// with Q the Wiebe function's share of the fuel's heat.
+
+struct Cycle
+  p: [real<bar>]               // at 0, 1, …, 719 degrees
+  v: [real<cm^3>]
+  torque: [real<N m>]          // the gas force's torque on the crank
+  work: real<J>
+  imep: real<bar>
+  peak: real<bar>
+  peak_at: real<deg>
+
+def burnt(th: real<deg>): real =
+  val start = 360deg - spark
+  if th <= start then 0.0
+  else if th >= start + burn then 1.0
+  else 1.0 - exp(-wiebe_a * ((th - start) / burn)^(wiebe_m + 1.0))
+
+// `arm` is per radian; the angle in `cm^3/rad` is spelled, and converts to per degree where asked.
+def dvdth(c: real, th: real<deg>): real<cm^3/rad> = piston_area() * arm(th) / 1rad
+
+def dpdth(c: real, th: real<deg>, p: real<bar>, q_total: real<J>): real<bar/deg> =
+  val v = cylinder_volume(c, th)
+  val h = 0.01deg
+  val dq: real<J/deg> = q_total * (burnt(th + h) - burnt(th - h)) / (2 * h)
+  -n_poly * p / v * dvdth(c, th) + (n_poly - 1.0) / v * dq
+
+def otto(c: real): Cycle =
+  val v1 = cylinder_volume(c, 180deg)
+  val air: real<kg> = p_intake * v1 / (r_air * t_intake)
+  val q_total: real<J> = air / afr * lhv * heat_used
+  var p: [real<bar>] = fill(720, p_intake)
+  var v: [real<cm^3>] = fill(720, 0.0<cm^3>)
+  var torque: [real<N m>] = fill(720, 0.0<N m>)
+  var pk = p_intake
+  var pk_at = 0deg
+  for step in 0..<720
+    val th = step * 1deg
+    v[step + 1] = cylinder_volume(c, th)
+    if step < 180 then p[step + 1] = p_intake
+    else if step >= 540 then p[step + 1] = p_exhaust
+    else if step == 180 then p[step + 1] = p_intake
+    else
+      // Heun's method over the degree, in four quarter-degree steps.
+      var q = p[step]
+      for sub in 0..<4
+        val h = 0.25deg
+        val a = th - 1deg + sub * h
+        val k1 = dpdth(c, a, q, q_total)
+        val k2 = dpdth(c, a + h, q + h * k1, q_total)
+        q = q + h * (k1 + k2) / 2
+      p[step + 1] = q
+    if p[step + 1] > pk then
+      pk = p[step + 1]
+      pk_at = th
+    torque[step + 1] = (p[step + 1] - p_intake) * piston_area() * arm(th)
+  var work = 0.0<J>
+  for k in 1..720
+    val next = if k == 720 then 1 else k + 1
+    work += 0.5 * (p[k] + p[next]) * (v[next] - v[k])
+  Cycle(p, v, torque, work, to<bar>(work / swept()), pk, pk_at)
+
+// The inline four's torque: each cylinder's trace shifted by its firing offset, summed.
+def summed_torque(cy: Cycle, n: integer): [real<N m>] =
+  map(1..720, i -> sum(map(1..n, k -> cy.torque[(i - 1 - firing_offset(n, k) + 1440) % 720 + 1])))
+
+// ---------------------------------------------------------------------------------------------
+
+def show_parts(n: integer) =
+  print(s"--- parts, $n cylinder(s), compression $compression")
+  print(f"  swept ${strip(swept())}%.1f cm3, clearance volume ${strip(clearance_volume(compression))}%.2f cm3")
+  print(f"  deck gap ${strip(deck_gap(compression))}%.3f mm, deck height ${strip(deck_height(compression))}%.2f mm")
+  print(f"  head dome ${strip(head_dome)}%.1f cm3 is ${strip(dome_depth())}%.2f mm deep")
+  print(f"  counterweight radius ${strip(counterweight_radius())}%.1f mm")
+  val m = mechanism(n, compression)
+  for b in m.bodies
+    val (lo, hi) = bbox(b.solid)
+    print(f"  ${b.name}%-10s ${nodes(b.solid)}%4d nodes, box ${strip(hi[1] - lo[1])}%.0f x ${strip(hi[2] - lo[2])}%.0f x ${strip(hi[3] - lo[3])}%.0f mm")
+
+def show_kinematics(n: integer) =
+  val k = run_kinematics(n, compression)
+  print(s"--- kinematics, $n cylinder(s), 720 steps of 1 deg")
+  print(s"  solver vs slider-crank: worst ${k.worst_follow}")
+  print(f"  piston to head at TDC: ${strip(k.head_gap)}%.3f mm (min_gap query ${strip(k.head_gap_query)}%.3f mm)")
+  print(f"  rod to bore edge: ${strip(k.wall_gap)}%.2f mm at ${strip(k.wall_gap_at)}%.0f deg")
+
+def show_cycle(cy: Cycle) =
+  print("--- Otto cycle, one cylinder")
+  print(f"  peak ${strip(cy.peak)}%.1f bar at ${strip(cy.peak_at) - 360.0}%.0f deg after firing TDC")
+  print(f"  p at IVC ${strip(cy.p[181])}%.2f bar, at TDC ${strip(cy.p[361])}%.1f bar, at EVO ${strip(cy.p[540])}%.2f bar")
+  print(f"  indicated work ${strip(cy.work)}%.1f J, IMEP ${strip(cy.imep)}%.2f bar")
+  val mean: real<N m> = cy.work / 4pi
+  print(f"  mean torque ${strip(mean)}%.2f N m (sum of trace / 720: ${strip(sum(cy.torque) / 720.0)}%.2f)")
+  print(f"  torque peak ${strip(maxval(cy.torque))}%.1f N m, least ${strip(minval(cy.torque))}%.1f N m")
+  for th in [300, 340, 360, 370, 380, 400, 450, 500]
+    print(f"    ${th}%4d deg  p ${strip(cy.p[th + 1])}%7.2f bar  T ${strip(cy.torque[th + 1])}%8.1f N m")
+
+def show_four(cy: Cycle) =
+  // The crank's pins and the firing order must agree: cylinder k sits at crank angle
+  // `theta + pin_phase`, and is at `theta - firing_offset` in its own cycle.
+  for k in 1..4
+    assert(to_integer(strip(pin_phase(4, k))) % 360 == (720 - firing_offset(4, k)) % 360,
+           s"cylinder $k: pin and firing order disagree")
+  val t = summed_torque(cy, 4)
+  val mean = sum(t) / 720.0
+  print("--- inline four, firing 1-3-4-2")
+  print(f"  summed torque: mean ${strip(mean)}%.1f N m, peak ${strip(maxval(t))}%.1f, least ${strip(minval(t))}%.1f N m")
+  val power: real<kW> = mean * speed
+  print(f"  indicated power at 3000 rpm: ${strip(power)}%.1f kW")
+  for th in [0, 45, 90, 135, 180]
+    print(f"    ${th}%4d deg  T ${strip(t[th + 1])}%8.1f N m")
+
+def sweep() =
+  print("--- sweep: compression 8 to 12")
+  print("     CR   deck gap   TDC clearance  (simulated)   IMEP     buildable")
+  for i in 0..8
+    val c = 8.0 + 0.5 * i
+    val gap = tdc_clearance(c)
+    val simulated = run_kinematics(1, c).head_gap
+    val cy = otto(c)
+    val ok = if simulated >= min_clearance then "yes" else "no: piston meets head"
+    print(f"  ${c}%5.1f  ${strip(deck_gap(c))}%7.3f mm  ${strip(gap)}%9.3f mm  ${strip(simulated)}%9.3f mm  ${strip(cy.imep)}%6.2f bar  $ok")
+
+def main(args: [string]) =
+  val what = if length(args) > 0 then args[1] else "all"
+  check(sliders())
+  if what == "parts" or what == "all" then
+    show_parts(1)
+    show_parts(4)
+  if what == "kinematics" or what == "kin1" or what == "all" then show_kinematics(1)
+  if what == "kinematics" or what == "kin4" or what == "all" then show_kinematics(4)
+  if what == "cycle" or what == "all" then show_cycle(otto(compression))
+  if what == "four" or what == "all" then show_four(otto(compression))
+  if what == "sweep" or what == "all" then sweep()

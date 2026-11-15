@@ -1,0 +1,13 @@
+// Typical mistakes a modeller makes, to read the diagnostics. Run from probe/nex/.
+import tekton.*
+
+def main() =
+  val a = translate(cylinder(10mm, 5mm), z = 5deg)          // an angle where a length goes
+  val b = cylinder(10, 5mm)                                  // a bare number for a length
+  val c = cylinder(10mm)                                     // a parameter left out
+  val d = shell(a, 1.6mm, opne = [Top])                      // a named argument misspelled
+  val e = 3mm + 2bar                                         // two dimensions added
+  val f = rotate(a, Z, 30)                                   // an angle without its unit
+  val g = cylinder(radius, 5mm)                              // a name never declared
+  val h = 2 * 1.0<in> > 50mm                                 // mixed scales: fine, no error expected
+  print(h)

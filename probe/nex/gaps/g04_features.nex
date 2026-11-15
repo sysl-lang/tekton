@@ -1,0 +1,38 @@
+// Features the stub leans on, each tried in its natural form.
+unit bar = 100000 Pa
+// natural: unit rpm = turn / 60 s  -> "the only number in a unit expression is `1` ..."
+unit minute = 60 s
+unit rpm = turn / minute
+
+enum Solid =
+  Box(w: real<mm>, h: real<mm>, d: real<mm>)
+  Union(parts: [Solid])
+  Moved(s: [Solid], by: [real<mm>; 3])
+
+def translate(s: Solid, x: real<mm>, y: real<mm> = 0mm, z: real<mm> = 0mm): Solid = Moved([s], [x, y, z])
+def union(a: Solid, b: Solid): Solid = Union([a, b])
+
+def count(s: Solid): integer =
+  s match
+    Box(_, _, _) -> 1
+    Union(ps) -> sum(map(ps, count))
+    Moved(ss, _) -> count(ss[1])
+
+struct Joint
+  name: string
+  angle: real<deg>
+  drive: real<deg> -> real<deg>
+
+def main() =
+  val s = union(Box(1mm, 2mm, 3mm), Box(1in, 1mm, 1mm).translate(5mm, z = 2mm))
+  print(count(s))
+  val p = 12.5bar
+  // natural (spec §12.11: `print(x, …)`): print(p, to<kPa>(p))  -> "`print` takes one value"
+  print(s"$p ${to<kPa>(p)}")
+  val w = 3000rpm
+  print(to<rad/s>(w))
+  val j = Joint("crank", 0deg, a -> a + 1deg)
+  print(j.drive(j.angle))
+  val v = 499.6<cm^3>
+  print(f"v = $v%.1f")
+  print(s"v in m3 = ${to<m^3>(v)}")

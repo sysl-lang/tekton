@@ -1,0 +1,47 @@
+// The same API as ../tekton/tekton.nex, in the shape Tekton's embedding would give it (DESIGN §16.4):
+// the solids and the solver are the host's, and a thin nex layer adds what a host function may not
+// have — defaults, named arguments, and anything that takes a function. Not runnable with
+// `nex run --interp`, which has no host (and panics on a call to a host function: gaps/g07g).
+//
+// The scripts would not change: they call `cylinder`, `translate(s, z = ...)`, `union`, `step`,
+// `position_of` and `min_gap` by the same names and never look inside a Solid or a State.
+
+@host struct Solid
+@host struct State
+
+@host extern def cylinder(r: real<mm>, h: real<mm>): Solid
+@host extern def cube(w: real<mm>, d: real<mm>, h: real<mm>): Solid
+@host extern def host_loft(radii_x: [real<mm>], radii_y: [real<mm>], z: [real<mm>]): Solid
+@host extern def csg(op: integer, parts: [Solid]): Solid
+@host extern def moved(s: Solid, by: [real<mm>; 3]): Solid
+@host extern def host_shell(s: Solid, wall: real<mm>, open_top: bool, open_bottom: bool): Solid
+@host extern def host_thread(major: real<mm>, pitch: real<mm>, length: real<mm>, internal: bool,
+                             clearance: real<mm>): Solid
+
+// Edges cross as data; the predicate stays in nex.
+struct Edge
+  id: integer
+  circular: bool
+  z: real<mm>
+  r: real<mm>
+
+@host extern def edges(s: Solid): [Edge]
+@host extern def host_fillet(s: Solid, ids: [integer], r: real<mm>): Solid
+
+// The mechanism is the host's; the script drives it a step at a time and queries it.
+@host extern def mechanism(bodies: [Solid], names: [string], joints: [string]): State
+@host extern def step(st: State, by: real<deg>): State
+@host extern def position_of(st: State, body: string): [real<mm>; 3]
+@host extern def min_gap(st: State, a: string, b: string): real<mm>
+
+// The nex layer: defaults and named arguments a host function may not have.
+def translate(s: Solid, x: real<mm> = 0mm, y: real<mm> = 0mm, z: real<mm> = 0mm): Solid = moved(s, [x, y, z])
+def union(a: Solid, b: Solid): Solid = csg(1, [a, b])
+def cut(a: Solid, b: Solid): Solid = csg(2, [a, b])
+def thread(major: real<mm>, pitch: real<mm>, length: real<mm>, internal: bool = false,
+           clearance: real<mm> = 0mm): Solid = host_thread(major, pitch, length, internal, clearance)
+def fillet_where(s: Solid, keep: Edge -> bool, r: real<mm>): Solid =
+  host_fillet(s, map(filter(edges(s), keep), e -> e.id), r)
+
+// Only so `nex elaborate` checks the declarations; a host calls the script by name.
+def main() = print(0)

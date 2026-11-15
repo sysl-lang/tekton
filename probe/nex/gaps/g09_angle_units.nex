@@ -1,0 +1,22 @@
+// What a rate per crank degree becomes: angles "drop out, in radians" where they meet a dimension.
+unit bar = 100000 Pa
+
+def main() =
+  val dp = 2.0bar
+  val dth = 1.0deg
+  val rate = dp / dth
+  print(s"rate = $rate")
+  val r2: real<bar/deg> = dp / dth
+  print(s"declared bar/deg = $r2")
+  val back = r2 * 1deg
+  print(s"back = $back")
+  val ds = 0.5mm
+  val lever = ds / dth                 // mm per degree of crank: a moment arm per radian?
+  val f = 1000.0<N>
+  val torque: real<N m> = f * lever
+  print(s"torque = $torque")
+  val area = 50.0<cm^2>
+  val work: real<J> = 10bar * 500.0<cm^3>
+  print(s"work = $work")
+  print(s"imep = ${to<bar>(work / 500.0<cm^3>)}")
+  print(s"F = ${to<kN>(10bar * area)}")

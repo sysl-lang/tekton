@@ -1,0 +1,13 @@
+// A part parameter with a range, generic over its unit, collected into one list for the inspector.
+struct Param[U: Unit]
+  name: string
+  value: real<U>
+  lo: real<U>
+  hi: real<U>
+
+def main() =
+  val h = Param("height", 120mm, 80mm, 200mm)
+  val a = Param("taper", 3deg, 0deg, 10deg)
+  print(h.value)
+  val all = [h, a]
+  print(length(all))

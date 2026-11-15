@@ -1,0 +1,20 @@
+// Joining two arrays of structs: the bodies of a crank and of four pistons.
+struct Body
+  name: string
+  mass: real<g>
+
+def concat(a: [Body], b: [Body]): [Body] =
+  if length(a) == 0 then return b
+  var out = fill(length(a) + length(b), a[1])
+  out[1..length(a)] = a
+  out[length(a) + 1..] = b
+  out
+
+def main() =
+  val crank = [Body("crank", 4000g)]
+  val pistons = map(1..4, k -> Body(s"piston$k", 300g))
+  val both = concat(crank, pistons)
+  print(length(both))
+  print(both[5].name)
+  val generic = flatMap([1, 2], k -> if k == 1 then crank else pistons)
+  print(length(generic))

@@ -1,0 +1,414 @@
+module tekton
+
+// A stub of the geometry and simulation API a Tekton script would call. Every solid is a tree of
+// what was asked for, which `describe` prints and `bbox` measures roughly; the real kernel is
+// Tekton's. The mechanism solver is a small planar one, enough for a slider-crank family: a driven
+// revolute, revolutes between bodies, and a body sliding on a prismatic joint closes the loop.
+//
+// In Tekton itself `Solid` would be `@host struct Solid` and the constructors `@host extern def`s.
+// The scripts never look inside a `Solid`, so they would not change; see REPORT.md.
+
+unit bar = 100000 Pa
+
+// ---------------------------------------------------------------------------------------------
+// Profiles: the 2D sections that extrude, loft and revolve take.
+
+enum Profile =
+  Circle(r: real<mm>)
+  Ellipse(rx: real<mm>, ry: real<mm>)
+  Rect(w: real<mm>, d: real<mm>)
+  RoundRect(w: real<mm>, d: real<mm>, r: real<mm>)
+  Polygon(pts: [real<mm>; :, :])
+
+// The half-extents of a profile in x and y.
+def half(p: Profile): (real<mm>, real<mm>) =
+  p match
+    Circle(r) -> (r, r)
+    Ellipse(rx, ry) -> (rx, ry)
+    Rect(w, d) -> (w / 2, d / 2)
+    RoundRect(w, d, _) -> (w / 2, d / 2)
+    Polygon(pts) -> (maxval(abs(pts[:, 1])), maxval(abs(pts[:, 2])))
+
+def profile_text(p: Profile): string =
+  p match
+    Circle(r) -> s"circle r=$r"
+    Ellipse(rx, ry) -> s"ellipse $rx x $ry"
+    Rect(w, d) -> s"rect $w x $d"
+    RoundRect(w, d, r) -> s"roundrect $w x $d r=$r"
+    Polygon(pts) -> s"polygon of ${rows(pts)} points"
+
+// ---------------------------------------------------------------------------------------------
+// Solids.
+
+enum Axis =
+  X
+  Y
+  Z
+
+enum Op =
+  Add
+  Sub
+  Mul
+
+enum Face =
+  Top
+  Bottom
+  Side
+
+enum ThreadKind =
+  External
+  Internal
+
+// A child that is itself a solid is held in a one-element array: an enum holds itself only so.
+enum Solid =
+  Cube(w: real<mm>, d: real<mm>, h: real<mm>)
+  Cylinder(r: real<mm>, h: real<mm>)
+  Cone(r1: real<mm>, r2: real<mm>, h: real<mm>)
+  Sphere(r: real<mm>)
+  Extrude(p: Profile, h: real<mm>, taper: real<deg>)
+  Revolve(outline: [real<mm>; :, :], sweep: real<deg>)
+  Loft(sections: [Profile], z: [real<mm>])
+  Thread(major: real<mm>, pitch: real<mm>, length: real<mm>, kind: ThreadKind, clearance: real<mm>)
+  Csg(op: Op, parts: [Solid])
+  Moved(s: [Solid], by: [real<mm>; 3])
+  Turned(s: [Solid], axis: Axis, by: real<deg>)
+  Shelled(s: [Solid], wall: real<mm>, open: [Face])
+  Filleted(s: [Solid], edges: [integer], r: real<mm>)
+  Named(s: [Solid], name: string)
+
+def cube(w: real<mm>, d: real<mm>, h: real<mm>): Solid = Cube(w, d, h)
+def cylinder(r: real<mm>, h: real<mm>): Solid = Cylinder(r, h)
+def cone(r1: real<mm>, r2: real<mm>, h: real<mm>): Solid = Cone(r1, r2, h)
+def sphere(r: real<mm>): Solid = Sphere(r)
+def extrude(p: Profile, h: real<mm>, taper: real<deg> = 0deg): Solid = Extrude(p, h, taper)
+def revolve(outline: [real<mm>; :, :], sweep: real<deg> = 360deg): Solid = Revolve(outline, sweep)
+
+def loft(sections: [Profile], z: [real<mm>]): Solid =
+  assert(length(sections) == length(z), "loft: one height per section")
+  assert(length(sections) >= 2, "loft: at least two sections")
+  Loft(sections, z)
+
+def thread(major: real<mm>, pitch: real<mm>, length: real<mm>, kind: ThreadKind = External,
+           clearance: real<mm> = 0mm): Solid =
+  Thread(major, pitch, length, kind, clearance)
+
+// CSG. `a + b` would be the natural spelling; nex has no operators on user types.
+def union(a: Solid, b: Solid): Solid = Csg(Add, [a, b])
+def cut(a: Solid, b: Solid): Solid = Csg(Sub, [a, b])
+def intersect(a: Solid, b: Solid): Solid = Csg(Mul, [a, b])
+def union_all(parts: [Solid]): Solid = Csg(Add, parts)
+def cut_all(a: Solid, tools: [Solid]): Solid = Csg(Sub, [a, Csg(Add, tools)])
+
+def translate(s: Solid, x: real<mm> = 0mm, y: real<mm> = 0mm, z: real<mm> = 0mm): Solid =
+  Moved([s], [x, y, z])
+def rotate(s: Solid, axis: Axis, by: real<deg>): Solid = Turned([s], axis, by)
+def shell(s: Solid, wall: real<mm>, open: [Face] = [Top]): Solid = Shelled([s], wall, open)
+def named(s: Solid, name: string): Solid = Named([s], name)
+
+// `n` copies of `s` around the Z axis at radius `r`.
+def polar(s: Solid, n: integer, r: real<mm>, phase: real<deg> = 0deg): Solid =
+  union_all(map(1..n, k ->
+    val a = phase + (k - 1) * 360deg / n
+    translate(s, r * cos(a), r * sin(a))))
+
+// ---------------------------------------------------------------------------------------------
+// Rough measures: the axis-aligned box around a solid, before any CSG subtraction.
+
+def bbox(s: Solid): ([real<mm>; 3], [real<mm>; 3]) =
+  s match
+    Cube(w, d, h) -> ([-w / 2, -d / 2, 0mm], [w / 2, d / 2, h])
+    Cylinder(r, h) -> ([-r, -r, 0mm], [r, r, h])
+    Cone(r1, r2, h) -> ([-max(r1, r2), -max(r1, r2), 0mm], [max(r1, r2), max(r1, r2), h])
+    Sphere(r) -> ([-r, -r, -r], [r, r, r])
+    Extrude(p, h, taper) ->
+      val (hx, hy) = half(p)
+      val grow = max(0mm, -h * tan(taper))
+      ([-hx - grow, -hy - grow, 0mm], [hx + grow, hy + grow, h])
+    Revolve(outline, _) ->
+      val r = maxval(abs(outline[:, 1]))
+      ([-r, -r, minval(outline[:, 2])], [r, r, maxval(outline[:, 2])])
+    Loft(sections, z) ->
+      var hx = 0mm
+      var hy = 0mm
+      for p in sections
+        val (x, y) = half(p)
+        hx = max(hx, x)
+        hy = max(hy, y)
+      ([-hx, -hy, minval(z)], [hx, hy, maxval(z)])
+    Thread(major, _, len, _, c) -> ([-major / 2 - c, -major / 2 - c, 0mm], [major / 2 + c, major / 2 + c, len])
+    Csg(op, parts) ->
+      var (lo, hi) = bbox(parts[1])
+      for k in 2..length(parts)
+        val (l, h) = bbox(parts[k])
+        op match
+          Add ->
+            lo = min(lo, l)
+            hi = max(hi, h)
+          Mul ->
+            lo = max(lo, l)
+            hi = min(hi, h)
+          Sub -> ()
+      (lo, hi)
+    Moved(ss, by) ->
+      val (lo, hi) = bbox(ss[1])
+      (lo + by, hi + by)
+    Turned(ss, axis, a) -> turned_box(bbox(ss[1]), axis, a)
+    Shelled(ss, _, _) -> bbox(ss[1])
+    Filleted(ss, _, _) -> bbox(ss[1])
+    Named(ss, _) -> bbox(ss[1])
+
+def turn_point(p: [real<mm>; 3], axis: Axis, a: real<deg>): [real<mm>; 3] =
+  val c = cos(a)
+  val s = sin(a)
+  axis match
+    X -> [p[1], p[2] * c - p[3] * s, p[2] * s + p[3] * c]
+    Y -> [p[1] * c + p[3] * s, p[2], -p[1] * s + p[3] * c]
+    Z -> [p[1] * c - p[2] * s, p[1] * s + p[2] * c, p[3]]
+
+def turned_box(b: ([real<mm>; 3], [real<mm>; 3]), axis: Axis, a: real<deg>): ([real<mm>; 3], [real<mm>; 3]) =
+  val (lo, hi) = b
+  var nlo: [real<mm>; 3] = [1e9mm, 1e9mm, 1e9mm]
+  var nhi: [real<mm>; 3] = [-1e9mm, -1e9mm, -1e9mm]
+  for ix in 0..1
+    for iy in 0..1
+      for iz in 0..1
+        val corner: [real<mm>; 3] = [if ix == 0 then lo[1] else hi[1], if iy == 0 then lo[2] else hi[2],
+                                     if iz == 0 then lo[3] else hi[3]]
+        val q = turn_point(corner, axis, a)
+        nlo = min(nlo, q)
+        nhi = max(nhi, q)
+  (nlo, nhi)
+
+// The number of nodes in a solid's tree.
+def nodes(s: Solid): integer =
+  s match
+    Csg(_, parts) -> 1 + sum(map(parts, nodes))
+    Moved(ss, _) -> 1 + nodes(ss[1])
+    Turned(ss, _, _) -> 1 + nodes(ss[1])
+    Shelled(ss, _, _) -> 1 + nodes(ss[1])
+    Filleted(ss, _, _) -> 1 + nodes(ss[1])
+    Named(ss, _) -> 1 + nodes(ss[1])
+    _ -> 1
+
+// The tree, one node a line, `depth` levels deep.
+def describe(s: Solid, depth: integer = 99, indent: string = ""): void =
+  if depth < 0 then return
+  val line = s match
+    Cube(w, d, h) -> s"cube $w x $d x $h"
+    Cylinder(r, h) -> s"cylinder r=$r h=$h"
+    Cone(r1, r2, h) -> s"cone r1=$r1 r2=$r2 h=$h"
+    Sphere(r) -> s"sphere r=$r"
+    Extrude(p, h, t) -> s"extrude ${profile_text(p)} h=$h taper=$t"
+    Revolve(o, a) -> s"revolve ${rows(o)} points through $a"
+    Loft(sec, z) -> s"loft through ${length(sec)} sections, z ${minval(z)}..${maxval(z)}"
+    Thread(maj, p, len, k, c) ->
+      val kind = k match
+        External -> "external"
+        Internal -> "internal"
+      s"thread $kind M$maj x $p, length $len, clearance $c"
+    Csg(op, parts) ->
+      val name = op match
+        Add -> "union"
+        Sub -> "cut"
+        Mul -> "intersect"
+      s"$name of ${length(parts)}"
+    Moved(_, by) -> s"move by $by"
+    Turned(_, _, a) -> s"rotate by $a"
+    Shelled(_, w, open) -> s"shell wall=$w, ${length(open)} face(s) open"
+    Filleted(_, es, r) -> s"fillet ${length(es)} edge(s) r=$r"
+    Named(_, n) -> s"part \"$n\""
+  print(indent + line)
+  val more = indent + "  "
+  s match
+    Csg(_, parts) ->
+      for p in parts
+        describe(p, depth - 1, more)
+    Moved(ss, _) -> describe(ss[1], depth - 1, more)
+    Turned(ss, _, _) -> describe(ss[1], depth - 1, more)
+    Shelled(ss, _, _) -> describe(ss[1], depth - 1, more)
+    Filleted(ss, _, _) -> describe(ss[1], depth - 1, more)
+    Named(ss, _) -> describe(ss[1], depth - 1, more)
+    _ -> ()
+
+// ---------------------------------------------------------------------------------------------
+// Edge selection. The kernel answers a solid's edges as data; a script picks them with a predicate
+// in nex and hands back their numbers, since a host function may not take a function.
+
+enum EdgeKind =
+  Straight
+  Circular
+
+struct Edge
+  id: integer
+  kind: EdgeKind
+  z: real<mm>
+  r: real<mm>
+
+def edges(s: Solid): [Edge] =
+  val (lo, hi) = bbox(s)
+  val r = (hi[1] - lo[1]) / 2
+  [Edge(1, Circular, lo[3], r), Edge(2, Circular, hi[3], r),
+   Edge(3, Straight, (lo[3] + hi[3]) / 2, 0mm), Edge(4, Straight, (lo[3] + hi[3]) / 2, 0mm)]
+
+def is_circular(e: Edge): bool =
+  e.kind match
+    Circular -> true
+    Straight -> false
+
+def fillet(s: Solid, es: [Edge], r: real<mm>): Solid = Filleted([s], map(es, e -> e.id), r)
+
+// ---------------------------------------------------------------------------------------------
+// Part parameters: what the inspector shows as sliders. A parameter's number is held in its unit,
+// named as text, since an array holds one type and the parameters' units differ.
+
+struct Slider
+  name: string
+  value: real
+  lo: real
+  hi: real
+  units: string    // `unit` is a keyword, so no field may have that name
+
+// Natural: one `slider` overloaded on the unit (spec §6.4 allows overloading); this nex answers
+// "redeclaration of `tekton.slider`", so each unit gets a name of its own.
+def slider_mm(name: string, v: real<mm>, lo: real<mm>, hi: real<mm>): Slider =
+  Slider(name, strip(v), strip(lo), strip(hi), "mm")
+def slider_deg(name: string, v: real<deg>, lo: real<deg>, hi: real<deg>): Slider =
+  Slider(name, strip(v), strip(lo), strip(hi), "deg")
+def slider(name: string, v: real, lo: real, hi: real): Slider = Slider(name, v, lo, hi, "")
+
+def check(ps: [Slider]): void =
+  for p in ps
+    assert(p.lo <= p.value <= p.hi, s"parameter ${p.name} = ${p.value} ${p.units} is outside ${p.lo}..${p.hi}")
+
+def show(ps: [Slider]): void =
+  for p in ps
+    print(f"  ${p.name}%-16s ${p.value}%9.3f ${p.units}%-4s [${p.lo}%.3g .. ${p.hi}%.3g]")
+
+// ---------------------------------------------------------------------------------------------
+// Mechanisms: bodies, joints, a driven joint, and queries of the solved state.
+
+struct Body
+  name: string
+  solid: Solid
+  mass: real<g>
+
+// A revolute joint turns about Y (the crankshaft's axis) through `at_parent` on the parent and
+// `at_child` on the child; a prismatic joint slides its child along an axis through the origin.
+enum Joint =
+  Revolute(name: string, parent: string, child: string, at_parent: [real<mm>; 3], at_child: [real<mm>; 3])
+  Prismatic(name: string, parent: string, child: string, axis: Axis, through: [real<mm>; 3])
+
+struct Mechanism
+  bodies: [Body]
+  joints: [Joint]
+  driven: string
+
+struct Pose
+  name: string
+  at: [real<mm>; 3]
+  angle: real<deg>
+
+struct State
+  mech: Mechanism
+  drive: real<deg>
+  poses: [Pose]
+
+def joint_name(j: Joint): string =
+  j match
+    Revolute(n, _, _, _, _) -> n
+    Prismatic(n, _, _, _, _) -> n
+
+def body_index(m: Mechanism, name: string): integer =
+  for k, b in enumerate(m.bodies)
+    if b.name == name then return k
+  assert(false, s"no body named $name")
+  0
+
+def pose_of(st: State, name: string): Pose =
+  for p in st.poses
+    if p.name == name then return p
+  assert(false, s"no body named $name")
+  st.poses[1]
+
+def position_of(st: State, name: string): [real<mm>; 3] = pose_of(st, name).at
+def angle_of(st: State, name: string): real<deg> = pose_of(st, name).angle
+
+// A point fixed in a body, where the body's pose puts it.
+def placed(p: Pose, local: [real<mm>; 3]): [real<mm>; 3] = p.at + turn_point(local, Y, p.angle)
+
+def axis_vector(a: Axis): [real; 3] =
+  a match
+    X -> [1.0, 0.0, 0.0]
+    Y -> [0.0, 1.0, 0.0]
+    Z -> [0.0, 0.0, 1.0]
+
+// Solves every pose with the driven joint at `drive`. A body on a prismatic joint whose other link
+// (a two-revolute body such as a rod) reaches back to a placed body is found by Newton's method on
+// the link's length.
+def solve(m: Mechanism, drive: real<deg>): State =
+  var poses = map(m.bodies, b -> Pose(b.name, [0mm, 0mm, 0mm], 0deg))
+  var known = map(m.bodies, b -> false)
+  known[body_index(m, "ground")] = true
+  // The driven revolute.
+  for j in m.joints
+    j match
+      Revolute(n, parent, child, ap, ac) ->
+        if n == m.driven then
+          val k = body_index(m, child)
+          poses[k] = Pose(child, ap - turn_point(ac, Y, drive), drive)
+          known[k] = true
+      _ -> ()
+  // Each slider: find the link that joins it to a placed body.
+  for j in m.joints
+    j match
+      Prismatic(_, _, slider_name, axis, through) ->
+        val e = axis_vector(axis)
+        for link_j in m.joints
+          link_j match
+            Revolute(_, lp, link, lap, lac) ->
+              val pk = body_index(m, lp)
+              if known[pk] and link != slider_name and not known[body_index(m, link)] then
+                // The link's joint to the slider.
+                for sj in m.joints
+                  sj match
+                    Revolute(_, sp, sc, sap, sac) ->
+                      if sp == link and sc == slider_name then
+                        val a = placed(poses[pk], lap)
+                        val len = norm2(sap - lac)
+                        // The slider's origin is `through + s e`; its pin is `sac` from there.
+                        var s = len + dot(a - through, e)
+                        for iter in 1..30
+                          val d = through + s * e + sac - a
+                          val f = dot(d, d) - len^2
+                          val df = 2.0 * dot(d, e)
+                          s = s - f / df
+                        val d = through + s * e + sac - a
+                        val ang = to<deg>(atan2(d[1], d[3]))
+                        val lk = body_index(m, link)
+                        poses[lk] = Pose(link, a - turn_point(lac, Y, ang), ang)
+                        poses[body_index(m, slider_name)] = Pose(slider_name, through + s * e, 0deg)
+                        known[lk] = true
+                        known[body_index(m, slider_name)] = true
+                    _ -> ()
+            _ -> ()
+      _ -> ()
+  State(m, drive, poses)
+
+def step(st: State, by: real<deg>): State = solve(st.mech, st.drive + by)
+
+// The box around a body where its pose puts it.
+def placed_box(st: State, name: string): ([real<mm>; 3], [real<mm>; 3]) =
+  val p = pose_of(st, name)
+  val b = st.mech.bodies[body_index(st.mech, name)]
+  val (lo, hi) = turned_box(bbox(b.solid), Y, p.angle)
+  (lo + p.at, hi + p.at)
+
+// The gap between two bodies' boxes; negative where they overlap. The kernel's answer is the true
+// distance between the solids.
+def min_gap(st: State, a: string, b: string): real<mm> =
+  val (alo, ahi) = placed_box(st, a)
+  val (blo, bhi) = placed_box(st, b)
+  val sep = max(blo - ahi, alo - bhi)
+  maxval(sep)
+
+def overlaps(st: State, a: string, b: string): bool = min_gap(st, a, b) < 0mm

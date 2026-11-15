@@ -1,0 +1,8 @@
+// The real API's shape: Solid is the host's object. What does `nex run --interp` say?
+@host struct Solid
+@host extern def box(w: real<mm>, h: real<mm>, d: real<mm>): Solid
+@host extern def translate(s: Solid, by: [real<mm>; 3]): Solid
+
+def main() =
+  val s = translate(box(1mm, 2mm, 3mm), [1mm, 0mm, 0mm])
+  print(s)

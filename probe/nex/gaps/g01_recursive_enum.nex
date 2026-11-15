@@ -1,0 +1,13 @@
+// Can a CSG tree be an enum whose variants hold the enum itself?
+enum Solid =
+  Box(w: real<mm>, h: real<mm>, d: real<mm>)
+  Union(a: Solid, b: Solid)
+
+def count(s: Solid): integer =
+  s match
+    Box(_, _, _) -> 1
+    Union(a, b) -> count(a) + count(b)
+
+def main() =
+  val s = Union(Box(1mm, 2mm, 3mm), Union(Box(1mm, 1mm, 1mm), Box(2mm, 2mm, 2mm)))
+  print(count(s))

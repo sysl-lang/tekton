@@ -1,0 +1,6 @@
+// Reduction of g07: one call to a host function the runner does not give. Panics `nex run --interp`
+// (`unwrap of a None value`, embed.sysl:659) instead of answering the "gives none of that name"
+// diagnostic that the same file without the call gets.
+@host extern def area(w: real<mm>): real<mm^2>
+
+def main() = print(area(2mm))

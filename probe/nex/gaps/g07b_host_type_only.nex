@@ -1,0 +1,4 @@
+// Reduction of g07: a host type declared, never used.
+@host struct Solid
+
+def main() = print(1)
