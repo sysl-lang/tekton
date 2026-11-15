@@ -3,12 +3,14 @@ module sh.sysl.tekton.interface
 
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.document.{Edge, PRIMITIVES, Primitive, Transform, primitive_key}
-import sh.sysl.tekton.settings.{Settings, default_settings, load_settings}
+import sh.sysl.tekton.settings.{MAX_INSPECTOR_WIDTH, MAX_LIBRARY_WIDTH, MAX_OBJECTS_HEIGHT, MIN_INSPECTOR_WIDTH,
+                                MIN_LIBRARY_WIDTH, MIN_OBJECTS_HEIGHT, Settings, default_settings, load_settings}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
-import sysl.buf.Buf
+import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, remove_dir_all}
 import sysl.path.join
+import sysl.text.split
 
 // The window's layout: the library on the left, the toolbar along the top, the object list and the inspector on
 // the right, the status line along the bottom, and the panel sizes remembered between launches.
@@ -73,6 +75,24 @@ every_shape_has_a_tile_in_the_library_and_a_tap_adds_it()
 
         tap(w, &c, s"palette.${primitive_key(p)}")
         assert_eq(w.doc.items().len, before + 1, primitive_key(p))
+
+        val added = w.doc.items()[w.doc.items().len - 1].operation match
+            Shape(q, _, _, _) -> q == p
+            Group(_) -> false
+
+        assert(added, s"the tile adds a ${primitive_key(p)}")
+
+@test
+every_tile_says_which_shape_it_adds()
+    val w = new_workspace()
+    var c = recorder()
+    val s = look(w, &c, SCREEN)
+
+    assert_eq(s.find("palette.box").unwrap().tip, "Add a box")
+    assert_eq(s.find("palette.half_sphere").unwrap().tip, "Add a half sphere")
+
+    for p in PRIMITIVES
+        assert(s.find(s"palette.${primitive_key(p)}").unwrap().tip.index_of("Add a ").is_some(), primitive_key(p))
 
 @test
 a_closed_section_hides_its_tiles_and_opening_it_brings_them_back()
@@ -421,6 +441,17 @@ the_status_line_gives_the_hints_or_what_went_wrong()
     w.problem.set("Nothing to group")
     assert_eq(w.status(), "Nothing to group")
 
+@test
+the_status_line_wraps_rather_than_running_off_a_narrow_window()
+    val w = new_workspace()
+    var c = recorder()
+    var d = recorder()
+    val wide = look(w, &c, Rect(0, 0, 4000, 800)).find("status").unwrap().rect
+    val narrow = look(w, &d, Rect(0, 0, 1024, 700)).find("status").unwrap().rect
+
+    assert(narrow.h > wide.h, s"taller when narrow: ${narrow.h} against ${wide.h}")
+    assert(narrow.x + narrow.w <= 1024, "and inside the window")
+
 // ## The layout and its widths
 
 @test
@@ -494,6 +525,119 @@ a_workspace_with_no_settings_file_writes_nothing()
     w.library_width.set(300)
     w.next_frame(5.0)
     assert(w.remembered == Settings(300, 260, 200), "taken as remembered, with nowhere to write it")
+
+// The window's draggable rules, left to right across it and then the one under the object list.
+private rules(w: &Workspace, c: *Recorder, at: Rect) -> (Rect, Rect, Rect)
+    val all = look(w, c, at).entries.view()
+    var across: Buf[Rect] = buf()
+    var under = Rect(0, 0, 0, 0)
+
+    for i in 0..<all.len
+        if all[i].role == "divider"
+            if all[i].marks.contains("vertical") then under = all[i].rect else across.push(all[i].rect)
+
+    assert_eq(across.len(), 2, "two rules across")
+    if across[0].x < across[1].x then (across[0], across[1], under) else (across[1], across[0], under)
+end rules
+
+// Press on a rule, carry it this far, and let go, a frame at each step.
+private drag_rule(w: &Workspace, c: *Recorder, at: Rect, rule: Rect, dx: int, dy: int)
+    val x = rule.x + rule.w / 2
+    val y = rule.y + rule.h / 2
+
+    render(w.tree(), c, at)
+    c.point(x, y, true)
+    render(w.tree(), c, at)
+    c.point(x + dx, y + dy, true)
+    render(w.tree(), c, at)
+    c.release(x + dx, y + dy)
+    render(w.tree(), c, at)
+end drag_rule
+
+@test
+the_rules_stop_at_each_panels_least_and_greatest_size()
+    val big = Rect(0, 0, 1600, 1200)
+    val w = new_workspace()
+    var c = recorder()
+    val (left, right, under) = rules(w, &c, big)
+
+    drag_rule(w, &c, big, left, 2000, 0)
+    assert_eq(w.library_width.read(), MAX_LIBRARY_WIDTH, "the library's greatest")
+
+    val (back, _, _) = rules(w, &c, big)
+
+    drag_rule(w, &c, big, back, -2000, 0)
+    assert_eq(w.library_width.read(), MIN_LIBRARY_WIDTH, "the library's least")
+
+    drag_rule(w, &c, big, right, 2000, 0)
+    assert_eq(w.inspector_width.read(), MIN_INSPECTOR_WIDTH, "the right-hand column's least")
+
+    val (_, wide, _) = rules(w, &c, big)
+
+    drag_rule(w, &c, big, wide, -2000, 0)
+    assert_eq(w.inspector_width.read(), MAX_INSPECTOR_WIDTH, "the right-hand column's greatest")
+
+    drag_rule(w, &c, big, under, 0, 2000)
+    assert_eq(w.objects_height.read(), MAX_OBJECTS_HEIGHT, "the object list's greatest")
+
+    val (_, _, low) = rules(w, &c, big)
+
+    drag_rule(w, &c, big, low, 0, -2000)
+    assert_eq(w.objects_height.read(), MIN_OBJECTS_HEIGHT, "the object list's least")
+end the_rules_stop_at_each_panels_least_and_greatest_size
+
+// ## The theme
+
+// The paint of the whole window drawn under `theme`, with the array panel open over it.
+private painted_in(w: &Workspace, theme: Theme) -> string
+    var c = recorder()
+
+    render(w.unthemed().restyle(t -> theme), &c, SCREEN)
+    c.dump()
+end painted_in
+
+@test
+a_window_restyled_dark_takes_dark_grounds_rules_and_outlines()
+    val w = new_workspace()
+
+    for dialog in [w.array_open, w.hollow_open]
+        dialog.set(true)
+
+        val dark_paint = painted_in(w, dark())
+
+        for colour in [dark().panel, dark().edge, dark().ground]
+            assert(dark_paint.contains(s"#${colour}"), s"dark #${colour}")
+
+        // The light ground is white, which a filled button's label is in either theme, so it is not looked for.
+        for colour in [light().panel, light().edge, u32(0xCBD2DC)]
+            for line in split(dark_paint, "\n")
+                assert(!line.contains(s"#${colour}"), s"nothing light: ${line}")
+
+        dialog.set(false)
+
+    w.array_open.set(true)
+
+    assert(!painted_in(w, light()).contains(s"#${dark().edge}"), "and the other way about")
+
+    var c = recorder()
+
+    render(w.tree(), &c, SCREEN)
+    assert(c.dump().contains(s"#${light().panel}") && !c.dump().contains(s"#${dark().panel}"),
+           "the window itself is in the light chrome")
+
+@test
+a_choice_restyled_dark_is_on_a_dark_ground_in_a_dark_outline()
+    val (w, a, _) = apart()
+    var c = recorder()
+
+    w.doc.toggle_selected(a)
+    tap(w, &c, "toolbar.align")
+    assert(w.align_open.read(), "open")
+
+    val paint = painted_in(w, dark())
+
+    assert(paint.contains(s"#${dark().edge} w1"), "the outline")
+    assert(!paint.contains(s"#${light().edge}") && !paint.contains(s"#${u32(0xCBD2DC)}"), "no light edge")
 
 // ## Rigid
 
