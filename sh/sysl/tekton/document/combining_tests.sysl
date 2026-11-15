@@ -257,10 +257,14 @@ a_split_redoes_to_the_same_halves_and_editing_a_half_leaves_the_history_alone()
     assert(doc.redo(), "forward")
     assert_eq(doc.describe(), halves, "the same halves")
 
+    val halves_ids = [doc.items()[0].id, doc.items()[1].id]
+
     doc.select(Some(doc.items()[0].id))
     doc.ungroup_selected().unwrap()
     assert(doc.describe() != halves, "a half ungrouped to the thing and its cutter")
     assert(doc.undo(), "back")
+
+    select_all(doc, [halves_ids[0], halves_ids[1]])
     assert_eq(doc.describe(), halves, "the halves as the split made them")
     assert(doc.undo(), "back")
     assert_eq(doc.describe(), whole, "and the whole thing before them")
