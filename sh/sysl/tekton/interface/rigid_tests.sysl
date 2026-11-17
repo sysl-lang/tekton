@@ -130,9 +130,8 @@ end shift_drags_straight_through
 
 @test
 a_drag_in_an_orthographic_view_stops_the_same_way()
-    // Straight from the front, and from the home view's angle; from straight above a press on a box's middle takes
-    // its lift arrow, with Rigid on or off.
-    for view in [NamedView.Front, NamedView.Home]
+    // Straight from the front, from straight above, and from the home view's angle.
+    for view in [NamedView.Front, NamedView.Top, NamedView.Home]
         val (w, a, b) = two_boxes()
         var c = recorder()
 

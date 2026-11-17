@@ -2,9 +2,10 @@ module sh.sysl.tekton.interface
 @tests
 
 import sh.sysl.sdl3.{KMOD_GUI, KMOD_SHIFT}
-import sh.sysl.tekton.camera.NamedView
+import sh.sysl.tekton.camera.{NamedView, view_name}
 import sh.sysl.tekton.cube.view_cube
 import sh.sysl.tekton.document.{Primitive, moved_to}
+import sh.sysl.tekton.handles.{Grip, layout}
 import sh.sysl.tekton.picking.pick
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
@@ -271,3 +272,82 @@ a_click_away_from_the_cube_still_picks_in_orthographic()
 
     click_port(w, &c, int(x), int(y))
     assert(w.doc.selected == Some(a), "the box, straight ahead of the pointer")
+
+// ## Moving a shape from straight above
+
+// A box, selected, seen from a named view in one projection or the other, arrived.
+private box_from(v: NamedView, ortho: bool) -> (&Workspace, int)
+    val w = new_workspace()
+    val a = w.doc.add_shape(Primitive.Box)
+
+    w.look_from(v)
+
+    if ortho then w.toggle_orthographic()
+
+    settle(w)
+    (w, a)
+end box_from
+
+private middle_of(w: &Workspace, id: int) -> (int, int)
+    val (x, y) = w.camera.project(w.doc.bounds_of(w.doc.find(id).unwrap()).center(), 900.0, 600.0).unwrap()
+
+    (int(x), int(y))
+
+@test
+a_drag_on_a_boxs_middle_from_the_top_moves_it_along_the_ground()
+    for ortho in [true, false]
+        val (w, a) = box_from(NamedView.Top, ortho)
+        var c = recorder()
+        val (x, y) = middle_of(w, a)
+
+        drag_port(w, &c, x, y, x + 60, y + 30)
+
+        val t = w.doc.find(a).unwrap().transform
+
+        assert(t.translation.x > 5.0 && t.translation.y < -2.0, s"right and toward the viewer's foot: ${t.translation} ${ortho}")
+        assert_eq(t.translation.z, 0.0, "and no higher")
+        assert_eq(t.scale, Vec3(1.0, 1.0, 1.0), "nor taller")
+
+@test
+a_drag_from_where_the_arrow_would_stand_from_the_top_moves_the_box()
+    // The arrow's tip stood 40 points up the screen from the middle, still over the box.
+    val (w, a) = box_from(NamedView.Top, true)
+    var c = recorder()
+    val (x, y) = middle_of(w, a)
+
+    drag_port(w, &c, x, y - 40, x - 50, y - 40)
+
+    val t = w.doc.find(a).unwrap().transform
+
+    assert(t.translation.x < -5.0 && t.translation.y.abs() < 1.0e-9, s"left along the ground: ${t.translation}")
+    assert_eq(t.translation.z, 0.0, "and no higher")
+
+@test
+the_arrow_still_raises_from_the_front_and_the_home_view()
+    for (v, ortho) in [(NamedView.Front, false), (NamedView.Front, true), (NamedView.Home, false)]
+        val (w, a) = box_from(v, ortho)
+        var c = recorder()
+        val (x, y) = layout(w.doc, w.camera, 900.0, 600.0).spot(Grip.Raise).unwrap()
+
+        drag_port(w, &c, int(x.round()), int(y.round()), int(x.round()), int(y.round()) - 40)
+        assert(w.doc.find(a).unwrap().transform.translation.z > 2.0, s"higher: ${view_name(v)} ${ortho}")
+
+@test
+a_drag_on_one_of_several_from_the_top_moves_them_all_along_the_ground()
+    val (w, a) = box_from(NamedView.Top, true)
+    val b = w.doc.add_shape(Primitive.Box)
+    var c = recorder()
+
+    w.doc.set_transform(b, moved_to(Vec3(40.0, 0.0, 0.0)))
+    w.doc.select(Some(a))
+    w.doc.toggle_selected(b)
+
+    val (x, y) = middle_of(w, a)
+
+    drag_port(w, &c, x, y, x, y - 60)
+
+    for id in [a, b]
+        val t = w.doc.find(id).unwrap().transform
+
+        assert(t.translation.y > 5.0, s"away up the bed: ${t.translation}")
+        assert_eq(t.translation.z, 0.0, "and no higher")

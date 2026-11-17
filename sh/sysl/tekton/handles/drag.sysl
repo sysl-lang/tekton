@@ -68,20 +68,8 @@ end plane_point
 // pointing at the viewer counts as if it were `LEAST_RATE` of the way across, and straight up the screen when
 // it has no direction there at all.
 line_travel(camera: &Camera, at: Vec3, along: Vec3, width: real, height: real, dx: real, dy: real) -> real
-    val per_point = camera.world_per_point(at, height)
-    val step = per_point * 10.0
-    val least = LEAST_RATE / per_point
-    val a = camera.project(at, width, height)
-    val b = camera.project(at + along * step, width, height)
-    var rate = (0.0, 0.0)
-
-    a match
-        Some((ax, ay)) ->
-            b match
-                Some((bx, by)) -> rate = ((bx - ax) / step, (by - ay) / step)
-                None -> ()
-        None -> ()
-
+    val least = LEAST_RATE / camera.world_per_point(at, height)
+    val rate = screen_rate(camera, at, along, width, height)
     val n = (rate.0 * rate.0 + rate.1 * rate.1).sqrt()
 
     if n < least
@@ -90,6 +78,29 @@ line_travel(camera: &Camera, at: Vec3, along: Vec3, width: real, height: real, d
 
     (dx * rate.0 + dy * rate.1) / (n * n)
 end line_travel
+
+// Whether a line through `at` points so nearly at the viewer that a drag cannot follow it on the screen: it
+// covers less than `LEAST_RATE` of what a line across the screen does there, which is within about 8.6° of the
+// line of sight (sin 8.6° = 0.15). It is the same edge at which `line_travel` stops following the line, so a
+// handle whose drag runs along such a line is not offered: it would sit on the shape's middle, where a press
+// belongs to the shape, and drag by a direction it no longer shows.
+end_on(camera: &Camera, at: Vec3, along: Vec3, width: real, height: real) -> bool
+    val rate = screen_rate(camera, at, along, width, height)
+
+    (rate.0 * rate.0 + rate.1 * rate.1).sqrt() < LEAST_RATE / camera.world_per_point(at, height)
+
+// How many points across and down the screen a millimetre along a line through `at` moves, or none where the
+// line's ends do not both land on the screen.
+private screen_rate(camera: &Camera, at: Vec3, along: Vec3, width: real, height: real) -> (real, real)
+    val step = camera.world_per_point(at, height) * 10.0
+
+    camera.project(at, width, height) match
+        Some((ax, ay)) ->
+            camera.project(at + along * step, width, height) match
+                Some((bx, by)) -> ((bx - ax) / step, (by - ay) / step)
+                None -> (0.0, 0.0)
+        None -> (0.0, 0.0)
+end screen_rate
 
 // The drag in progress.
 struct Drag

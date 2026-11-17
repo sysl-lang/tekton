@@ -14,7 +14,8 @@ import sysl.math.{max, min}
 //
 // The arrangement: a thin box around the shape, a dot on each corner of its base to resize it, a dot in the
 // middle of its top for its height, an arrow standing above it to raise it, and three curved arrows, one
-// around each axis in that axis's colour, to turn it.
+// around each axis in that axis's colour, to turn it. The height dot and the arrow are left off in a view that
+// looks along the line they drag on, as Top does, where they would cover the shape's middle.
 
 // Radii and lengths, in points.
 const DOT_RADIUS: real = 6.0
@@ -244,12 +245,14 @@ layout(doc: &Document, camera: &Camera, width: real, height: real, hot: Option[G
 
     add_arrow(out, doc, node, camera, width, height, hot)
 
-    // Height first, then the corners on top of it.
+    // Height first, then the corners on top of it. Seen along the shape's own up, the height dot has no
+    // direction to be dragged in and would cover the shape's middle, so it is left off.
     val top = t.apply(Vec3((b.min.x + b.max.x) * 0.5, (b.min.y + b.max.y) * 0.5, b.max.z))
 
-    at(top) match
-        Some(p) -> out.dot(Grip.Stretch, p, sized(DOT_RADIUS, Grip.Stretch, hot))
-        None -> ()
+    if !end_on(camera, top, t.turned(Vec3(0.0, 0.0, 1.0)), width, height)
+        at(top) match
+            Some(p) -> out.dot(Grip.Stretch, p, sized(DOT_RADIUS, Grip.Stretch, hot))
+            None -> ()
 
     for (i, grip) in [(0, Grip.Corner(-1.0, -1.0)), (1, Grip.Corner(1.0, -1.0)), (2, Grip.Corner(1.0, 1.0)), (3, Grip.Corner(-1.0, 1.0))]
         corners[i] match
@@ -327,8 +330,12 @@ private screen_up(camera: &Camera, p: Vec3, width: real, height: real) -> Dot
         None -> straight
 end screen_up
 
+// The arrow, unless the view looks along the vertical: from straight above it would stand on the shape's middle
+// pointing nowhere, and a press there is for moving the shape.
 private add_arrow(out: &Layout, doc: &Document, node: &Node, camera: &Camera, width: real, height: real, hot: Option[Grip])
     val base = above(doc, node)
+
+    if end_on(camera, base, Vec3(0.0, 0.0, 1.0), width, height) then return
 
     camera.project(base, width, height) match
         Some((x, y)) ->

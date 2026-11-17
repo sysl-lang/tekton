@@ -120,7 +120,13 @@ every_handle_at_every_view_is_on_its_own_ink_and_stays_finite_wherever_the_point
 
             for g in ALL_GRIPS()
                 val doc = box()
-                val (x, y) = layout(doc, camera, W, H).spot(g).unwrap()
+
+                // Almost straight down, the arrow and the height dot are not offered.
+                val (x, y) = layout(doc, camera, W, H).spot(g) match
+                    Some(p) -> p
+                    None ->
+                        assert(tilt == 1.55 && (g == Grip.Raise || g == Grip.Stretch), s"only those, only there: ${tilt}")
+                        continue
 
                 assert(layout(doc, camera, W, H).grip_at(x, y).is_some(), "a handle answers on its ink")
 
@@ -599,3 +605,77 @@ a_corner_resizes_across_the_screen_from_a_level_orthographic_view()
 
     assert(wider.scale.x > 1.0, "wider")
     assert(near(wider.scale.y, 1.0) && near(wider.scale.z, 1.0), "and no deeper or taller")
+
+// ## Looking along the line a handle drags on
+
+@test
+from_straight_above_the_arrow_and_the_height_dot_are_left_off_and_the_middle_is_the_shapes()
+    for ortho in [false, true]
+        val doc = box()
+        val camera = at_view(NamedView.Top, ortho)
+        val out = layout(doc, camera, W, H)
+        val (x, y) = camera.project(Vec3(0.0, 0.0, 10.0), W, H).unwrap()
+
+        assert(out.spot(Grip.Raise).is_none() && out.spot(Grip.Stretch).is_none(), s"neither is there: ${ortho}")
+        assert(out.grip_at(x, y).is_none(), "the middle is the shape's")
+        assert(out.grip_at(x, y - ARROW_GAP - ARROW_LENGTH).is_none(), "and so is where the arrow's tip stood")
+
+        for g in [Grip.Corner(-1.0, -1.0), Grip.Corner(1.0, -1.0), Grip.Corner(1.0, 1.0), Grip.Corner(-1.0, 1.0),
+                  Grip.Turn(0), Grip.Turn(1), Grip.Turn(2)]
+            assert(out.spot(g).is_some(), "the corners and the turns stay")
+
+@test
+the_arrow_and_the_height_dot_go_within_about_nine_degrees_of_straight_down()
+    // Off straight down by 0.02 and 0.12 radians is inside the edge (sin 0.15 ≈ 0.1506), by 0.2 outside it.
+    for ortho in [false, true]
+        for (off, shown) in [(0.02, false), (0.12, false), (0.2, true), (1.07, true)]
+            val camera = looking(0.3, real.pi() * 0.5 - off)
+
+            camera.orthographic = ortho
+
+            val out = layout(box(), camera, W, H)
+
+            assert(out.spot(Grip.Raise).is_some() == shown, s"the arrow: ${off} ${ortho}")
+            assert(out.spot(Grip.Stretch).is_some() == shown, s"the height dot: ${off} ${ortho}")
+
+@test
+just_outside_the_edge_the_arrow_raises_with_the_pointer()
+    for ortho in [false, true]
+        val doc = box()
+        val camera = looking(0.3, real.pi() * 0.5 - 0.2)
+
+        camera.orthographic = ortho
+
+        val d = grab(doc, camera, Grip.Raise)
+        val t = d.transform_at(camera, W, H, d.press_x, d.press_y - 30.0, FREE())
+
+        assert(t.translation.z > 0.0, s"higher: ${ortho}")
+        assert(near(t.translation.x, 0.0) && near(t.translation.y, 0.0), "and nowhere else")
+
+@test
+the_height_dot_follows_the_shapes_own_up_and_the_arrow_the_worlds()
+    val turned = Transform(Vec3(0.0, 0.0, 10.0), Quaternion.from_axis_angle([1.0, 0.0, 0.0], real.pi() * 0.5), Vec3(1.0, 1.0, 1.0))
+
+    // From above, a box on its side shows its height dot and no arrow; from the front, its up points at the
+    // viewer, so the dot goes and the arrow stays.
+    for (v, dot, arrow) in [(NamedView.Top, true, false), (NamedView.Front, false, true)]
+        val doc = box()
+
+        doc.set_transform(1, turned)
+
+        val out = layout(doc, at_view(v, true), W, H)
+
+        assert(out.spot(Grip.Stretch).is_some() == dot, s"the dot: ${view_name(v)}")
+        assert(out.spot(Grip.Raise).is_some() == arrow, s"the arrow: ${view_name(v)}")
+
+@test
+end_on_is_the_edge_at_which_a_drag_along_the_line_stops_following_it()
+    val at = Vec3(0.0, 0.0, 10.0)
+    val up = Vec3(0.0, 0.0, 1.0)
+
+    for tilt in [0.07, 0.5, 1.2, real.pi() * 0.5 - 0.2, real.pi() * 0.5 - 0.12, 1.55]
+        val camera = looking(0.3, tilt)
+        val least = LEAST_RATE / camera.world_per_point(at, H)
+        val fallback = near(line_travel(camera, at, up, W, H, 13.0, -40.0), 40.0 / least, 1.0e-9)
+
+        assert(end_on(camera, at, up, W, H) == fallback, s"the same edge: ${tilt}")
