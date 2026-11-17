@@ -2,6 +2,7 @@ module sh.sysl.tekton.interface
 @tests
 
 import sh.sysl.tekton.document.Primitive
+import sh.sysl.tekton.palette.{DARK_PALETTE, LIGHT_PALETTE}
 import sh.sysl.tekton.settings.{Scheme, default_settings, load_settings}
 import sh.sysl.tekton.space.Vec3
 import sh.sysl.ui.*
@@ -110,6 +111,90 @@ every_colour_of_the_dark_look_is_its_own_and_reads_on_its_ground()
         assert(apart(look.wrong, look.theme.ground) >= 90, s"and on a dialog: #${look.wrong}")
         assert(apart(look.mark_ink, look.mark_back) >= 150, s"a mark's words read on its label: #${look.mark_ink}")
         assert(apart(look.clear, look.theme.ink) >= 150, s"the window's ground is the theme's side: #${look.clear}")
+
+// A colour of the scene as the window's 0xRRGGBB.
+private channel(c: f32) -> u32 = u32(real(c) * 255.0 + 0.5)
+private hex(c: [3]f32) -> u32 = (channel(c[0]) << 16) | (channel(c[1]) << 8) | channel(c[2])
+private hex4(c: [4]f32) -> u32 = hex([c[0], c[1], c[2]])
+
+@test
+the_light_look_draws_the_scene_as_it_always_did()
+    val p = LIGHT_LOOK.palette
+
+    assert(p == LIGHT_PALETTE && DARK_LOOK.palette == DARK_PALETTE, "each look in its own palette")
+    assert(p.background == [0.868f32, 0.888, 0.915], "behind the ground")
+    assert(p.plane == [0.955f32, 0.962, 0.972], "the bed")
+    assert(p.fine == [0.895f32, 0.91, 0.93], "its fine grid")
+    assert(p.coarse == [0.80f32, 0.825, 0.86], "its coarse grid")
+    assert(p.off_bed == [0.925f32, 0.934, 0.948], "the floor past it")
+    assert(p.border == [0.46f32, 0.51, 0.59], "its edge")
+    assert(p.axis_x == [0.90f32, 0.60, 0.58], "the x axis")
+    assert(p.axis_y == [0.60f32, 0.80, 0.65], "the y axis")
+    assert(p.shadow == [0.20f32, 0.25, 0.36, 0.22], "a shadow")
+    assert(p.volume == [0.30f32, 0.38, 0.52, 0.45], "the build volume")
+    assert(p.hole == [0.42f32, 0.47, 0.55], "a hole")
+    assert(p.cube_backing == [1.0f32, 1.0, 1.0, 0.45], "behind the view cube")
+    assert(p.cube_halo == [1.0f32, 1.0, 1.0, 0.9], "under its edges")
+    assert(p.cube_edge == [0.12f32, 0.16, 0.24, 0.75], "its edges")
+    assert_eq(p.cube_ink, 0x1F2937u32, "its names")
+
+@test
+every_scene_colour_of_the_dark_look_is_its_own_and_reads_on_its_ground()
+    val l = LIGHT_PALETTE
+    val d = DARK_PALETTE
+
+    for (a, b) in [(l.background, d.background), (l.plane, d.plane), (l.fine, d.fine), (l.coarse, d.coarse),
+                   (l.off_bed, d.off_bed), (l.border, d.border), (l.axis_x, d.axis_x), (l.axis_y, d.axis_y),
+                   (l.hole, d.hole)]
+        assert(a != b, s"#${hex(b)} is not the light #${hex(a)}")
+
+    for (a, b) in [(l.shadow, d.shadow), (l.volume, d.volume), (l.cube_backing, d.cube_backing),
+                   (l.cube_halo, d.cube_halo), (l.cube_edge, d.cube_edge)]
+        assert(a != b, s"#${hex4(b)} is not the light #${hex4(a)}")
+
+    assert(l.cube_ink != d.cube_ink, "the view cube's names")
+
+    for look in [LIGHT_LOOK, DARK_LOOK]
+        val p = look.palette
+        val bed = hex(p.plane)
+
+        assert_eq(hex(p.background), look.clear, "the scene stands on the window's own ground")
+        assert(apart(bed, look.theme.ink) >= 150, s"the bed is the theme's side: #${bed}")
+        assert(apart(hex(p.fine), bed) >= 5 && apart(hex(p.fine), bed) <= 25, s"the fine grid is quiet: #${hex(p.fine)}")
+        assert(apart(hex(p.coarse), bed) >= 20 && apart(hex(p.coarse), bed) <= 50, s"the coarse grid shows: #${hex(p.coarse)}")
+        assert(apart(hex(p.axis_x), bed) >= 50, s"the x axis reads on the bed: #${hex(p.axis_x)}")
+        assert(apart(hex(p.axis_y), bed) >= 50, s"the y axis reads on the bed: #${hex(p.axis_y)}")
+        assert(apart(hex(p.border), bed) >= 90, s"the bed's edge reads: #${hex(p.border)}")
+        assert(apart(hex(p.hole), bed) >= 90, s"a hole reads on the bed: #${hex(p.hole)}")
+        assert(apart(hex4(p.volume), look.clear) >= 90, s"the volume's edges read: #${hex4(p.volume)}")
+        assert(apart(hex4(p.cube_edge), look.clear) >= 150, s"the view cube's edges read: #${hex4(p.cube_edge)}")
+        assert(apart(hex4(p.cube_edge), hex4(p.cube_halo)) >= 150, s"and stand on their halo: #${hex4(p.cube_halo)}")
+        assert(apart(p.cube_ink, look.clear) >= 150, s"its names read: #${p.cube_ink}")
+        assert(brightness(hex4(p.shadow)) < brightness(bed), s"a shadow darkens the bed: #${hex4(p.shadow)}")
+
+// The view cube over the viewport is drawn and named in the look's palette, and in nothing of the other's.
+@test
+the_view_cube_follows_the_look()
+    for (scheme, look, other) in [(Scheme.Dark, DARK_LOOK, LIGHT_LOOK), (Scheme.Light, LIGHT_LOOK, DARK_LOOK)]
+        val w = new_workspace()
+
+        w.choose_scheme(scheme)
+        painted(w)
+
+        var edges = 0
+
+        for s in w.overlay.strokes.view()
+            if s.color == look.palette.cube_edge then edges += 1
+            assert(s.color != other.palette.cube_edge && s.color != other.palette.cube_backing &&
+                   s.color != other.palette.cube_halo, "nothing in the other's")
+
+        assert(edges > 0, "the cube's edges in the look's ink")
+
+        var c = recorder()
+
+        render(w.dimensioned(), &c, VIEW)
+        assert(c.dump().contains(s"ink #${look.palette.cube_ink}"), "its names in the look's ink")
+        assert(!c.dump().contains(s"ink #${other.palette.cube_ink}"), "and not the other's")
 
 @test
 the_window_follows_the_system_until_an_appearance_is_chosen()

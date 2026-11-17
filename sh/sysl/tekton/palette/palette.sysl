@@ -1,0 +1,72 @@
+module sh.sysl.tekton.palette
+
+// The colours the 3D scene is drawn in, apart from the shapes' own, the selection's blue and the handles, which
+// are the same in every appearance: what stands behind the bed, the bed and its grid, the floor past it, the
+// shadows, the build volume's edges, the holes, and the view cube.
+//
+// **A colour here is red, green and blue from 0 to 1**, as the renderer hands it to the shaders, with an alpha
+// where the scene blends it over what is already drawn. The view cube's names are written by the interface, so
+// theirs is a 0xRRGGBB as its canvas takes it.
+struct Palette derives Eq
+    // What is not the ground, which the ground also fades into in the distance.
+    background: [3]f32
+
+    // The bed, its grid every 10 millimetres and every 50, the floor past its edge, and the edge itself.
+    plane: [3]f32
+    fine: [3]f32
+    coarse: [3]f32
+    off_bed: [3]f32
+    border: [3]f32
+
+    // The lines along the x axis and along the y axis, across the middle of the bed.
+    axis_x: [3]f32
+    axis_y: [3]f32
+
+    // A shape's shadow on the ground, the build volume's edges and a hole's body.
+    shadow: [4]f32
+    volume: [4]f32
+    hole: [3]f32
+
+    // The view cube: the disc behind it, the halo under its edges, the edges, and its faces' names.
+    cube_backing: [4]f32
+    cube_halo: [4]f32
+    cube_edge: [4]f32
+    cube_ink: u32
+end Palette
+
+val LIGHT_PALETTE = Palette(
+    background = [0.868, 0.888, 0.915],
+    plane = [0.955, 0.962, 0.972],
+    fine = [0.895, 0.91, 0.93],
+    coarse = [0.80, 0.825, 0.86],
+    off_bed = [0.925, 0.934, 0.948],
+    border = [0.46, 0.51, 0.59],
+    axis_x = [0.90, 0.60, 0.58],
+    axis_y = [0.60, 0.80, 0.65],
+    shadow = [0.20, 0.25, 0.36, 0.22],
+    volume = [0.30, 0.38, 0.52, 0.45],
+    hole = [0.42, 0.47, 0.55],
+    cube_backing = [1.0, 1.0, 1.0, 0.45],
+    cube_halo = [1.0, 1.0, 1.0, 0.9],
+    cube_edge = [0.12, 0.16, 0.24, 0.75],
+    cube_ink = 0x1F2937u32)
+
+// The bed a little lighter than the ground behind it and its grid quiet, so the shapes' colours, the red and
+// green axes and the selection's blue stand out from it. A shadow is black, since a blue one would not darken a
+// dark floor, and the volume's edges and the holes are paler than in the light, to be seen against it.
+val DARK_PALETTE = Palette(
+    background = [0.110, 0.125, 0.188],
+    plane = [0.165, 0.180, 0.228],
+    fine = [0.205, 0.222, 0.272],
+    coarse = [0.285, 0.305, 0.365],
+    off_bed = [0.135, 0.150, 0.208],
+    border = [0.52, 0.58, 0.68],
+    axis_x = [0.80, 0.36, 0.34],
+    axis_y = [0.34, 0.66, 0.42],
+    shadow = [0.0, 0.0, 0.0, 0.40],
+    volume = [0.62, 0.70, 0.84, 0.40],
+    hole = [0.62, 0.67, 0.76],
+    cube_backing = [0.30, 0.33, 0.42, 0.55],
+    cube_halo = [0.10, 0.11, 0.16, 0.9],
+    cube_edge = [0.85, 0.88, 0.94, 0.80],
+    cube_ink = 0xE6E8EFu32)

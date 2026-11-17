@@ -11,6 +11,7 @@ import sh.sysl.tekton.files.{export_answer, load_file, open_answer, save_answer,
 import sh.sysl.tekton.handles.{Drag, DragKeys, Grip, Layout, Stroke, drag_body, drag_grip, layout}
 import sh.sysl.tekton.measure.{Mark, Measures, measures}
 import sh.sysl.tekton.picking.{box_pick, pick, pick_hit}
+import sh.sysl.tekton.palette.{DARK_PALETTE, LIGHT_PALETTE, Palette}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.glyphs.*
 import sh.sysl.tekton.renderer.{Renderer, new_renderer}
@@ -58,7 +59,7 @@ const FIRST_FIELD_ID: int = 100
 // How the window looks in one appearance: the theme the panels, the toolbar and the status line are drawn in,
 // whose surfaces and rules they take, and the colours the window paints for itself, which no theme names: what
 // a mistake is written and outlined in, the labels of the measurements over the viewport, and the window's own
-// ground behind everything.
+// ground behind everything, which is the colour behind the 3D scene too. The scene itself is drawn in `palette`.
 struct Look derives Eq
     theme: Theme
     wrong: u32
@@ -66,12 +67,13 @@ struct Look derives Eq
     mark_edge: u32
     mark_ink: u32
     clear: u32
+    palette: Palette
 end Look
 
-val LIGHT_LOOK = Look(light(), 0xD92D20u32, 0xFFFFFFu32, 0xC9D1DCu32, 0x1F2937u32, 0xDDE2E9u32)
+val LIGHT_LOOK = Look(light(), 0xD92D20u32, 0xFFFFFFu32, 0xC9D1DCu32, 0x1F2937u32, 0xDDE2E9u32, LIGHT_PALETTE)
 
 // A brighter red than the light one, since a dark red on a dark panel is the one mistake nobody would see.
-val DARK_LOOK = Look(dark(), 0xF97066u32, 0x22262Fu32, 0x3A3F4Bu32, 0xE6E8EFu32, 0x1C2030u32)
+val DARK_LOOK = Look(dark(), 0xF97066u32, 0x22262Fu32, 0x3A3F4Bu32, 0xE6E8EFu32, 0x1C2030u32, DARK_PALETTE)
 
 // The look a scheme gives where the system is set to `system`: the one it names, or the system's own.
 look_for(scheme: Scheme, system: Appearance) -> Look =
@@ -788,7 +790,7 @@ struct Workspace
         self.measured = if self.show_dimensions then measures(self.doc, self.camera, w, h) else Measures(buf(), buf())
 
         for s in self.measured.strokes.view() do self.overlay.strokes.push(s)
-        for s in view_cube(self.camera, w, h).strokes.view() do self.overlay.strokes.push(s)
+        for s in view_cube(self.camera, w, h, self.look().palette).strokes.view() do self.overlay.strokes.push(s)
 
         self.box match
             Some((ax, ay, bx, by)) -> for s in box_strokes(ax, ay, bx, by) do self.overlay.strokes.push(s)
@@ -1136,7 +1138,7 @@ struct Workspace
 
             self.renderer.draw(f.device, f.cmd, f.color, f.depth, viewport_depth_format(f.device), VIEWPORT_COLOR_FORMAT,
                                self.doc, self.camera, real(f.rect.w), real(f.rect.h), scale, self.overlay.strokes.view(),
-                               self.printer, self.show_volume)
+                               self.printer, self.show_volume, self.look().palette)
         , (c, r) -> self.input(c, r))
 
         self.view = Some(v)
@@ -1817,10 +1819,8 @@ mark_text(m: Mark) -> string =
 const MARK_FONT: real = 11.0
 const MARK_PAD: int = 3
 
-// The type the view cube's faces are named in, in points, and its colour. The cube is part of the picture and
-// is drawn alike in either appearance, so its names are too.
+// The type the view cube's faces are named in, in points. Its colour is the look's palette's, as the cube's is.
 const CUBE_FONT: real = 10.0
-const CUBE_INK: u32 = 0x1F2937u32
 
 // The viewport with the view cube's names and the selection's marks written over it, each mark on a label of its
 // own in the look's colours. They are painted after the viewport, so they land on its picture rather than in the
@@ -1836,7 +1836,7 @@ impl View for Dimensioned
         self.inner.paint(c, r)
         c.clip(r)
         c.push_font_size(CUBE_FONT)
-        c.ink(CUBE_INK)
+        c.ink(self.owner.look().palette.cube_ink)
 
         for l in view_cube(self.owner.camera, real(r.w), real(r.h)).labels.view()
             val size = c.text_size(l.words)

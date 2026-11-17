@@ -5,7 +5,8 @@ import sh.sysl.sdl3.{GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNO
                      GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
                      GPU_SHADERFORMAT_MSL, GpuDevice, gpu_device, init, INIT_VIDEO}
 import sysl.buf.{Buf, buf}
-import sh.sysl.tekton.camera.new_camera
+import sh.sysl.tekton.camera.{Camera, NamedView, new_camera}
+import sh.sysl.tekton.palette.{DARK_PALETTE, LIGHT_PALETTE, Palette}
 import sh.sysl.quaternion.Quaternion
 import sh.sysl.tekton.document.{Document, FLOATS_PER_VERTEX, Primitive, Transform, moved_to, new_document}
 import sh.sysl.tekton.handles.Stroke
@@ -36,14 +37,14 @@ private device() -> &GpuDevice
 
 // A frame of this document, as bytes of RGBA, drawn by this renderer on the device that made it.
 private frame(dev: &GpuDevice, r: &Renderer, doc: &Document, strokes: []const Stroke = [], printer: Printer = CORE_ONE,
-              volume: bool = true) -> Buf[u8]
+              volume: bool = true, palette: Palette = LIGHT_PALETTE, camera: &Camera = new_camera()) -> Buf[u8]
     val color = dev.texture(GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, GPU_TEXTUREUSAGE_COLOR_TARGET, SIZE, SIZE).unwrap()
     val depth = dev.texture(GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, SIZE, SIZE).unwrap()
     val readback = dev.transfer_buffer(GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, SIZE * SIZE * 4).unwrap()
     val cmd = dev.command_buffer().unwrap()
 
-    r.draw(dev, cmd, color, depth, GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, doc, new_camera(),
-           real(SIZE), real(SIZE), 1.0, strokes, printer, volume)
+    r.draw(dev, cmd, color, depth, GPU_TEXTUREFORMAT_D32_FLOAT, GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, doc, camera,
+           real(SIZE), real(SIZE), 1.0, strokes, printer, volume, palette)
 
     val out = cmd.copy_pass().unwrap()
 
@@ -400,3 +401,98 @@ private the_volume_follows_the_printer()
     frame(dev, r, doc)
     assert(sent_for(r) == Some(CORE_ONE), "and again for the CORE One")
 end the_volume_follows_the_printer
+
+// The names of the scene's colours, in the order `marked` takes them.
+private val SCENE_COLOURS = ["background", "plane", "fine", "coarse", "off_bed", "border", "axis_x", "axis_y", "shadow",
+                             "volume", "hole"]
+
+// The light palette with one of its scene colours made a magenta nothing else in the picture is.
+private marked(which: usize) -> Palette
+    val magenta: [3]f32 = [1.0, 0.0, 1.0]
+    var p = LIGHT_PALETTE
+
+    which match
+        0 -> p.background = magenta
+        1 -> p.plane = magenta
+        2 -> p.fine = magenta
+        3 -> p.coarse = magenta
+        4 -> p.off_bed = magenta
+        5 -> p.border = magenta
+        6 -> p.axis_x = magenta
+        7 -> p.axis_y = magenta
+        8 -> p.shadow = [1.0, 0.0, 1.0, 1.0]
+        9 -> p.volume = [1.0, 0.0, 1.0, 1.0]
+        _ -> p.hole = magenta
+
+    p
+end marked
+
+private differs(a: Buf[u8], b: Buf[u8]) -> bool
+    for i in 0..<a.len()
+        if a[i] != b[i] then return true
+
+    false
+end differs
+
+// Every colour of the scene is the palette's: changing any one of them changes the picture, from far off, where
+// the bed's edge, the floor past it, the volume, a shadow and a hole are in sight, or from close by, where the
+// fine grid is.
+@test
+private every_scene_colour_is_drawn_from_the_palette()
+    if !can_use_gpu("every_scene_colour_is_drawn_from_the_palette") then return
+
+    val dev = device()
+    val doc = new_document()
+    val hole = doc.add_shape(Primitive.Box)
+
+    doc.set_transform(hole, Transform(Vec3(-12.0, -12.0, 0.0), Quaternion.identity(), Vec3(0.5, 0.5, 0.5)))
+    doc.set_part_hole(hole, true)
+    doc.add_shape(Primitive.Box)
+    doc.select(None)
+
+    val near = new_camera()
+
+    near.distance = 40.0
+
+    val far_light = frame(dev, new_renderer(), doc, printer = SMALL)
+    val near_light = frame(dev, new_renderer(), doc, printer = SMALL, camera = near)
+
+    for i in 0..<SCENE_COLOURS.len
+        val p = marked(i)
+        val far = frame(dev, new_renderer(), doc, printer = SMALL, palette = p)
+        val close = frame(dev, new_renderer(), doc, printer = SMALL, palette = p, camera = near)
+
+        assert(differs(far, far_light) || differs(close, near_light), s"the ${SCENE_COLOURS[i]} is the palette's")
+end every_scene_colour_is_drawn_from_the_palette
+
+// What stands behind the ground is exactly the palette's background, light or dark, and the dark scene is not
+// the light one.
+@test
+private the_scene_stands_on_the_palettes_background()
+    if !can_use_gpu("the_scene_stands_on_the_palettes_background") then return
+
+    val dev = device()
+    val doc = new_document()
+    val level = new_camera()
+
+    // Looking straight at the front, the top of the picture is above the horizon, where there is no ground.
+    level.go_to(NamedView.Front)
+    level.advance(10.0)
+
+    for p in [LIGHT_PALETTE, DARK_PALETTE]
+        val (r, g, b) = pixel_at(frame(dev, new_renderer(), doc, volume = false, palette = p, camera = level), 64.0, 0.0)
+
+        for (got, want) in [(r, p.background[0]), (g, p.background[1]), (b, p.background[2])]
+            val d = int(got) - int(real(want) * 255.0 + 0.5)
+
+            assert(d >= -1 && d <= 1, s"a channel of the background: ${got}")
+
+    val light = frame(dev, new_renderer(), doc, printer = SMALL)
+    val dark = frame(dev, new_renderer(), doc, printer = SMALL, palette = DARK_PALETTE)
+    val camera = new_camera()
+    val (ix, iy) = camera.project(Vec3(13.0, 3.0, 0.0), real(SIZE), real(SIZE)).unwrap()
+    val (lr, lg, lb) = pixel_at(light, ix, iy)
+    val (dr, dg, db) = pixel_at(dark, ix, iy)
+
+    assert(int(dr) + int(dg) + int(db) < int(lr) + int(lg) + int(lb) - 300, "the dark bed is dark")
+end the_scene_stands_on_the_palettes_background

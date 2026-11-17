@@ -1,6 +1,7 @@
 module sh.sysl.tekton.renderer
 
-// The viewport's shaders, in Metal Shading Language.
+// The viewport's shaders, in Metal Shading Language. Every colour of the ground comes in its uniforms, from the
+// palette the scene is drawn in.
 //
 // Four pipelines share one set of uniforms. The ground draws the printer's bed and fades its grid into
 // the background, the shadow flattens each mesh onto the ground along the light, the surface shades
@@ -22,6 +23,13 @@ val SHADERS: string = raw"""
         float4 ground;      // the view's centre, and how far the ground reaches from it
         float4 size;        // the target in pixels, and the outline's width in pixels
         float4 bed;         // half the printer's bed along x and y, centred on the origin
+        float4 plane;       // the bed, its fine and coarse grid, the floor past it and its edge
+        float4 fine;
+        float4 coarse;
+        float4 off_bed;
+        float4 border;
+        float4 axis_x;      // the lines along the x and y axes
+        float4 axis_y;
     };
 
     struct Vertex {
@@ -113,11 +121,11 @@ val SHADERS: string = raw"""
     // The printer's bed, gridded every 10 and 50 millimetres with the axes crossing in its middle and a border
     // around it, on a floor that carries only the coarse grid, faintly.
     fragment float4 ground_fragment(Ground in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
-        const float3 plane = float3(0.955, 0.962, 0.972);
-        const float3 fine = float3(0.895, 0.91, 0.93);
-        const float3 coarse = float3(0.80, 0.825, 0.86);
-        const float3 off_bed = float3(0.925, 0.934, 0.948);
-        const float3 border = float3(0.46, 0.51, 0.59);
+        float3 plane = u.plane.rgb;
+        float3 fine = u.fine.rgb;
+        float3 coarse = u.coarse.rgb;
+        float3 off_bed = u.off_bed.rgb;
+        float3 border = u.border.rgb;
 
         // Lines closer than a few pixels would be a grey wash, so the fine grid leaves as they close up.
         float mm_per_pixel = length(fwidth(in.plan));
@@ -130,8 +138,8 @@ val SHADERS: string = raw"""
         float2 slope = fwidth(in.plan);
         float2 off = abs(in.plan) / slope;
 
-        c = mix(c, float3(0.90, 0.60, 0.58), (1.0 - smoothstep(0.7, 1.7, off.y)));
-        c = mix(c, float3(0.60, 0.80, 0.65), (1.0 - smoothstep(0.7, 1.7, off.x)));
+        c = mix(c, u.axis_x.rgb, (1.0 - smoothstep(0.7, 1.7, off.y)));
+        c = mix(c, u.axis_y.rgb, (1.0 - smoothstep(0.7, 1.7, off.x)));
 
         // How many pixels past the bed's nearest edge this is, below zero inside it.
         float2 beyond = (abs(in.plan) - u.bed.xy) / slope;

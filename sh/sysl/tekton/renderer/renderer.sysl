@@ -8,6 +8,7 @@ import sh.sysl.sdl3.{GpuBuffer, GpuCommandBuffer, GpuCopyPass, GpuDevice, GpuPip
 import sh.sysl.tekton.camera.Camera
 import sh.sysl.tekton.document.{Document, FLOATS_PER_VERTEX, Mesh, identity_transform}
 import sh.sysl.tekton.handles.Stroke
+import sh.sysl.tekton.palette.{LIGHT_PALETTE, Palette}
 import sh.sysl.tekton.printer.{CORE_ONE, Printer}
 import sh.sysl.tekton.space.Vec3
 import sysl.buf.{Buf, buf}
@@ -18,11 +19,6 @@ import sysl.slices.as_ptr
 //
 // **It knows nothing of an interface**, so a test can hand it a device and two textures with no window at
 // all. A mesh reaches the GPU once and stays there until its node's mesh has a new revision.
-
-// The colour of what is not the ground, which the ground also fades into.
-const BACKGROUND_R: f32 = 0.868
-const BACKGROUND_G: f32 = 0.888
-const BACKGROUND_B: f32 = 0.915
 
 // The light: from behind the viewer's left shoulder, as the view opens, and well above.
 const LIGHT_X: real = 0.05
@@ -42,11 +38,8 @@ val SHAPE_COLORS: [][3]f32 = [
     [0.80, 0.53, 0.40],
 ]
 
-// A hole, which is the same grey whatever its tint, and how much of it shows over what it stands before and
-// through what it stands inside.
-const HOLE_R: f32 = 0.42
-const HOLE_G: f32 = 0.47
-const HOLE_B: f32 = 0.55
+// How much of a hole shows over what it stands before and through what it stands inside. Its colour is the
+// palette's, the same whatever its tint.
 const HOLE_ALPHA: f32 = 0.45
 const HOLE_BURIED_ALPHA: f32 = 0.18
 
@@ -65,9 +58,13 @@ private struct Uniforms
     ground: [4]f32
     size: [4]f32
     bed: [4]f32
-
-// The build volume's edges: faint, so a part stands out against them, and hidden behind what stands in front.
-val VOLUME_COLOR: [4]f32 =[0.30, 0.38, 0.52, 0.45]
+    plane: [4]f32
+    fine: [4]f32
+    coarse: [4]f32
+    off_bed: [4]f32
+    border: [4]f32
+    axis_x: [4]f32
+    axis_y: [4]f32
 
 // Laid out as the shaders' `StrokeUniforms`.
 private struct StrokeUniforms
@@ -105,10 +102,11 @@ struct Renderer
 
     // Everything in the document, as this camera sees it, on this printer's bed and inside the outline of its
     // build volume where `volume` asks for it, then these strokes over it, whose points are `scale` pixels
-    // each. Records into `cmd` and leaves it open.
+    // each, all in the scene colours of `palette`. Records into `cmd` and leaves it open.
     draw(&self, device: &GpuDevice, cmd: GpuCommandBuffer, color: &GpuTexture, depth: &GpuTexture, depth_format: i32,
          color_format: i32, doc: &Document, camera: &Camera, width: real, height: real, scale: real,
-         strokes: []const Stroke = [], printer: Printer = CORE_ONE, volume: bool = true)
+         strokes: []const Stroke = [], printer: Printer = CORE_ONE, volume: bool = true,
+         palette: Palette = LIGHT_PALETTE)
         val p = self.pipelines match
             Some(have) -> have
             None ->
@@ -121,7 +119,8 @@ struct Renderer
 
         val edges = if volume then Some(self.volume_buffer(device, cmd, printer)) else None
 
-        val pass = cmd.render_pass_depth([color_target_clear(color, BACKGROUND_R, BACKGROUND_G, BACKGROUND_B, 1.0)],
+        val back = palette.background
+        val pass = cmd.render_pass_depth([color_target_clear(color, back[0], back[1], back[2], 1.0)],
                                          depth_target_clear(depth, 1.0)).expect("a render pass")
         val eye = camera.eye()
         val reach = camera.distance * 5.0 + 600.0
@@ -130,17 +129,19 @@ struct Renderer
                          unmoved.normal_matrix().floats(),
                          [f32(eye.x), f32(eye.y), f32(eye.z), 0.0],
                          [f32(LIGHT_X), f32(LIGHT_Y), f32(LIGHT_Z), 0.0],
-                         [BACKGROUND_R, BACKGROUND_G, BACKGROUND_B, 1.0],
+                         opaque(back),
                          [f32(camera.target.x), f32(camera.target.y), 0.0, f32(reach)],
                          [f32(width), f32(height), OUTLINE_POINTS * f32(scale), 0.0],
-                         [f32(printer.width * 0.5), f32(printer.depth * 0.5), 0.0, 0.0])
+                         [f32(printer.width * 0.5), f32(printer.depth * 0.5), 0.0, 0.0],
+                         opaque(palette.plane), opaque(palette.fine), opaque(palette.coarse), opaque(palette.off_bed),
+                         opaque(palette.border), opaque(palette.axis_x), opaque(palette.axis_y))
 
         push(cmd, &u)
         pass.bind_pipeline(p.ground)
         pass.draw(6)
 
         // Faces toward the light land on the ground once each, so nothing is darkened twice.
-        u.color = [0.20, 0.25, 0.36, 0.22]
+        u.color = palette.shadow
         pass.bind_pipeline(p.shadow)
 
         for m in self.meshes.view()
@@ -165,7 +166,7 @@ struct Renderer
         // After the solids, so their depth hides the edges behind them, and before the holes, which would.
         edges match
             Some(lines) ->
-                u.color = VOLUME_COLOR
+                u.color = palette.volume
                 u.model = unmoved.matrix().floats()
                 u.normals = unmoved.normal_matrix().floats()
                 push(cmd, &u)
@@ -182,7 +183,7 @@ struct Renderer
 
             for m in self.meshes.view()
                 if is_hole(doc, m.id)
-                    u.color = [HOLE_R, HOLE_G, HOLE_B, alpha]
+                    u.color = [palette.hole[0], palette.hole[1], palette.hole[2], alpha]
                     place(&u, doc, m.id)
                     push(cmd, &u)
                     draw_mesh(pass, m)
@@ -289,6 +290,9 @@ private is_hole(doc: &Document, id: int) -> bool =
     doc.find(id) match
         Some(node) -> node.hole
         None -> false
+
+// A colour with nothing showing through it.
+private opaque(c: [3]f32) -> [4]f32 = [c[0], c[1], c[2], 1.0]
 
 // The colour a node is drawn in.
 private shape_color(doc: &Document, id: int) -> [3]f32 =
